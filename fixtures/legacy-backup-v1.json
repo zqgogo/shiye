@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "libraryId": "legacy-library",
+  "exportedAt": "2026-09-01T08:00:00.000Z",
+  "dataCutoffAt": "2026-09-01T08:00:00.000Z",
+  "scope": "device",
+  "categories": [
+    { "id": "cat-ios", "name": "iOS 开发", "desc": "UIKit 与 Swift", "revision": 3 }
+  ],
+  "tags": [{ "id": "tag-uikit", "name": "UIKit", "revision": 1 }],
+  "bookmarks": [
+    {
+      "id": "b-uncategorized",
+      "url": "https://developer.apple.com/documentation/uikit",
+      "title": "UIKit 文档",
+      "description": "旧版来源描述",
+      "categoryId": null,
+      "valueLevel": "high",
+      "valueReason": "经常使用",
+      "tagIds": ["tag-uikit"],
+      "pinned": true,
+      "createdAt": 1690000000000,
+      "revision": 4
+    },
+    {
+      "id": "b-categorized",
+      "url": "https://github.com/lucaong/minisearch",
+      "title": "MiniSearch",
+      "description": "",
+      "categoryId": "cat-ios",
+      "valueLevel": "normal",
+      "valueReason": "",
+      "tagIds": [],
+      "createdAt": 1690000100000,
+      "revision": 2
+    },
+    {
+      "id": "b-deleted",
+      "url": "https://example.org/old/temp",
+      "title": "旧的临时链接",
+      "categoryId": null,
+      "valueLevel": "low",
+      "deletedAt": 1690000200000
+    }
+  ],
+  "readingItems": [
+    {
+      "id": "w-legacy",
+      "url": "https://example.org/swift/concurrency",
+      "title": "Swift 并发实践",
+      "done": true,
+      "addedAt": 1690000300000
+    }
+  ]
+}
