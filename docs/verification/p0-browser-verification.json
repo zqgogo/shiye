@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-27T16:41:34.088Z",
+  "generatedAt": "2026-10-27T17:03:38.173Z",
   "extension": {
     "manifestVersion": 3,
     "distPath": "apps\\extension\\dist",
@@ -219,7 +219,7 @@
         {
           "step": "重启后主库数据仍在",
           "ok": true,
-          "detail": "bookmarks=2：P0 验证·工作台写入 / P0 验证·弹窗写入"
+          "detail": "bookmarks=2：P0 验证·弹窗写入 / P0 验证·工作台写入"
         },
         {
           "step": "重启后工作台列表渲染出记录",

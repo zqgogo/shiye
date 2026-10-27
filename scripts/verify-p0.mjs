@@ -72,11 +72,12 @@ async function verifyBrowser(target) {
   report.headless = attempt.headless;
   report.extensionId = attempt.extId;
   report.extensionIdSource = attempt.idSource;
+  report.strategy = attempt.strategy;
   report.version = await browser.version();
   record(
     '启动浏览器并加载扩展',
     true,
-    `${report.version}｜模式=${attempt.headless ? 'headless' : 'headful'}｜策略=${target.strategy}｜id=${attempt.extId}（${attempt.idSource}）`
+    `${report.version}｜模式=${attempt.headless ? 'headless' : 'headful'}｜策略=${attempt.strategy}｜id=${attempt.extId}（${attempt.idSource}）`
   );
 
   const base = `chrome-extension://${attempt.extId}`;
@@ -226,7 +227,7 @@ async function verifyBrowser(target) {
   // ---- 7. 重启（P0.3）----
   let second = null;
   try {
-    second = await launchWithExtension(target, profileDir, attempt.headless);
+    second = await launchWithExtension(target, profileDir, attempt.headless, attempt.strategy);
   } catch (error) {
     record('重启浏览器', false, `重启失败：${String(error)}`);
     report.ok = false;

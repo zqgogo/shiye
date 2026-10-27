@@ -12,18 +12,56 @@ import puppeteer from 'puppeteer-core';
 export const ROOT = path.resolve(import.meta.dirname, '..', '..');
 export const DIST = path.join(ROOT, 'apps', 'extension', 'dist');
 
-export const BROWSERS = [
-  {
-    name: 'Chrome',
-    executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
-    strategy: 'cdp',
-  },
-  {
-    name: 'Edge',
-    executablePath: 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-    strategy: 'flag',
-  },
+/**
+ * 浏览器可执行文件按「环境变量 → 常见安装路径」的顺序解析，避免换机器后脚本失效。
+ * 换平台或装在非默认位置时，设置 SHIYE_CHROME / SHIYE_EDGE 指向可执行文件即可。
+ */
+const CHROME_CANDIDATES = [
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
 ];
+
+const EDGE_CANDIDATES = [
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+  '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  '/usr/bin/microsoft-edge',
+  '/usr/bin/microsoft-edge-stable',
+];
+
+function resolveExecutable(envValue, candidates) {
+  if (envValue) return envValue;
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
+}
+
+function detectBrowsers() {
+  const found = [];
+  const chrome = resolveExecutable(process.env.SHIYE_CHROME, CHROME_CANDIDATES);
+  const edge = resolveExecutable(process.env.SHIYE_EDGE, EDGE_CANDIDATES);
+  if (chrome) found.push({ name: 'Chrome', executablePath: chrome });
+  if (edge) found.push({ name: 'Edge', executablePath: edge });
+  return found;
+}
+
+/**
+ * `strategy` 是首选策略提示；实际加载方式由 launchBestEffort 逐个尝试后确定，
+ * 因为 Chrome 137+ 移除了 `--load-extension`，而 Edge 仍支持，写死任一种都会在另一侧失败。
+ */
+export const BROWSERS = detectBrowsers().map((browser) => ({
+  ...browser,
+  strategy: browser.name === 'Chrome' ? 'cdp' : 'flag',
+}));
+
+if (BROWSERS.length === 0) {
+  console.warn(
+    '未找到 Chrome 或 Edge。请安装其中之一，或用 SHIYE_CHROME / SHIYE_EDGE 指定可执行文件路径后再运行浏览器验证。'
+  );
+}
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -43,14 +81,14 @@ export function prepareProfile(baseDir, name) {
   return `${base}-${Date.now().toString(36)}`;
 }
 
-export async function launchWithExtension(target, profileDir, headless, extraArgs = []) {
+export async function launchWithExtension(target, profileDir, headless, strategy, extraArgs = []) {
   const args = [
     '--no-first-run',
     '--no-default-browser-check',
     '--window-size=1280,900',
     ...extraArgs,
   ];
-  if (target.strategy === 'cdp') {
+  if (strategy === 'cdp') {
     args.push('--enable-unsafe-extension-debugging');
   } else {
     args.push(
@@ -71,17 +109,21 @@ export async function launchWithExtension(target, profileDir, headless, extraArg
 
   let extId = null;
   let idSource = null;
-  if (target.strategy === 'cdp') {
+  if (strategy === 'cdp') {
     const client = await browser.target().createCDPSession();
-    const result = await client.send('Extensions.loadUnpacked', { path: DIST });
-    extId = result.id ?? null;
-    idSource = 'CDP Extensions.loadUnpacked';
+    try {
+      const result = await client.send('Extensions.loadUnpacked', { path: DIST });
+      extId = result.id ?? null;
+      idSource = 'CDP Extensions.loadUnpacked';
+    } catch (error) {
+      extId = null;
+    }
   }
   if (!extId) {
     try {
       const swTarget = await browser.waitForTarget(
         (t) => t.type() === 'service_worker' && t.url().startsWith('chrome-extension://'),
-        { timeout: 20_000 }
+        { timeout: 12_000 }
       );
       extId = new URL(swTarget.url()).host;
       idSource = 'service_worker target';
@@ -92,23 +134,34 @@ export async function launchWithExtension(target, profileDir, headless, extraArg
   return { browser, extId, idSource };
 }
 
-/** 先无头、失败退回有界面；两种模式都失败时抛错。 */
+/**
+ * 依次尝试加载策略（命令行参数 / CDP）与有头无头，第一个拿到扩展 ID 的组合即采用。
+ *
+ * 不写死策略：Chrome 137+ 不再支持 `--load-extension`，Edge 仍支持，
+ * 而 CDP 的 `Extensions.loadUnpacked` 只在带 `--enable-unsafe-extension-debugging` 时可用。
+ */
 export async function launchBestEffort(target, profileDir, limitations) {
   let lastError = null;
-  for (const headless of [true, false]) {
-    try {
-      const result = await launchWithExtension(target, profileDir, headless);
-      if (result.extId) return { ...result, headless };
-      limitations?.push(`${headless ? '无头' : '有界面'}模式下未获得扩展 ID。`);
-      await result.browser.close();
-    } catch (error) {
-      lastError = error;
-      limitations?.push(
-        `${headless ? '无头' : '有界面'}模式启动失败：${error instanceof Error ? error.message : String(error)}`
-      );
+  const preferred = target.strategy === 'flag' ? 'flag' : 'cdp';
+  const strategies = preferred === 'flag' ? ['flag', 'cdp'] : ['cdp', 'flag'];
+
+  for (const strategy of strategies) {
+    for (const headless of [true, false]) {
+      const label = `${strategy === 'cdp' ? 'CDP 加载' : '命令行加载'}·${headless ? '无头' : '有界面'}`;
+      try {
+        const result = await launchWithExtension(target, profileDir, headless, strategy);
+        if (result.extId) return { ...result, headless, strategy };
+        limitations?.push(`${label}模式下未获得扩展 ID。`);
+        await result.browser.close();
+      } catch (error) {
+        lastError = error;
+        limitations?.push(
+          `${label}模式启动失败：${error instanceof Error ? error.message : String(error)}`
+        );
+      }
     }
   }
-  throw lastError ?? new Error('两种启动模式均未获得扩展 ID');
+  throw lastError ?? new Error('所有加载策略均未获得扩展 ID');
 }
 
 export async function clickByText(page, text) {
