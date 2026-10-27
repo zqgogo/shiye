@@ -4,29 +4,70 @@
 
 ## 当前状态
 
-此仓库目前只有工程骨架，尚无可安装扩展或可运行功能。产品与技术依据位于仓库同级的 `../resource/拾页_UI与完整开发交付包_v2_1/拾页开发交付包_v2_1/`。开发前先阅读其中的 `00_先读我.md`、`02_产品与技术实现说明_v2_1.md` 和 `03_AI开发任务书_v2_1.md`。`resource` 不纳入仓库，避免把原型和参考文件误认为正式代码。
+v1a 主体已实现并可构建：Chrome / Edge MV3 扩展 + React 工作台，数据落在扩展 origin 下的单一 IndexedDB 主库。P0（工程与能力验证）与 P1（核心规则、数据模型、持久仓库）已完成并留下真实浏览器证据；P2–P6 的实现已落地，浏览器内逐条回归仍在进行。**逐阶段进度与证据只以 [开发进度规划](docs/ROADMAP.md) 为准**，本文件不重复记录状态。
+
+产品与技术依据位于仓库同级的 `../resource/拾页_UI与完整开发交付包_v2_1/拾页开发交付包_v2_1/`（不纳入仓库，避免把原型与参考文件误认为正式代码）。开发前先读其中的 `00_先读我.md`、`02_产品与技术实现说明_v2_1.md`、`03_AI开发任务书_v2_1.md`。
 
 ## 方向
 
 - v1a：Chrome / Edge MV3 扩展；React + TypeScript 工作台；Dexie / IndexedDB 为唯一可编辑主库。
-- 按 [开发进度规划](docs/ROADMAP.md) 的 P0 → P7 阶段开发。先做浏览器能力和数据持久化验证，再实施业务功能。
+- 待看与收藏是两条独立的线，共用一套 URL 去重；不引入价值等级。
+- AI 默认关闭、默认人工交接：只导出材料、导入结果并逐条校验应用，不接真实模型。
 - v1b Worker + D1 同步是独立可选阶段，当前不建云端工程。
+
+## 在新机器上继续
+
+```bash
+git clone https://github.com/zqgogo/shiye.git
+cd shiye
+git checkout develop
+npm install
+```
+
+要求：Node 20+（开发时用 22.22.2）、npm 10+。若 `registry.npmjs.org` 不可达，改用镜像：
+`npm install --registry=https://registry.npmmirror.com --strict-ssl=false`。
+
+常用命令：
+
+| 命令 | 作用 |
+| --- | --- |
+| `npm run dev` | 以开发模式打开工作台页面 |
+| `npm run build` | 产出 `apps/extension/dist`（页面 + 自包含 service worker） |
+| `npm run typecheck` | TypeScript 全量检查 |
+| `npm test` | Vitest 单元 / 集成测试 |
+| `npm run verify` | typecheck + test + build |
+| `npm run verify:browser` | 真实浏览器验证共享主库与重启持久化（P0.2 / P0.3） |
+| `npm run verify:import` | 真实浏览器验证书签导入与手机快照（P0.4） |
+| `npm run verify:p1` | 真实浏览器验证并发、版本冲突、墓碑（P1） |
+| `npm run verify:all` | 以上全部 |
+
+手动加载扩展：`chrome://extensions` → 打开「开发者模式」→「加载已解压的扩展程序」→ 选 `apps/extension/dist`。Edge 同理（`edge://extensions`）。
+
+浏览器验证脚本依赖本机已装的 Chrome 或 Edge（通过 `puppeteer-core` 调用，不额外下载浏览器）。脚本会自动探测常见安装路径；装在非默认位置或换了系统时，用环境变量指定：
+
+```bash
+SHIYE_CHROME="/path/to/chrome" SHIYE_EDGE="/path/to/msedge" npm run verify:browser
+```
+
+`P0_BROWSER=chrome|edge` 可只跑其中一个。
 
 ## 目录
 
 ```text
-apps/workspace/          扩展工作台页面
+apps/workspace/          扩展工作台页面（React）
 apps/extension/          弹窗、service worker、manifest 与受控消息
-packages/core/          领域类型与纯规则
-packages/application/   用例与仓库接口
-packages/storage/       IndexedDB / Dexie 实现
-packages/adapters/ai/   AI 服务适配器
-fixtures/               后续存放脱敏测试样例
-docs/                   工程决策与验证记录
+packages/core/           领域类型与纯规则（URL、隐私、校验、导入解析、快照生成）
+packages/application/    用例与仓储端口、本地搜索、跨上下文变更广播
+packages/storage/        IndexedDB / Dexie 实现、schema 迁移、备份恢复
+packages/adapters/ai/    AI 服务适配器（P7，默认关闭，尚未实现）
+fixtures/                脱敏测试样例（书签 HTML、旧版备份）
+scripts/                 真实浏览器验证脚本
+docs/                    进度规划、技术决定与验证记录
 ```
 
-根目录使用 npm workspaces，已有空骨架对应的锁文件。实际依赖与构建脚本将在 P0 验证时确定并加入；目前没有可运行的应用，也没有通过任何浏览器验证。
+## 已知限制
 
-## 下一步
-
-从 [开发进度规划](docs/ROADMAP.md) 的 P0 开始，按 [P0 准备清单](docs/P0.md) 记录实际验证结果。
+- P7 内置 AI 未实现，界面明示并禁用；接真实模型需要供应商凭据与显式授权。
+- 手机只读快照只在移动视口下验证过，真机打开仍列为未验证。
+- 右键菜单、所选文字读取、手动加载扩展流程尚未逐项实测。
+- 验证记录里的未验证项一律标注「未验证」，不当作通过。
