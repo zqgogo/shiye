@@ -3,7 +3,7 @@
 - 任务：P1.4 / P1.5 / P1.6
 - 日期：2026-10-27
 - 关联规划：[ROADMAP](../ROADMAP.md#p1--核心规则数据模型与持久仓库)
-- 原始证据：[p1-browser-verification.json](p1-browser-verification.json)（16 项检查）
+- 原始证据：运行后在 `.verify/reports/p1-browser-verification.json` 生成（16 项检查）。该文件是运行产物，不入版本库。
 - 复现命令：`npm run build && npm run verify:p1`
 
 ## 为什么要在浏览器里再验证一次

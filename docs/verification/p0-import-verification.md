@@ -3,7 +3,7 @@
 - 任务：P0.4（文件与手机验证）
 - 日期：2026-10-27
 - 关联规划：[ROADMAP](../ROADMAP.md#p0--最小工程与关键能力验证)、[P0 准备清单](../P0.md)
-- 原始证据：[p0-import-verification.json](p0-import-verification.json)（41 项检查，逐项通过状态与实测值）
+- 原始证据：运行后在 `.verify/reports/p0-import-verification.json` 生成（41 项检查，逐项通过状态与实测值）。该文件是运行产物，不入版本库。
 - 复现命令：`npm run build && npm run verify:import`
 
 ## 环境

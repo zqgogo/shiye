@@ -202,5 +202,6 @@ P0 的未验证项：手动「加载已解压的扩展程序」流程需用户�
 - 2026-10-28：首次代码入库并打通跨机器继续。
   交付：按模块拆成 8 个提交（工程配置 / core / storage / application / workspace / extension / 测试与样例 / 文档），推送到 `origin/develop`；README 重写为「状态 + 安装 + 命令 + 手动加载 + 环境变量」，明确进度只以本文件为准；验证脚本改为自动探测浏览器可执行文件，支持 `SHIYE_CHROME` / `SHIYE_EDGE` 覆盖，加载策略改为运行时逐个尝试（Chrome 137+ 用 CDP，Edge 用命令行）。
   验证：`npm run typecheck`、`npm test`（37 项）、`npm run build` 通过；三套浏览器验证在改造后重跑全部通过——P0.2/P0.3 每个浏览器 19 项、P0.4 41 项、P1 16 项。
-  风险与限制：`docs/verification/*.json` 是脚本真实输出，会随每次重跑变化；`.workbuddy/` 为本地工作记忆，已排除出版本库，换机器不会带过去，可继续的信息全部落在本文件与 `docs/`。
+  风险与限制：`.workbuddy/` 为本地工作记忆，已排除出版本库，换机器不会带过去，可继续的信息全部落在本文件与 `docs/`。
+  调整：验证脚本的原始 JSON 原写入 `docs/verification/` 并入库，每次重跑都会产生时间戳 diff。改为写入 `.verify/reports/`（不入库），仓库只保留 Markdown 记录；`docs/verification/*.md` 与 `P0.md` 的证据引用同步改为说明生成位置。
   下一步：P2 页面级回归。

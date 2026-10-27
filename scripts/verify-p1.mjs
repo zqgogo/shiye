@@ -29,7 +29,7 @@ import {
 } from './lib/launch-extension.mjs';
 
 const VERIFY_DIR = path.join(ROOT, '.verify');
-const OUT_DIR = path.join(ROOT, 'docs', 'verification');
+const OUT_DIR = path.join(VERIFY_DIR, 'reports');
 const LEGACY_BACKUP = path.join(ROOT, 'fixtures', 'legacy-backup-v1.json');
 
 const RACE_URL = 'https://example.com/p1-race-same-url';

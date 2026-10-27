@@ -28,7 +28,7 @@ import {
 } from './lib/launch-extension.mjs';
 
 const VERIFY_DIR = path.join(ROOT, '.verify');
-const OUT_DIR = path.join(ROOT, 'docs', 'verification');
+const OUT_DIR = path.join(VERIFY_DIR, 'reports');
 const DOWNLOADS = path.join(VERIFY_DIR, 'downloads');
 const FIXTURE_CHROME = path.join(ROOT, 'fixtures', 'bookmarks-chrome.html');
 const FIXTURE_BROKEN = path.join(ROOT, 'fixtures', 'bookmarks-malformed.html');

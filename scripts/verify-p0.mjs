@@ -28,7 +28,7 @@ import {
 } from './lib/launch-extension.mjs';
 
 const VERIFY_DIR = path.join(ROOT, '.verify');
-const OUT_DIR = path.join(ROOT, 'docs', 'verification');
+const OUT_DIR = path.join(VERIFY_DIR, 'reports');
 
 const BOOKMARK_URL = 'https://example.com/shiye-p0-bookmark';
 const BOOKMARK_TITLE = 'P0 验证·工作台写入';

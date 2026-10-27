@@ -3,7 +3,7 @@
 - 任务：P0.2（扩展与主库）、P0.3（重启验证）
 - 日期：2026-10-27
 - 关联规划：[ROADMAP](../ROADMAP.md#p0--最小工程与关键能力验证)、[P0 准备清单](../P0.md)
-- 原始证据：[p0-browser-verification.json](p0-browser-verification.json)（脚本自动生成，含每条检查的通过状态与实测值）
+- 原始证据：运行后在 `.verify/reports/p0-browser-verification.json` 生成（含每条检查的通过状态与实测值）。该文件是运行产物，不入版本库。
 - 复现命令：`npm run build && npm run verify:browser`
 
 ## 环境
