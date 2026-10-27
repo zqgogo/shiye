@@ -1,10 +1,42 @@
 {
   "name": "shiye",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
+  "type": "module",
   "workspaces": [
     "apps/*",
     "packages/*",
     "packages/adapters/*"
-  ]
+  ],
+  "scripts": {
+    "dev": "vite --config apps/extension/vite.config.ts",
+    "build": "vite build --config apps/extension/vite.config.ts && vite build --config apps/extension/vite.sw.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify": "npm run typecheck && npm run test && npm run build",
+    "verify:browser": "node scripts/verify-p0.mjs",
+    "verify:import": "node scripts/verify-p0-import.mjs",
+    "verify:all": "npm run verify && npm run verify:browser && npm run verify:import && npm run verify:p1",
+    "verify:p1": "node scripts/verify-p1.mjs"
+  },
+  "dependencies": {
+    "dexie": "4.0.11",
+    "minisearch": "7.1.3",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.0.332",
+    "@types/node": "^22.10.2",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "@vitejs/plugin-react": "4.3.4",
+    "fake-indexeddb": "6.0.1",
+    "puppeteer-core": "^23.11.1",
+    "typescript": "5.7.3",
+    "vite": "5.4.21",
+    "vitest": "2.1.9"
+  }
 }

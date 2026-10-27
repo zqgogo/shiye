@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["chrome", "vite/client"],
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@shiye/core": ["packages/core/src/index.ts"],
+      "@shiye/application": ["packages/application/src/index.ts"],
+      "@shiye/storage": ["packages/storage/src/index.ts"],
+      "@shiye/ai-adapter": ["packages/adapters/ai/src/index.ts"],
+      "@shiye/workspace": ["apps/workspace/src/index.tsx"]
+    }
+  },
+  "include": [
+    "apps/*/src",
+    "packages/**/src",
+    "tests",
+    "vitest.config.ts",
+    "apps/extension/vite.config.ts"
+  ]
+}
