@@ -222,6 +222,8 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .field { display: grid; gap: 6px; margin: 16px 0; text-align: left; }
 .field > span, .label { font-size: 11px; color: #697762; }
 .field small { color: #9aa18f; font-size: 10px; }
+/* 超出字段上限时提示改为警示色，配合保存前的明确拒绝 */
+.field small.overlimit { color: var(--danger); font-weight: 600; }
 .checkline { display: flex; align-items: center; gap: 9px; font-size: 12px; margin: 12px 0; text-align: left; }
 .checkline > span { min-width: 0; overflow-wrap: anywhere; }
 .actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 20px; flex-wrap: wrap; }

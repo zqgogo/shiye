@@ -10,6 +10,9 @@ coverage/
 .DS_Store
 Thumbs.db
 
+# Vite 加载配置时生成的临时文件（正常会被自动清理）
+*.timestamp-*.mjs
+
 # 本地浏览器验证产物（浏览器 profile 与临时数据，不入库）
 .verify/
 

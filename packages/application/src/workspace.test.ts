@@ -196,6 +196,124 @@ ${JSON.stringify({
   });
 });
 
+describe('待看与收藏的转换规则', () => {
+  it('已完成待看再次加入时恢复 pending 并刷新加入时间', async () => {
+    const first = await service.addReading({ originalUrl: 'https://example.com/r1', title: '待看样本' });
+    const completed = await service.completeReading(first.id);
+    expect(completed.status).toBe('completed');
+    expect(await service.snapshot()).toMatchObject({ pendingReading: [] });
+
+    const again = await service.addReading({ originalUrl: 'https://example.com/r1', title: '待看样本' });
+    expect(again.id).toBe(first.id);
+    expect(again.status).toBe('pending');
+    expect(again.addedAt >= completed.addedAt).toBe(true);
+    expect(again.note).toBe(first.note);
+    expect((await service.snapshot()).pendingReading).toHaveLength(1);
+
+    // 未完成的同 URL 不能重复入队。
+    await expect(
+      service.addReading({ originalUrl: 'https://example.com/r1', title: '待看样本' })
+    ).rejects.toMatchObject({ code: 'DUPLICATE' });
+  });
+
+  it('已有收藏时转收藏被拒绝，并返回已有收藏供界面提示', async () => {
+    const existing = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/same',
+      title: '已有收藏',
+    });
+    const queued = await service.addReading({
+      originalUrl: 'https://example.com/same',
+      title: '同链接待看',
+    });
+
+    await expect(
+      service.convertReading(queued.id, queued.localRevision, { title: '同链接待看' })
+    ).rejects.toMatchObject({ code: 'DUPLICATE', details: { bookmarkId: existing.id } });
+    // 失败不改变任何一侧状态。
+    expect((await repos.reading.listPending())).toHaveLength(1);
+    expect((await repos.bookmarks.listActive())).toHaveLength(1);
+  });
+
+  it('同 URL 有墓碑时转收藏被拦，且墓碑可被界面查出', async () => {
+    const deleted = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/tomb',
+      title: '被删掉的收藏',
+    });
+    await repos.bookmarks.softDelete(deleted.id);
+    const queued = await service.addReading({
+      originalUrl: 'https://example.com/tomb',
+      title: '想再次收藏',
+    });
+
+    // 规范化是保守的：只把主机名大小写和默认端口归一，不动 query。
+    const tombstone = await service.findDeletedByUrl('HTTPS://Example.com:443/tomb');
+    expect(tombstone?.id).toBe(deleted.id);
+    expect(await service.findDeletedByUrl('https://example.com/tomb?utm_source=x')).toBeUndefined();
+
+    await expect(
+      service.convertReading(queued.id, queued.localRevision, { title: '想再次收藏' })
+    ).rejects.toMatchObject({ code: 'TOMBSTONED', details: { bookmarkId: deleted.id } });
+    expect(await service.findDeletedByUrl('https://example.com/no-such-url')).toBeUndefined();
+  });
+
+  it('恢复墓碑后完成待看：保留原分类与未读，且不新建第二条收藏', async () => {
+    const category = await repos.categories.create('资料');
+    const original = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/revive',
+      title: '原收藏',
+      categoryId: category.id,
+    });
+    await repos.bookmarks.markRead([original.id]);
+    await repos.bookmarks.softDelete(original.id);
+    const queued = await service.addReading({
+      originalUrl: 'https://example.com/revive',
+      title: '待看里的同链接',
+    });
+
+    const restored = await service.restoreBookmark(original.id);
+    expect(restored.id).toBe(original.id);
+    expect(restored.categoryId).toBe(category.id);
+    // 恢复不改变未读状态：删除前已读，恢复后仍是已读。
+    expect(restored.inboxUnread).toBe(false);
+
+    const done = await service.completeReading(queued.id);
+    expect(done.status).toBe('completed');
+    expect(done.relatedBookmarkId).toBeNull();
+
+    const active = await repos.bookmarks.listActive();
+    expect(active).toHaveLength(1);
+    expect((await repos.reading.listPending())).toHaveLength(0);
+
+    // 完成历史里可以恢复回 pending。
+    const reopened = await service.reopenReading(queued.id);
+    expect(reopened.status).toBe('pending');
+  });
+
+  it('被引用的收藏删除后，待看仍保留自己的标题与网址', async () => {
+    const bookmark = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/linked',
+      title: '被引用的收藏',
+    });
+    const queued = await service.addReading({
+      originalUrl: 'https://example.com/linked',
+      title: '队列里的标题',
+      relatedBookmarkId: bookmark.id,
+    });
+    await service.deleteBookmark(bookmark.id);
+
+    const pending = await repos.reading.listPending();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({
+      id: queued.id,
+      title: '队列里的标题',
+      originalUrl: 'https://example.com/linked',
+      status: 'pending',
+    });
+    // 收藏已进回收站时不应被转成 active 记录。
+    expect(await repos.bookmarks.listActive()).toHaveLength(0);
+  });
+});
+
 describe('手机只读快照', () => {
   it('排除本地专用与已删除条目，转义标题并限制链接协议', async () => {
     await repos.bookmarks.create({

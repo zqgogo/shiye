@@ -221,6 +221,18 @@ export class WorkspaceService {
     return this.repos.bookmarks.findByCanonical(checked.canonicalUrl);
   }
 
+  /**
+   * 查同 URL 的墓碑（已软删除的收藏）。
+   *
+   * 转收藏前必须能识别这种情况：仓库层会拒绝直接新建，界面要让用户
+   * 明确选择「恢复原收藏」还是「保持待看不动」，而不是只弹一条错误提示。
+   */
+  async findDeletedByUrl(url: string): Promise<Bookmark | undefined> {
+    const checked = canonicalizeUrl(url);
+    const deleted = await this.repos.bookmarks.listDeleted();
+    return deleted.find((row) => row.canonicalUrl === checked.canonicalUrl);
+  }
+
   async createCategory(name: string, description?: string): Promise<Category> {
     return this.repos.categories.create(name, description ?? '');
   }

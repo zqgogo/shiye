@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   LIMITS,
   codePointLength,
@@ -245,8 +245,77 @@ export function ConvertReadingModal({ readingId }: { readingId: string }) {
   const [categoryId, setCategoryId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  /**
+   * 同 URL 的墓碑要先查出来：仓库层会直接拒绝新建，
+   * 界面上必须让用户明确选择「恢复原收藏」还是「保持待看」，不能只丢一条报错。
+   */
+  const [tombstone, setTombstone] = useState<Bookmark | null | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!item) return;
+    service
+      .findDeletedByUrl(item.originalUrl)
+      .then((found) => {
+        if (!cancelled) setTombstone(found ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setTombstone(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [item, service]);
 
   if (!item) return null;
+
+  if (tombstone) {
+    return (
+      <div className="modalshade" role="presentation">
+        <div className="modal" role="dialog" aria-modal="true" aria-labelledby="tomb-title">
+          <div className="modalheader">
+            <h2 id="tomb-title">这条网址有已删除的收藏</h2>
+            <button className="iconbtn" onClick={closeModal} aria-label="关闭">
+              ×
+            </button>
+          </div>
+          <p>
+            《{tombstone.title}》此前被移到回收站（{formatDateTime(tombstone.deletedAt)}）。
+            为避免绕过删除记录重复建库，需要你选择一种处理方式。
+          </p>
+          <div className="notice">
+            恢复会保留它原来的分类与未读状态，并把这条待看标记为完成；选择保持待看则不做任何写入。
+          </div>
+          <p className="alert">{error}</p>
+          <div className="actions">
+            <button className="btn" onClick={closeModal}>
+              保持待看
+            </button>
+            <button
+              className="btn primary"
+              disabled={busy}
+              onClick={async () => {
+                setError('');
+                setBusy(true);
+                const restored = await run(async () => {
+                  const row = await service.restoreBookmark(tombstone.id);
+                  await service.completeReading(item.id);
+                  return row;
+                }, '已恢复原收藏，并完成待看。');
+                setBusy(false);
+                if (restored) {
+                  closeModal();
+                  openBookmark(restored.id);
+                }
+              }}
+            >
+              {busy ? '处理中…' : '恢复原收藏'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (existing) {
     return (
@@ -376,7 +445,7 @@ export function DeleteBookmarkModal({ bookmarkId }: { bookmarkId: string }) {
 }
 
 export function DetailDrawer({ bookmarkId }: { bookmarkId: string }) {
-  const { data, service, closeDrawer, reload, run, openModal, toast } = useWorkspace();
+  const { data, service, closeDrawer, reload, run, openModal, toast, setDrawerDirty } = useWorkspace();
   const bookmark = data.bookmarks.find((entry) => entry.id === bookmarkId);
   const [draft, setDraft] = useState(() => makeDraft(bookmark));
   /**
@@ -395,14 +464,37 @@ export function DetailDrawer({ bookmarkId }: { bookmarkId: string }) {
     return new Map(data.categories.map((category) => [category.id, category.name]));
   }, [bookmark, data.categories]);
 
+  // 先算草稿状态再提前返回：Hook 不能放在条件分支后面。
+  const dirty = bookmark ? isDirty(draft, bookmark) : false;
+
+  // 把「有未保存修改」上报给上层，关闭按钮 / Escape / 切换页面据此拦截。
+  useEffect(() => {
+    setDrawerDirty(dirty);
+    return () => setDrawerDirty(false);
+  }, [dirty, setDrawerDirty]);
+
   if (!bookmark) return null;
-  const dirty = isDirty(draft, bookmark);
 
   const categoryLocked = draft.lockedFields.includes('categoryId');
   const tagLocked = draft.lockedFields.includes('tagIds');
 
   const save = async () => {
     setError('');
+    const titleLength = codePointLength(draft.title);
+    if (titleLength > LIMITS.title) {
+      setError(`标题最多 ${LIMITS.title} 个字符，当前 ${titleLength} 个。`);
+      return;
+    }
+    const noteLength = codePointLength(draft.note);
+    if (noteLength > LIMITS.note) {
+      setError(`人工备注最多 ${LIMITS.note} 个字符，当前 ${noteLength} 个。`);
+      return;
+    }
+    const descriptionLength = codePointLength(draft.sourceDescription);
+    if (descriptionLength > LIMITS.sourceDescription) {
+      setError(`来源描述最多 ${LIMITS.sourceDescription} 个字符，当前 ${descriptionLength} 个。`);
+      return;
+    }
     const textLength = codePointLength(draft.selectedText);
     if (textLength > LIMITS.selectedText) {
       setError(`选中文字最多 ${LIMITS.selectedText} 个字符，当前 ${textLength} 个。`);
@@ -489,8 +581,12 @@ export function DetailDrawer({ bookmarkId }: { bookmarkId: string }) {
           <input
             value={draft.title}
             onChange={(event) => setDraft({ ...draft, title: event.target.value })}
-            aria-invalid={!draft.title.trim()}
+            aria-invalid={!draft.title.trim() || codePointLength(draft.title) > LIMITS.title}
           />
+          <small className={codePointLength(draft.title) > LIMITS.title ? 'overlimit' : undefined}>
+            {codePointLength(draft.title)} / {LIMITS.title} 字符
+            {codePointLength(draft.title) > LIMITS.title ? ` · 已超出 ${codePointLength(draft.title) - LIMITS.title}` : ''}
+          </small>
         </label>
 
         <label className="field">
@@ -500,6 +596,7 @@ export function DetailDrawer({ bookmarkId }: { bookmarkId: string }) {
             onChange={(event) => setDraft({ ...draft, sourceDescription: event.target.value })}
             style={{ minHeight: 70 }}
           />
+          <small>{codePointLength(draft.sourceDescription)} / {LIMITS.sourceDescription} 字符</small>
         </label>
 
         {bookmark.aiPurpose ? (
@@ -594,7 +691,9 @@ export function DetailDrawer({ bookmarkId }: { bookmarkId: string }) {
             onChange={(event) => setDraft({ ...draft, note: event.target.value })}
             style={{ minHeight: 90 }}
           />
-          <small>{codePointLength(draft.note)} 字符</small>
+          <small className={codePointLength(draft.note) > LIMITS.note ? 'overlimit' : undefined}>
+            {codePointLength(draft.note)} / {LIMITS.note} 字符
+          </small>
         </label>
 
         <label className="field">
@@ -954,6 +1053,35 @@ export function CategoriesModal() {
   );
 }
 
+/**
+ * 未保存离开提醒。
+ * 关闭抽屉、按 Escape、切换左侧页面时都会走到这里，由用户明确选择继续编辑还是丢草稿。
+ */
+export function DiscardEditsModal() {
+  const { resolveDiscard } = useWorkspace();
+  return (
+    <div className="modalshade" role="presentation">
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="discard-title">
+        <div className="modalheader">
+          <h2 id="discard-title">还有未保存的修改</h2>
+          <button className="iconbtn" onClick={() => resolveDiscard(false)} aria-label="关闭">
+            ×
+          </button>
+        </div>
+        <p>这条收藏的改动还没有写入主库。放弃后不会保留草稿，也不会影响已有内容。</p>
+        <div className="actions">
+          <button className="btn primary" onClick={() => resolveDiscard(false)}>
+            继续编辑
+          </button>
+          <button className="btn danger" onClick={() => resolveDiscard(true)}>
+            放弃修改并离开
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ModalHost() {
   const { modal } = useWorkspace();
   if (!modal) return null;
@@ -968,6 +1096,8 @@ export function ModalHost() {
       return <DeleteBookmarkModal bookmarkId={modal.bookmarkId} />;
     case 'categories':
       return <CategoriesModal />;
+    case 'discard-edits':
+      return <DiscardEditsModal />;
     default:
       return null;
   }

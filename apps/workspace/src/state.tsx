@@ -19,6 +19,8 @@ export type ModalState =
   | { kind: 'convert-reading'; readingId: string }
   | { kind: 'delete-bookmark'; bookmarkId: string }
   | { kind: 'category-editor'; categoryId?: string }
+  /** 抽屉里有未保存的修改，离开前要求用户明确选择。 */
+  | { kind: 'discard-edits' }
   | null;
 
 interface ToastMessage {
@@ -42,6 +44,10 @@ interface WorkspaceContextValue {
   closeModal: () => void;
   toast: (text: string, kind?: 'ok' | 'error') => void;
   run: <T>(task: () => Promise<T>, success?: string) => Promise<T | null>;
+  /** 详情抽屉上报「有未保存修改」，离开前据此拦截。 */
+  setDrawerDirty: (dirty: boolean) => void;
+  /** 未保存提醒的选择结果：true 放弃修改继续离开，false 留在当前页。 */
+  resolveDiscard: (discard: boolean) => void;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
@@ -71,6 +77,12 @@ export function WorkspaceProvider({
   const [modal, setModal] = useState<ModalState>(null);
   const [toastState, setToastState] = useState<ToastMessage | null>(null);
   const timer = useRef<number | null>(null);
+  const [drawerDirty, setDrawerDirtyState] = useState(false);
+  /**
+   * 被未保存提醒暂扣的离开动作。
+   * 用 ref 而不是 state：它只给 resolveDiscard 读，不需要触发渲染。
+   */
+  const pendingLeave = useRef<null | { action: 'close' } | { action: 'navigate'; route: string }>(null);
 
   const reload = useCallback(async () => {
     const next = await service.snapshot();
@@ -100,14 +112,56 @@ export function WorkspaceProvider({
     [reload, toast]
   );
 
-  const navigate = useCallback((next: string) => {
-    setRoute(next);
-    setQueryState('');
+  const navigate = useCallback(
+    (next: string) => {
+      // 抽屉里有未保存的修改时，切页等于丢弃草稿，必须让用户先确认。
+      if (drawerId && drawerDirty && next !== route) {
+        pendingLeave.current = { action: 'navigate', route: next };
+        setModal({ kind: 'discard-edits' });
+        return;
+      }
+      setRoute(next);
+      setQueryState('');
+      setDrawerId(null);
+      setDrawerDirtyState(false);
+      setModal(null);
+      document.body.classList.remove('menu-open');
+      window.history.replaceState(null, '', `#${next}`);
+      window.scrollTo({ top: 0 });
+    },
+    [drawerId, drawerDirty, route]
+  );
+
+  const closeDrawer = useCallback(() => {
+    if (drawerDirty) {
+      pendingLeave.current = { action: 'close' };
+      setModal({ kind: 'discard-edits' });
+      return;
+    }
     setDrawerId(null);
-    setModal(null);
-    document.body.classList.remove('menu-open');
-    window.history.replaceState(null, '', `#${next}`);
-    window.scrollTo({ top: 0 });
+  }, [drawerDirty]);
+
+  const resolveDiscard = useCallback(
+    (discard: boolean) => {
+      const pending = pendingLeave.current;
+      pendingLeave.current = null;
+      setModal(null);
+      if (!discard) return;
+      setDrawerDirtyState(false);
+      setDrawerId(null);
+      if (pending?.action === 'navigate') {
+        setRoute(pending.route);
+        setQueryState('');
+        document.body.classList.remove('menu-open');
+        window.history.replaceState(null, '', `#${pending.route}`);
+        window.scrollTo({ top: 0 });
+      }
+    },
+    []
+  );
+
+  const setDrawerDirty = useCallback((dirty: boolean) => {
+    setDrawerDirtyState(dirty);
   }, []);
 
   const setQuery = useCallback((value: string) => {
@@ -122,14 +176,22 @@ export function WorkspaceProvider({
         document.getElementById('globalSearch')?.focus();
       }
       if (event.key === 'Escape') {
-        setModal(null);
-        setDrawerId(null);
-        document.body.classList.remove('menu-open');
+        // Escape 也要走同一套未保存检查：直接关掉抽屉等于静默丢弃草稿。
+        if (modal) {
+          setModal(null);
+          pendingLeave.current = null;
+          return;
+        }
+        if (document.body.classList.contains('menu-open')) {
+          document.body.classList.remove('menu-open');
+          return;
+        }
+        if (drawerId) closeDrawer();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [modal, drawerId, closeDrawer]);
 
   // 弹窗或右键菜单写入主库后，已打开的工作台不能继续显示旧快照。
   // 广播负责即时更新，聚焦/可见性变化负责兜底（频道不可用时也能刷新）。
@@ -172,13 +234,30 @@ export function WorkspaceProvider({
       navigate,
       setQuery,
       openBookmark: (id) => setDrawerId(id),
-      closeDrawer: () => setDrawerId(null),
+      closeDrawer,
       openModal: (next) => setModal(next),
       closeModal: () => setModal(null),
       toast,
       run,
+      setDrawerDirty,
+      resolveDiscard,
     }),
-    [data, service, route, query, drawerId, modal, reload, navigate, setQuery, toast, run]
+    [
+      data,
+      service,
+      route,
+      query,
+      drawerId,
+      modal,
+      reload,
+      navigate,
+      setQuery,
+      toast,
+      run,
+      closeDrawer,
+      setDrawerDirty,
+      resolveDiscard,
+    ]
   );
 
   return (
