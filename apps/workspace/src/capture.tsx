@@ -71,6 +71,7 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
   }, [destination]);
 
   const stats = useMemo(() => computeStats(preview?.rows ?? []), [preview]);
+  const autoPreviewed = useRef(false);
 
   const parse = async (source?: { mode: 'bookmarkHtml'; text: string; fileName: string }) => {
     setError('');
@@ -122,6 +123,18 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
       setBusy(false);
     }
   };
+
+  /**
+   * 从首页「预览链接」带着粘贴内容进来时直接出预览。
+   * 首页那一步已经把「粘贴→预览」表达完了，落到这里再让用户点一次同名按钮是多余的。
+   */
+  useEffect(() => {
+    if (autoPreviewed.current) return;
+    autoPreviewed.current = true;
+    if (initialMode === 'paste' && text.trim()) void parse();
+    // 只在挂载时判定一次，之后由用户主动触发解析。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const onFile = async (file: File | undefined) => {
     setError('');

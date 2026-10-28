@@ -139,14 +139,18 @@ export async function launchWithExtension(target, profileDir, headless, strategy
  *
  * 不写死策略：Chrome 137+ 不再支持 `--load-extension`，Edge 仍支持，
  * 而 CDP 的 `Extensions.loadUnpacked` 只在带 `--enable-unsafe-extension-debugging` 时可用。
+ *
+ * 默认先试无头（快、不需要桌面）。设 `SHIYE_HEADED=1` 可强制先开有界面窗口，
+ * 用于人工观察自动化在页面里到底点了什么。
  */
 export async function launchBestEffort(target, profileDir, limitations) {
   let lastError = null;
   const preferred = target.strategy === 'flag' ? 'flag' : 'cdp';
   const strategies = preferred === 'flag' ? ['flag', 'cdp'] : ['cdp', 'flag'];
+  const headlessModes = process.env.SHIYE_HEADED === '1' ? [false, true] : [true, false];
 
   for (const strategy of strategies) {
-    for (const headless of [true, false]) {
+    for (const headless of headlessModes) {
       const label = `${strategy === 'cdp' ? 'CDP 加载' : '命令行加载'}·${headless ? '无头' : '有界面'}`;
       try {
         const result = await launchWithExtension(target, profileDir, headless, strategy);

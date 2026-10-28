@@ -49,6 +49,8 @@ const URL_EXISTING = 'https://example.com/p3-new-b';
 const URL_READING_KEEP = 'https://example.net/firefox/notes';
 const URL_SW_BOOKMARK = 'https://example.com/p3-sw-message';
 const URL_SW_READING = 'https://example.com/p3-sw-reading';
+/** P3.1 弹窗样本也落在同一个分类下，统计目录映射结果时必须排除。 */
+const URL_POPUP_BOOKMARK = 'https://example.com/p3-popup-bookmark';
 
 const steps = [];
 const record = (step, ok, detail) => {
@@ -376,7 +378,7 @@ async function main() {
       `status=${popupReading?.status}｜title=「${popupReading?.title}」`
     );
 
-    const POPUP_BOOKMARK_URL = 'https://example.com/p3-popup-bookmark';
+    const POPUP_BOOKMARK_URL = URL_POPUP_BOOKMARK;
     await popup.reload({ waitUntil: 'domcontentloaded' });
     await waitForText(popup, '收藏当前页面', 25_000);
     await sleep(500);
@@ -605,11 +607,14 @@ async function main() {
       'P3.4 未勾选、重复与无效行都不入库',
       !afterCommit.bookmarks.some((row) => row.originalUrl === 'https://example.com/same-title')
     );
-    const mapped = afterCommit.bookmarks.filter((row) => row.categoryId === ctx.categoryId);
+    // P3.1 的弹窗样本也带着这个分类，统计映射结果时剔除，只看本批写入的条目。
+    const mapped = afterCommit.bookmarks.filter(
+      (row) => row.categoryId === ctx.categoryId && row.originalUrl !== URL_POPUP_BOOKMARK
+    );
     record(
       'P3.3 目录映射到已有分类后写入生效',
       mapped.length === 3,
-      `该分类下=${mapped.length} 条（其他书签 4 条中取消了 1 条）`
+      `该分类下=${mapped.length} 条（不含 P3.1 弹窗样本；其他书签 4 条中取消了 1 条）`
     );
     const batches1 = await page.evaluate(readImportBatches);
     report.counts.batches = batches1;
