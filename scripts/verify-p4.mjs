@@ -486,10 +486,15 @@ async function main() {
       categoryId: ctx.categoryIds[CAT_NAMES[1]],
     });
     for (const item of FIELD_CASES) {
+      // 每个样本只把独特词写进「目标字段」，其他字段留空：
+      // 这样命中数必须是 1，多命中就说明索引串了字段。
       rowsToSeed.push({
-        url: `https://example.com/p4-field-${item.key}`,
-        title: `P4 字段样本 ${item.key}`,
-        description: '字段样本描述',
+        url: item.overrides.url ?? `https://example.com/p4-field-${item.key}`,
+        title: item.overrides.title ?? `P4 字段样本 ${item.key}`,
+        description: item.overrides.description ?? '字段样本描述',
+        note: item.overrides.note ?? '',
+        selectedText: item.overrides.selectedText ?? '',
+        aiPurpose: item.overrides.aiPurpose ?? '',
         ...(item.overrides.category !== undefined
           ? { categoryId: ctx.categoryIds[CAT_NAMES[item.overrides.category]] }
           : {}),

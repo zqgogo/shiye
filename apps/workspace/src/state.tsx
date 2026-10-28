@@ -166,7 +166,14 @@ export function WorkspaceProvider({
 
   const setQuery = useCallback((value: string) => {
     setQueryState(value);
-    if (value.trim()) setRoute('search');
+    if (!value.trim()) return;
+    setRoute('search');
+    // 地址栏必须跟着内部路由走。搜索是唯一不经过 navigate 的切页，
+    // 之前 hash 会停在上一页，导致「当前在搜索」这件事对地址栏不可见：
+    // 同一地址无法直接用 hash 跳走，前进/后退也会读回错误的一页。
+    if (window.location.hash !== '#search') {
+      window.history.replaceState(null, '', '#search');
+    }
   }, []);
 
   useEffect(() => {

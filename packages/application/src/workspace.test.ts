@@ -58,6 +58,70 @@ describe('本地搜索', () => {
     expect(await service.search('   ')).toEqual([]);
   });
 
+  it('八个字段各自可检索，且不会串到别的字段', async () => {
+    // 每个样本只把独特词写进目标字段，命中数必须正好是 1：
+    // 少一条说明该字段没进索引，多一条说明索引把字段混在了一起。
+    const category = await repos.categories.create('琥珀分类');
+    const tag = await repos.tags.create('青瓷标签');
+
+    const title = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/f-title',
+      title: '字段 靛蓝排版',
+    });
+    const url = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/path/p4urlkey',
+      title: '字段 网址',
+    });
+    const description = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/f-desc',
+      title: '字段 描述',
+      sourceDescription: '琥珀装帧 说明',
+    });
+    const note = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/f-note',
+      title: '字段 备注',
+      note: '绯红批注 备注',
+    });
+    const selectedText = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/f-text',
+      title: '字段 摘录',
+      selectedText: '黛绿摘录 原文',
+    });
+    const aiPurpose = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/f-purpose',
+      title: '字段 用途',
+    });
+    await repos.bookmarks.update(aiPurpose.id, aiPurpose.localRevision, { aiPurpose: '月白用途 说明' }, 'human');
+    const byCategory = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/f-category',
+      title: '字段 分类',
+    });
+    await repos.bookmarks.update(byCategory.id, byCategory.localRevision, { categoryId: category.id }, 'human');
+    const byTag = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/f-tag',
+      title: '字段 标签',
+    });
+    await repos.bookmarks.update(byTag.id, byTag.localRevision, { tagIds: [tag.id] }, 'human');
+
+    const cases: [string, string][] = [
+      ['靛蓝排版', title.id],
+      ['p4urlkey', url.id],
+      ['琥珀装帧', description.id],
+      ['绯红批注', note.id],
+      ['黛绿摘录', selectedText.id],
+      ['月白用途', aiPurpose.id],
+      ['琥珀分类', byCategory.id],
+      ['青瓷标签', byTag.id],
+    ];
+    for (const [term, id] of cases) {
+      const hits = await service.search(term);
+      expect(
+        hits.map((hit) => hit.bookmarkId),
+        `关键词「${term}」的命中集不对`
+      ).toEqual([id]);
+    }
+  });
+
   it('检索范围可限定到某个分类，全库不受影响', async () => {
     const first = await repos.bookmarks.create({ originalUrl: 'https://example.com/scope-a', title: '范围样本 A' });
     const second = await repos.bookmarks.create({ originalUrl: 'https://example.com/scope-b', title: '范围样本 B' });
