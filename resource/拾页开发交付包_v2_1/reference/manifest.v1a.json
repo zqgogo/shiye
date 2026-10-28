@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "拾页 · 收藏工作台",
+  "version": "0.1.0",
+  "description": "本地待看、收藏、搜索与可选AI",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "contextMenus",
+    "storage"
+  ],
+  "action": {
+    "default_title": "收藏到拾页",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "options_ui": {
+    "page": "workspace.html",
+    "open_in_tab": true
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  "optional_host_permissions": [
+    "https://*/*"
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "purpose": "待开发测试输入；不是已通过测试记录",
+  "cases": [
+    {
+      "id": "I01",
+      "input": [
+        "https://example.com/a",
+        "https://example.com/a",
+        "javascript:alert(1)"
+      ],
+      "expectedStatuses": [
+        "new",
+        "duplicate",
+        "invalid"
+      ]
+    },
+    {
+      "id": "Q01",
+      "input": {
+        "eligibleRecords": 500,
+        "filterMatchCount": 137
+      },
+      "action": "selectAllFiltered",
+      "expectedSelectedCount": 137
+    },
+    {
+      "id": "Q02",
+      "input": {
+        "existingSelectedIds": [
+          "a1"
+        ],
+        "newSelectedIds": [
+          "b1"
+        ]
+      },
+      "expectedSelectedIds": [
+        "a1",
+        "b1"
+      ]
+    },
+    {
+      "id": "R01",
+      "input": {
+        "queueStatus": "pending",
+        "bookmarkExists": false
+      },
+      "action": "convertAndFailSecondWrite",
+      "expected": {
+        "queueStatus": "pending",
+        "newBookmarkCount": 0
+      }
+    },
+    {
+      "id": "A01",
+      "input": {
+        "modelChanged": true,
+        "previousTestOk": true
+      },
+      "expected": {
+        "enabled": false,
+        "testRequired": true
+      }
+    },
+    {
+      "id": "A02",
+      "input": {
+        "replyField": "inboxUnread"
+      },
+      "expected": "rejectField"
+    },
+    {
+      "id": "B01",
+      "input": {
+        "queueCount": 3,
+        "bookmarkCount": 12
+      },
+      "expectedBackupFields": [
+        "readingItems",
+        "bookmarks",
+        "tombstones"
+      ],
+      "forbiddenBackupFields": [
+        "apiKey",
+        "password"
+      ]
+    }
+  ]
+}
