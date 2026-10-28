@@ -91,9 +91,26 @@ function goto(page, route, expectText) {
     .then(() => (expectText ? waitForText(page, expectText, 15_000) : sleep(400)));
 }
 
-/** 整页重新加载，让 React 重新从主库读一遍（造数后必须走这一步）。 */
+/**
+ * 整页重新加载，让 React 重新从主库读一遍（造数后必须走这一步）。
+ *
+ * 只 `page.goto('#home')` 不够：地址只有 hash 不同时，浏览器做的是同文档跳转，
+ * React 不会重新挂载，内存里仍是造数前的快照——侧栏显示旧的收藏总数，
+ * 搜索命中的条目也会被旧快照过滤成 0。必须显式 reload 才算重读主库。
+ */
 async function reloadWorkspace(page, base, hash = 'home') {
-  await page.goto(`${base}/workspace.html#${hash}`, { waitUntil: 'domcontentloaded' });
+  const url = `${base}/workspace.html#${hash}`;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded' });
+      break;
+    } catch (error) {
+      // 扩展刚加载完时标签页可能还在初始化，此时会抛「Requesting main frame too early」。
+      if (attempt === 9) throw error;
+      await sleep(300);
+    }
+  }
+  await page.reload({ waitUntil: 'domcontentloaded' });
   await waitForSelectorReady(page, '.brand-mark', 25_000);
   await sleep(700);
 }
@@ -265,19 +282,60 @@ function categoryRows(page) {
   );
 }
 
-/** 全局搜索框输入即跳转搜索页。 */
-async function searchFor(page, term) {
+/**
+ * 输入关键词并等到「检索已出结论」再读数。
+ *
+ * 搜索是异步的：输入后 120ms 才发起检索，检索回来才渲染计数。用固定 sleep 猜时间，
+ * 首屏第一次搜索一旦慢于猜测值就会读到「匹配 0 条」这个假结果。
+ * 这里轮询到计数落地（有命中，或已给出空态且不在「正在检索」）为止，
+ * 同时把耗时和失败现场记下来——首屏为什么慢，只能靠这些数说话。
+ */
+async function searchSettled(page, term, timeout = 8_000) {
+  const startedAt = Date.now();
   await setReactInput(page, '#globalSearch', term);
-  await sleep(900);
+  return settleSearch(page, startedAt, timeout);
 }
 
-function searchHitCount(page) {
-  return page.evaluate(() => {
-    const toolbar = document.querySelector('.toolbar');
-    const text = toolbar?.innerText ?? '';
-    const matched = /匹配\s*(\d+)\s*条/.exec(text);
-    return matched ? Number(matched[1]) : null;
-  });
+/** 不重新输入，只等当前检索落地（改检索范围后要用）。 */
+function settleSearch(page, startedAt = Date.now(), timeout = 8_000) {
+  return (async () => {
+    let last = null;
+    while (Date.now() - startedAt < timeout) {
+      last = await page.evaluate(() => {
+        const toolbar = document.querySelector('.toolbar')?.innerText ?? '';
+        const body = document.body.innerText;
+        const matched = /匹配\s*(\d+)\s*条/.exec(toolbar);
+        return {
+          count: matched ? Number(matched[1]) : null,
+          toolbar: toolbar.replace(/\s+/g, ' ').trim().slice(0, 60),
+          pending: body.includes('正在检索本地索引'),
+          failed: /索引(重建|检索)失败/.test(body),
+          emptyState: body.includes('没有匹配的收藏'),
+          rows: document.querySelectorAll('article.bookmark').length,
+          input: document.querySelector('#globalSearch')?.value ?? '',
+          library: /全部收藏\s*(\d+)/.exec(body)?.[1] ?? '',
+          heading: (document.querySelector('.heading h1')?.textContent ?? '').trim(),
+        };
+      });
+      if (last.count !== null && (last.count > 0 || !last.pending)) break;
+      await sleep(150);
+    }
+    return { ...last, elapsed: Date.now() - startedAt };
+  })();
+}
+
+/** 把一次搜索的现场压成一行，失败时才需要它。 */
+function searchScene(hit) {
+  return [
+    `耗时=${hit.elapsed}ms`,
+    `待定=${hit.pending}`,
+    `报错=${hit.failed}`,
+    `空态=${hit.emptyState}`,
+    `行数=${hit.rows}`,
+    `输入=${hit.input}`,
+    `全部收藏=${hit.library}`,
+    `页=${hit.heading}`,
+  ].join('｜');
 }
 
 function searchResultTitles(page) {
@@ -556,25 +614,25 @@ async function main() {
   phase('P4.5 搜索字段覆盖', async () => {
     const results = {};
     for (const item of FIELD_CASES) {
-      await searchFor(page, item.term);
-      const count = await searchHitCount(page);
-      results[item.key] = count;
+      const hit = await searchSettled(page, item.term);
+      results[item.key] = hit.count;
+      if (item.key === 'title') report.counts.firstSearch = hit;
       record(
         `P4.5 搜索命中「${item.key}」字段（${item.term}）`,
-        count === 1,
-        `匹配=${count} 条`
+        hit.count === 1,
+        hit.count === 1 ? `匹配=1 条｜耗时=${hit.elapsed}ms` : `匹配=${hit.count} 条｜${searchScene(hit)}`
       );
     }
     report.counts.fieldHits = results;
   });
 
   phase('P4.5 中文召回与待看独立搜索', async () => {
-    await searchFor(page, '靛蓝排版');
+    const recall = await searchSettled(page, '靛蓝排版');
     const titles = await searchResultTitles(page);
     record(
       'P4.2 中文标题按字与双字切分可召回',
       titles.some((title) => title.includes('靛蓝排版')),
-      `结果=${titles.slice(0, 3).join(' / ')}`
+      `结果=${titles.slice(0, 3).join(' / ')}｜${searchScene(recall)}`
     );
 
     // 待看队列里放一条，确认它只在待看搜索里出现，不混进收藏搜索。
@@ -614,51 +672,45 @@ async function main() {
   });
 
   phase('P4.5 检索范围与回收站排除', async () => {
-    await searchFor(page, '靛蓝排版');
-    const allScope = await searchHitCount(page);
+    const all = await searchSettled(page, '靛蓝排版');
     const catId = ctx.categoryIds[CAT_NAMES[8]];
+    const scopeStartedAt = Date.now();
     await page.select('select[aria-label="检索范围"]', catId);
-    await sleep(900);
-    const scoped = await searchHitCount(page);
+    const scoped = await settleSearch(page, scopeStartedAt);
     record(
       'P4.5 检索范围可限定到某个分类',
-      allScope === 1 && scoped === 0,
-      `全库=${allScope}｜限定分类=${scoped}`
+      all.count === 1 && scoped.count === 0,
+      `全库=${all.count}｜限定分类=${scoped.count}`
     );
 
     await page.select('select[aria-label="检索范围"]', '');
-    await sleep(900);
-    await searchFor(page, CAT_NAMES[8]);
-    const byCategory = await searchHitCount(page);
-    record('P4.5 分类名本身可被检索', byCategory === 1, `匹配=${byCategory} 条`);
+    await sleep(300);
+    const byCategory = await searchSettled(page, CAT_NAMES[8]);
+    record('P4.5 分类名本身可被检索', byCategory.count === 1, `匹配=${byCategory.count} 条`);
 
-    await searchFor(page, '回收站样本');
-    const trashedHit = await searchHitCount(page);
+    const trashed = await searchSettled(page, '回收站样本');
+    const trashedHit = trashed.count;
     record('P4.5 回收站中的收藏不进入搜索结果', trashedHit === 0, `匹配=${trashedHit} 条`);
 
-    await searchFor(page, '不会命中的关键词qzx');
-    const noneHit = await page.evaluate(() => ({
-      count: /匹配\s*0\s*条/.test(document.querySelector('.toolbar')?.innerText ?? ''),
-      empty: document.body.innerText.includes('没有匹配的收藏'),
-    }));
+    const none = await searchSettled(page, '不会命中的关键词qzx');
     record(
       'P4.2 无匹配时给出空状态而不是空白页',
-      noneHit.count && noneHit.empty,
-      `匹配0=${noneHit.count}｜空状态=${noneHit.empty}`
+      none.count === 0 && none.emptyState,
+      `匹配=${none.count}｜空状态=${none.emptyState}｜${searchScene(none)}`
     );
   });
 
   phase('P4.2 索引重建', async () => {
-    await searchFor(page, '靛蓝排版');
-    const before = await searchHitCount(page);
+    const before = await searchSettled(page, '靛蓝排版');
     await clickIn(page, '.toolbar', '重建索引');
-    await sleep(1200);
+    const rebuiltAt = Date.now();
+    await sleep(600);
     const toast = await toastText(page);
-    const after = await searchHitCount(page);
+    const after = await settleSearch(page, rebuiltAt);
     record(
       'P4.2 可显式重建索引且结果保持一致',
-      /索引已重建/.test(toast) && after === before && before === 1,
-      `提示=「${toast}」｜重建前=${before}｜重建后=${after}`
+      /索引已重建/.test(toast) && after.count === before.count && before.count === 1,
+      `提示=「${toast}」｜重建前=${before.count}｜重建后=${after.count}`
     );
   });
 
@@ -729,14 +781,12 @@ async function main() {
 
     await clickIn(page, '.modal.wide', '完成');
     await sleep(400);
-    await searchFor(page, CAT_NAMES[8]);
-    const oldName = await searchHitCount(page);
-    await searchFor(page, CAT_RENAME);
-    const newName = await searchHitCount(page);
+    const oldName = await searchSettled(page, CAT_NAMES[8]);
+    const newName = await searchSettled(page, CAT_RENAME);
     record(
       'P4.5 改名后索引同步：旧名失效、新名生效',
-      oldName === 0 && newName === 1,
-      `旧名=${oldName} 条｜新名=${newName} 条`
+      oldName.count === 0 && newName.count === 1,
+      `旧名=${oldName.count} 条｜新名=${newName.count} 条`
     );
   });
 

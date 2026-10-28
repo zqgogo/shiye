@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { LIMITS, TRASH_RETENTION_DAYS, formatDateTime, type Bookmark } from '@shiye/core';
+import { LIMITS, TRASH_RETENTION_DAYS, formatDateTime, toUserMessage, type Bookmark } from '@shiye/core';
 import { BookmarkRow, EmptyState, ICONS, Notice, PageHeader, ReadingRow } from './components.js';
 import { useWorkspace } from './state.js';
 import { setPendingPaste } from './capture.js';
@@ -295,6 +295,9 @@ export function SearchPage() {
 
   useEffect(() => {
     let cancelled = false;
+    // 换关键词或换检索范围时先回到「检索中」：否则新的检索还没回来，
+    // 页面上仍挂着上一个词的结果与「匹配 N 条」，读数会被当成这次的答案。
+    setHits(null);
     if (!query.trim()) {
       setHits([]);
       return;
@@ -308,8 +311,9 @@ export function SearchPage() {
             setHits(result);
           }
         })
-        .catch(() => {
-          if (!cancelled) setError('索引重建失败，请稍后重试。');
+        .catch((cause: unknown) => {
+          // 本地索引出错基本都是真实缺陷，把原因露出来比「请稍后重试」有用。
+          if (!cancelled) setError(`本地索引检索失败：${toUserMessage(cause)}`);
         });
     }, 120);
     return () => {
@@ -350,8 +354,8 @@ export function SearchPage() {
               const result = await service.rebuildSearchIndex();
               setReloadKey((value) => value + 1);
               toast(`索引已重建，共 ${result.documents} 条。`);
-            } catch {
-              setError('索引重建失败，请稍后重试。');
+            } catch (cause) {
+              setError(`本地索引重建失败：${toUserMessage(cause)}`);
             }
           }}
         >
