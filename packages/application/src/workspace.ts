@@ -43,7 +43,7 @@ import {
 import { AIReplySchema, AISuggestionSchema } from '@shiye/core';
 import { z } from 'zod';
 import type { CommitImportResult, Repositories, RestoreResult } from './ports.js';
-import { createSearchIndex, type SearchHit } from './search.js';
+import { createSearchIndex, type LocalSearchIndex, type SearchHit } from './search.js';
 
 export interface WorkspaceSnapshot {
   bookmarks: Bookmark[];
@@ -71,7 +71,30 @@ export interface BackupBundle {
 }
 
 export class WorkspaceService {
+  private searchCache: { key: string; index: LocalSearchIndex; bookmarks: Bookmark[] } | null = null;
+
   constructor(private readonly repos: Repositories) {}
+
+  private async ensureSearchIndex(): Promise<{ index: LocalSearchIndex; bookmarks: Bookmark[] }> {
+    const [bookmarks, categories, tags] = await Promise.all([
+      this.repos.bookmarks.listActive(),
+      this.repos.categories.list(),
+      this.repos.tags.list(),
+    ]);
+    const key = [
+      bookmarks
+        .map((bookmark) => `${bookmark.id}:${bookmark.localRevision}:${bookmark.categoryId ?? ''}:${bookmark.tagIds.join(',')}`)
+        .join('|'),
+      categories.map((category) => `${category.id}:${category.name}`).join('|'),
+      tags.map((tag) => `${tag.id}:${tag.name}`).join('|'),
+    ].join('#');
+    if (this.searchCache?.key === key) {
+      return { index: this.searchCache.index, bookmarks };
+    }
+    const index = createSearchIndex(bookmarks, categories, tags);
+    this.searchCache = { key, index, bookmarks };
+    return { index, bookmarks };
+  }
 
   private async loadAll(): Promise<WorkspaceSnapshot> {
     const [bookmarks, categories, tags, settings, policy, pendingReading, completedReading] =
@@ -104,13 +127,26 @@ export class WorkspaceService {
     return rows.sort((a, b) => (b.deletedAt ?? '').localeCompare(a.deletedAt ?? ''));
   }
 
-  async search(query: string): Promise<SearchHit[]> {
-    const [bookmarks, categories, tags] = await Promise.all([
-      this.repos.bookmarks.listActive(),
-      this.repos.categories.list(),
-      this.repos.tags.list(),
-    ]);
-    return createSearchIndex(bookmarks, categories, tags).search(query);
+  /**
+   * 本地检索。索引按数据指纹缓存：内容或分类标签名变化时自动重建，
+   * 避免每次输入都重新分词整库（500 条时差异明显）。
+   */
+  async search(query: string, options?: { categoryId?: string | null }): Promise<SearchHit[]> {
+    const { index, bookmarks } = await this.ensureSearchIndex();
+    const hits = index.search(query);
+    const scope = options?.categoryId;
+    if (!scope) return hits;
+    const allowed = new Set(
+      bookmarks.filter((bookmark) => bookmark.categoryId === scope).map((bookmark) => bookmark.id)
+    );
+    return hits.filter((hit) => allowed.has(hit.bookmarkId));
+  }
+
+  /** 显式重建索引：设置页与故障恢复用；正常情况下指纹变化会自动重建。 */
+  async rebuildSearchIndex(): Promise<{ documents: number; builtAt: string }> {
+    this.searchCache = null;
+    const { index, bookmarks } = await this.ensureSearchIndex();
+    return { documents: bookmarks.length, builtAt: index.builtAt || new Date().toISOString() };
   }
 
   async createBookmark(raw: unknown): Promise<Bookmark> {
@@ -238,7 +274,10 @@ export class WorkspaceService {
   }
 
   async renameCategory(id: string, patch: { name?: string; description?: string }): Promise<Category> {
-    return this.repos.categories.rename(id, patch);
+    const renamed = await this.repos.categories.rename(id, patch);
+    // 分类名进入搜索索引，改名后旧关键词不应再命中。
+    await this.rebuildSearchIndex();
+    return renamed;
   }
 
   async removeCategory(id: string, migrateTo: string | null): Promise<{ movedBookmarks: number }> {
@@ -246,7 +285,13 @@ export class WorkspaceService {
   }
 
   async setPinnedCategories(ids: string[]): Promise<AppSettings> {
-    return this.repos.settings.updateApp({ pinnedCategoryIds: ids });
+    const unique = [...new Set(ids)];
+    if (unique.length > LIMITS.pinnedCategories) {
+      throw new AppError('INVALID_INPUT', `最多置顶 ${LIMITS.pinnedCategories} 个分类。`);
+    }
+    const categories = await this.repos.categories.list();
+    const known = new Set(categories.map((category) => category.id));
+    return this.repos.settings.updateApp({ pinnedCategoryIds: unique.filter((id) => known.has(id)) });
   }
 
   async createTag(name: string): Promise<Tag> {

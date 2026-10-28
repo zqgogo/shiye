@@ -287,9 +287,11 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
 }
 
 export function SearchPage() {
-  const { query, service, data } = useWorkspace();
+  const { query, service, data, toast } = useWorkspace();
   const [hits, setHits] = useState<{ bookmarkId: string; score: number }[] | null>(null);
   const [error, setError] = useState('');
+  const [scope, setScope] = useState('');
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -299,9 +301,12 @@ export function SearchPage() {
     }
     const timer = window.setTimeout(() => {
       service
-        .search(query)
+        .search(query, scope ? { categoryId: scope } : undefined)
         .then((result) => {
-          if (!cancelled) setHits(result);
+          if (!cancelled) {
+            setError('');
+            setHits(result);
+          }
         })
         .catch(() => {
           if (!cancelled) setError('索引重建失败，请稍后重试。');
@@ -311,15 +316,48 @@ export function SearchPage() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [query, service, data.bookmarks]);
+  }, [query, service, data.bookmarks, scope, reloadKey]);
 
   const items = (hits ?? [])
     .map((hit) => data.bookmarks.find((bookmark) => bookmark.id === hit.bookmarkId))
     .filter((bookmark): bookmark is Bookmark => Boolean(bookmark));
 
+  const scopeName = scope
+    ? data.categories.find((category) => category.id === scope)?.name ?? '当前分类'
+    : '全库';
+
   return (
     <>
-      <PageHeader title="搜索结果" description={`关键词「${query}」，覆盖标题、网址、描述、用途、备注、选中文字、分类与标签。`} />
+      <PageHeader
+        title="搜索结果"
+        description={`关键词「${query}」在${scopeName}内检索，覆盖标题、网址、描述、用途、备注、选中文字、分类与标签。`}
+      />
+      <div className="toolbar">
+        <select aria-label="检索范围" value={scope} onChange={(event) => setScope(event.target.value)}>
+          <option value="">全库</option>
+          {data.categories.map((category) => (
+            <option key={category.id} value={category.id}>
+              {category.name}
+            </option>
+          ))}
+        </select>
+        <span className="micro">匹配 {items.length} 条</span>
+        <span className="spacer" />
+        <button
+          className="btn small"
+          onClick={async () => {
+            try {
+              const result = await service.rebuildSearchIndex();
+              setReloadKey((value) => value + 1);
+              toast(`索引已重建，共 ${result.documents} 条。`);
+            } catch {
+              setError('索引重建失败，请稍后重试。');
+            }
+          }}
+        >
+          重建索引
+        </button>
+      </div>
       {error ? <Notice tone="danger">{error}</Notice> : null}
       {hits === null ? (
         <div className="panel">
@@ -332,7 +370,7 @@ export function SearchPage() {
           items={items}
           empty={{
             title: '没有匹配的收藏',
-            description: '换个关键词，或者清空搜索回到全部收藏。',
+            description: '换个关键词、换检索范围，或者清空搜索回到全部收藏。',
           }}
         />
       )}
@@ -344,7 +382,15 @@ export function ReadingPage() {
   const { data, service, run, openModal, openBookmark, navigate } = useWorkspace();
   const [lastCompleted, setLastCompleted] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const items = [...data.pendingReading].sort((a, b) => b.addedAt.localeCompare(a.addedAt));
+  const [search, setSearch] = useState('');
+  const pending = [...data.pendingReading].sort((a, b) => b.addedAt.localeCompare(a.addedAt));
+  // 待看独立搜索：只查队列本身，不混入收藏库。
+  const term = search.trim().toLowerCase();
+  const items = term
+    ? pending.filter((item) =>
+        [item.title, item.originalUrl, item.note ?? ''].join(' ').toLowerCase().includes(term)
+      )
+    : pending;
 
   const complete = async (id: string) => {
     setBusy(true);
@@ -385,18 +431,47 @@ export function ReadingPage() {
         ) : null}
       </Notice>
 
+      <div className="toolbar">
+        <input
+          placeholder="搜索待看的标题、网址或备注…"
+          aria-label="搜索待看"
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+        />
+        <span className="micro">
+          {term ? `匹配 ${items.length} / 共 ${pending.length} 条` : `共 ${pending.length} 条`}
+        </span>
+        {term ? (
+          <>
+            <span className="spacer" />
+            <button className="btn small" onClick={() => setSearch('')}>
+              清空搜索
+            </button>
+          </>
+        ) : null}
+      </div>
+
       <div className="listbox">
         <div className="listhead">
           <span>待看的内容</span>
           <span>{items.length} 条 · 最近加入在前</span>
         </div>
         {items.length === 0 ? (
-          <EmptyState
-            title="待看清单是空的"
-            description="下次不舍得关闭的页面，先放在这里。"
-            actionLabel="＋ 添加待看"
-            onAction={() => openModal({ kind: 'add-reading' })}
-          />
+          term ? (
+            <EmptyState
+              title="没有匹配的待看"
+              description="换个关键词，或清空搜索看完整队列。"
+              actionLabel="清空搜索"
+              onAction={() => setSearch('')}
+            />
+          ) : (
+            <EmptyState
+              title="待看清单是空的"
+              description="下次不舍得关闭的页面，先放在这里。"
+              actionLabel="＋ 添加待看"
+              onAction={() => openModal({ kind: 'add-reading' })}
+            />
+          )
         ) : (
           items.map((item) => {
             const linked = data.bookmarks.find((bookmark) => bookmark.canonicalUrl === item.canonicalUrl);

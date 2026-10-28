@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   LIMITS,
   codePointLength,
@@ -501,6 +501,23 @@ export function AskPage() {
 
   const eligible = data.bookmarks.filter((bookmark) => isAiEligible(bookmark));
   const chosen = eligible.filter((bookmark) => selected.has(bookmark.id));
+
+  /**
+   * 隐私开关或删除状态一变，已不合格的资料必须立即移出选择集。
+   * 否则「已选 N 条」会把看不见的条目算进去，与真正能生成的资料不一致。
+   */
+  useEffect(() => {
+    setSelected((previous) => {
+      const allowed = new Set(data.bookmarks.filter((bookmark) => isAiEligible(bookmark)).map((bookmark) => bookmark.id));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of previous) {
+        if (allowed.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : previous;
+    });
+  }, [data.bookmarks]);
 
   const generate = async () => {
     setError('');

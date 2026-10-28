@@ -57,6 +57,82 @@ describe('本地搜索', () => {
 
     expect(await service.search('   ')).toEqual([]);
   });
+
+  it('检索范围可限定到某个分类，全库不受影响', async () => {
+    const first = await repos.bookmarks.create({ originalUrl: 'https://example.com/scope-a', title: '范围样本 A' });
+    const second = await repos.bookmarks.create({ originalUrl: 'https://example.com/scope-b', title: '范围样本 B' });
+    const category = await repos.categories.create('范围分类');
+    await repos.bookmarks.update(first.id, first.localRevision, { categoryId: category.id }, 'human');
+
+    const all = await service.search('范围样本');
+    expect(all.length).toBe(2);
+
+    const scoped = await service.search('范围样本', { categoryId: category.id });
+    expect(scoped).toHaveLength(1);
+    expect(scoped[0]?.bookmarkId).toBe(first.id);
+
+    const empty = await service.search('范围样本', { categoryId: 'no-such-category' });
+    expect(empty).toEqual([]);
+    expect(second.id).toBeTruthy();
+  });
+
+  it('分类改名后旧关键词失效、新关键词生效', async () => {
+    const category = await repos.categories.create('旧分类名');
+    const bookmark = await repos.bookmarks.create({ originalUrl: 'https://example.com/rename', title: '改名样本' });
+    await repos.bookmarks.update(bookmark.id, bookmark.localRevision, { categoryId: category.id }, 'human');
+
+    expect((await service.search('旧分类名')).some((hit) => hit.bookmarkId === bookmark.id)).toBe(true);
+
+    await service.renameCategory(category.id, { name: '新分类名' });
+
+    expect((await service.search('旧分类名')).some((hit) => hit.bookmarkId === bookmark.id)).toBe(false);
+    expect((await service.search('新分类名')).some((hit) => hit.bookmarkId === bookmark.id)).toBe(true);
+  });
+
+  it('删除进回收站后不再命中，重建索引只统计活跃条目', async () => {
+    const keep = await repos.bookmarks.create({ originalUrl: 'https://example.com/trash-keep', title: '回收站样本 保留' });
+    const drop = await repos.bookmarks.create({ originalUrl: 'https://example.com/trash-drop', title: '回收站样本 删除' });
+    await repos.bookmarks.softDelete(drop.id);
+
+    const hits = await service.search('回收站样本');
+    expect(hits.some((hit) => hit.bookmarkId === drop.id)).toBe(false);
+    expect(hits.some((hit) => hit.bookmarkId === keep.id)).toBe(true);
+
+    const rebuilt = await service.rebuildSearchIndex();
+    expect(rebuilt.documents).toBe(1);
+    expect(rebuilt.builtAt).toBeTruthy();
+  });
+});
+
+describe('分类置顶与引用迁移', () => {
+  it('最多置顶 8 个分类，重复与未知 ID 不占位', async () => {
+    const ids: string[] = [];
+    for (let index = 0; index < 9; index += 1) {
+      const created = await repos.categories.create(`置顶分类 ${index}`);
+      ids.push(created.id);
+    }
+
+    await expect(service.setPinnedCategories(ids)).rejects.toBeInstanceOf(AppError);
+
+    const settings = await service.setPinnedCategories([...ids.slice(0, 3), ids[0] as string, 'unknown-id']);
+    expect(settings.pinnedCategoryIds).toHaveLength(3);
+    expect(settings.pinnedCategoryIds).not.toContain('unknown-id');
+  });
+
+  it('删除分类只迁移引用，不删除收藏', async () => {
+    const source = await repos.categories.create('待删分类');
+    const target = await repos.categories.create('保留分类');
+    const bookmark = await repos.bookmarks.create({ originalUrl: 'https://example.com/migrate', title: '迁移样本' });
+    await repos.bookmarks.update(bookmark.id, bookmark.localRevision, { categoryId: source.id }, 'human');
+
+    const result = await service.removeCategory(source.id, target.id);
+    expect(result.movedBookmarks).toBe(1);
+
+    const after = await repos.bookmarks.get(bookmark.id);
+    expect(after?.categoryId).toBe(target.id);
+    expect(after?.lifeState).toBe('active');
+    expect(await repos.categories.list()).toHaveLength(1);
+  });
 });
 
 describe('提问资料与 AI 回复校验', () => {
