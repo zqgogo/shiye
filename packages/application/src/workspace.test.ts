@@ -304,6 +304,66 @@ describe('提问资料与 AI 回复校验', () => {
     ).rejects.toMatchObject({ code: 'INVALID_AI_REPLY' });
   });
 
+  it('导出后被删除的条目与不存在的分类都只拒绝对应条目', async () => {
+    const a = await repos.bookmarks.create({ originalUrl: 'https://example.com/gone', title: '会被删除的' });
+    const b = await repos.bookmarks.create({ originalUrl: 'https://example.com/keep', title: '保留的' });
+    const pack = await service.buildOrganizePack({ scope: 'all', selectedIds: [] });
+    const nOf = (title: string): number =>
+      pack.items.find((item) => item.bookmark.title === title)?.n ?? 0;
+
+    // 导出之后才删除 A：材料已经在手上，但不能再应用。
+    await repos.bookmarks.softDelete(a.id);
+
+    const checked = await service.validateAiReply({
+      text: JSON.stringify({
+        protocolVersion: 2,
+        batchId: pack.batchId,
+        part: 1,
+        results: [
+          { n: nOf('会被删除的'), domain: 'example.com', titleEcho: '会被删除的', patch: { aiPurpose: 'x' }, reason: 'ok', status: 'ok' },
+          {
+            n: nOf('保留的'),
+            domain: 'example.com',
+            titleEcho: '保留的',
+            patch: { categoryId: '00000000-0000-4000-8000-000000000000' },
+            reason: 'ok',
+            status: 'ok',
+          },
+        ],
+      }),
+      batchId: pack.batchId,
+      items: pack.items,
+      policyVersion: pack.policyVersion,
+    });
+
+    expect(checked.applied).toHaveLength(0);
+    const reasons = checked.rejected.map((item) => item.reason).join(' | ');
+    expect(reasons).toContain('条目已删除');
+    expect(reasons).toContain('建议的分类不存在');
+  });
+
+  it('导出后被删除的条目与不存在的分类都只拒绝对应条目（同一批里的合法项不受影响）', async () => {
+    const keep = await repos.bookmarks.create({ originalUrl: 'https://example.com/ok', title: '合法项' });
+    const category = await repos.categories.create('已存在分类');
+    const pack = await service.buildOrganizePack({ scope: 'all', selectedIds: [] });
+    const n = pack.items.find((item) => item.bookmark.id === keep.id)?.n ?? 0;
+    const checked = await service.validateAiReply({
+      text: JSON.stringify({
+        protocolVersion: 2,
+        batchId: pack.batchId,
+        part: 1,
+        results: [
+          { n, domain: 'example.com', titleEcho: '合法项', patch: { categoryId: category.id }, reason: 'ok', status: 'ok' },
+        ],
+      }),
+      batchId: pack.batchId,
+      items: pack.items,
+      policyVersion: pack.policyVersion,
+    });
+    expect(checked.applied).toHaveLength(1);
+    expect(checked.rejected).toHaveLength(0);
+  });
+
   it('恶意回复（未知字段/脚本字符串）不会被执行或静默应用', async () => {
     await repos.bookmarks.create({ originalUrl: 'https://example.com/m', title: 'M' });
     const pack = await service.buildOrganizePack({ scope: 'all', selectedIds: [] });
@@ -333,6 +393,177 @@ ${JSON.stringify({
     // 字符串本身允许，但只作为纯文本保存；应用时必须由界面转义，不能当 HTML 执行。
     expect(checked.applied).toHaveLength(1);
     expect(checked.applied[0]?.patch.aiPurpose).toContain('<img');
+  });
+});
+
+describe('手动交接的批次持久化与撤销', () => {
+  /** 造一条收藏、导出材料包，并返回一条只改分类与用途的合法回复。 */
+  async function prepare(batchTitle = '应用样本') {
+    const bookmark = await repos.bookmarks.create({
+      originalUrl: `https://example.com/handoff-${encodeURIComponent(batchTitle)}`,
+      title: batchTitle,
+      note: '人工备注不该被改',
+    });
+    const category = await repos.categories.create(`整理后-${batchTitle}`);
+    const pack = await service.buildOrganizePack({ scope: 'all', selectedIds: [] });
+    const target = pack.items.find((item) => item.bookmark.id === bookmark.id);
+    expect(target).toBeTruthy();
+    const reply = {
+      protocolVersion: 2,
+      batchId: pack.batchId,
+      part: 1,
+      results: [
+        {
+          n: target!.n,
+          domain: 'example.com',
+          titleEcho: batchTitle,
+          patch: { categoryId: category.id, aiPurpose: '用于整理' },
+          reason: '内容匹配',
+          status: 'ok',
+        },
+      ],
+    };
+    const checked = await service.validateAiReply({
+      text: JSON.stringify(reply),
+      batchId: pack.batchId,
+      items: pack.items,
+      policyVersion: pack.policyVersion,
+    });
+    return { bookmark, category, pack, checked };
+  }
+
+  it('批次与编号映射落库，刷新后可续接同一批', async () => {
+    const bookmark = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/resume',
+      title: '续接样本',
+    });
+    const pack = await service.buildOrganizePack({ scope: 'all', selectedIds: [] });
+
+    const stored = await repos.handoff.listItems(pack.batchId);
+    expect(stored).toHaveLength(pack.items.length);
+    expect(stored[0]).toMatchObject({
+      bookmarkId: bookmark.id,
+      baseLocalRevision: bookmark.localRevision,
+    });
+    expect(stored[0]?.inputHash).toHaveLength(64);
+
+    // 模拟刷新：只从库里读，不依赖内存里的 pack。
+    const found = await service.findResumableHandoff();
+    expect(found.status).toBe('ok');
+    if (found.status !== 'ok') throw new Error('应当可以续接');
+    expect(found.batchId).toBe(pack.batchId);
+    expect(found.materialText).toBe(pack.materialText);
+    expect(found.items.map((item) => item.bookmark.id)).toEqual([bookmark.id]);
+    expect(found.invalidCount).toBe(0);
+  });
+
+  it('换主库或缺少编号映射时明确拒绝续接', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/stale', title: '换库样本' });
+    const pack = await service.buildOrganizePack({ scope: 'all', selectedIds: [] });
+
+    const row = await db.settings.get('app');
+    const value = { ...(row!.value as Record<string, unknown>), libraryId: 'another-library' };
+    await db.settings.put({ key: 'app', value });
+    const stale = await service.findResumableHandoff();
+    expect(stale.status).toBe('stale');
+    if (stale.status === 'stale') expect(stale.reason).toContain('另一个主库');
+
+    await db.settings.put({ key: 'app', value: row!.value as Record<string, unknown> });
+    await db.handoffItems.clear();
+    const missing = await service.findResumableHandoff();
+    expect(missing.status).toBe('stale');
+    if (missing.status === 'stale') expect(missing.reason).toContain('编号映射');
+    expect(pack.batchId).toBeTruthy();
+  });
+
+  it('应用只写分类与 AI 用途，日志留下前后值，撤销可原样还原', async () => {
+    const { bookmark, category, pack, checked } = await prepare('应用样本');
+    expect(checked.applied).toHaveLength(1);
+
+    const outcome = await service.applySuggestions(
+      pack.batchId,
+      checked.applied.map((item) => ({ n: item.n, bookmark: item.bookmark, patch: item.patch }))
+    );
+    expect(outcome.applied).toHaveLength(1);
+    expect(outcome.skipped).toHaveLength(0);
+
+    const after = await repos.bookmarks.get(bookmark.id);
+    expect(after?.categoryId).toBe(category.id);
+    expect(after?.aiPurpose).toBe('用于整理');
+    // 授权之外的字段一个都不许动。
+    expect(after?.note).toBe('人工备注不该被改');
+    expect(after?.inboxUnread).toBe(bookmark.inboxUnread);
+    expect(after?.privacy).toEqual(bookmark.privacy);
+
+    const changes = await repos.handoff.listAppliedChanges(pack.batchId);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]?.before['categoryId']).toBeNull();
+    expect(changes[0]?.after['categoryId']).toBe(category.id);
+    expect(changes[0]?.changedFields.sort()).toEqual(['aiPurpose', 'categoryId']);
+
+    // 已应用的批次不再出现在可续接列表里。
+    expect((await service.findResumableHandoff()).status).toBe('none');
+
+    const reverted = await service.revertBatch(pack.batchId);
+    expect(reverted.reverted).toBe(1);
+    expect(reverted.conflicts).toHaveLength(0);
+    const restored = await repos.bookmarks.get(bookmark.id);
+    expect(restored?.categoryId).toBeNull();
+    expect(restored?.aiPurpose).toBe('');
+    expect(restored?.note).toBe('人工备注不该被改');
+  });
+
+  it('应用后又被人修改的条目不撤销，记为冲突并保留修改', async () => {
+    const { bookmark, pack, checked } = await prepare('冲突样本');
+    await service.applySuggestions(
+      pack.batchId,
+      checked.applied.map((item) => ({ n: item.n, bookmark: item.bookmark, patch: item.patch }))
+    );
+
+    const mid = await repos.bookmarks.get(bookmark.id);
+    await repos.bookmarks.update(mid!.id, mid!.localRevision, { note: '应用之后我自己改的' }, 'human');
+
+    const reverted = await service.revertBatch(pack.batchId);
+    expect(reverted.reverted).toBe(0);
+    expect(reverted.conflicts).toHaveLength(1);
+    expect(reverted.conflicts[0]?.reason).toContain('又被修改');
+
+    const kept = await repos.bookmarks.get(bookmark.id);
+    expect(kept?.note).toBe('应用之后我自己改的');
+    expect(kept?.aiPurpose).toBe('用于整理');
+  });
+
+  it('已应用或已失效的批次不能再次校验', async () => {
+    const { pack, checked } = await prepare('重复批次样本');
+    await service.applySuggestions(
+      pack.batchId,
+      checked.applied.map((item) => ({ n: item.n, bookmark: item.bookmark, patch: item.patch }))
+    );
+    await expect(
+      service.validateAiReply({
+        text: JSON.stringify({ protocolVersion: 2, batchId: pack.batchId, part: 1, results: [] }),
+        batchId: pack.batchId,
+        items: pack.items,
+        policyVersion: pack.policyVersion,
+      })
+    ).rejects.toMatchObject({ code: 'ALREADY_APPLIED' });
+
+    await service.discardHandoff(pack.batchId);
+    expect((await service.findResumableHandoff()).status).toBe('none');
+  });
+
+  it('本机没有这批交接时拒绝校验，未知批次不会被凭空应用', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/unknown', title: '未知批次' });
+    const pack = await service.buildOrganizePack({ scope: 'all', selectedIds: [] });
+    await db.handoffBatches.clear();
+    await expect(
+      service.validateAiReply({
+        text: JSON.stringify({ protocolVersion: 2, batchId: pack.batchId, part: 1, results: [] }),
+        batchId: pack.batchId,
+        items: pack.items,
+        policyVersion: pack.policyVersion,
+      })
+    ).rejects.toMatchObject({ code: 'INVALID_AI_REPLY' });
   });
 });
 

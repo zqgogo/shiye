@@ -1,10 +1,14 @@
 import type {
   AISuggestionPatch,
   AppSettings,
+  AppliedChange,
   BackupDocument,
   Bookmark,
   BookmarkPatch,
   Category,
+  HandoffBatch,
+  HandoffItem,
+  HandoffBatchStatus,
   ImportBatch,
   ImportDestination,
   ImportRow,
@@ -79,6 +83,14 @@ export interface BookmarkRepository {
     patch: AISuggestionPatch,
     context: { taskId: string; batchId: string }
   ): Promise<{ status: 'applied' | 'unchanged'; bookmark: Bookmark }>;
+  /**
+   * 撤销一条应用记录：把 before 值写回去。
+   * 只有在这条收藏应用后没再被修改时才允许，否则返回冲突，不能覆盖后续人工修改。
+   */
+  revertChange(changeId: string): Promise<{
+    status: 'reverted' | 'conflict' | 'skipped';
+    reason?: string;
+  }>;
 }
 
 export interface ReadingRepository {
@@ -142,6 +154,42 @@ export interface ImportRepository {
   listBatches(): Promise<ImportBatch[]>;
 }
 
+export interface CreateHandoffParams {
+  id: string;
+  protocolVersion: 2;
+  policyVersion: number;
+  libraryId: string;
+  materialText: string;
+  items: {
+    n: number;
+    part: number;
+    bookmarkId: string;
+    baseRevision: number;
+    baseLocalRevision: number;
+    inputHash: string;
+  }[];
+}
+
+export interface HandoffRepository {
+  /** 批次与编号映射必须落库：刷新、重开浏览器后仍要能续接同一批。 */
+  createBatch(params: CreateHandoffParams): Promise<HandoffBatch>;
+  getBatch(id: string): Promise<HandoffBatch | undefined>;
+  listBatches(limit?: number): Promise<HandoffBatch[]>;
+  listItems(batchId: string): Promise<HandoffItem[]>;
+  /** 校验回复后回写每条的状态、建议与原因。 */
+  saveItemResults(
+    batchId: string,
+    results: {
+      n: number;
+      status: HandoffItem['status'];
+      patch: AISuggestionPatch | null;
+      reason: string;
+    }[]
+  ): Promise<void>;
+  setStatus(batchId: string, status: HandoffBatchStatus): Promise<void>;
+  listAppliedChanges(batchId: string): Promise<AppliedChange[]>;
+}
+
 export interface RestoreResult {
   mode: 'merge' | 'replace';
   bookmarksAdded: number;
@@ -169,5 +217,6 @@ export interface Repositories {
   tags: TagRepository;
   settings: SettingsRepository;
   imports: ImportRepository;
+  handoff: HandoffRepository;
   backup: BackupRepository;
 }

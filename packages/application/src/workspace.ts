@@ -437,10 +437,12 @@ export class WorkspaceService {
   ): Promise<{
     applied: { n: number; bookmark: Bookmark }[];
     skipped: { n: number; reason: string }[];
+    taskId: string;
   }> {
     const applied: { n: number; bookmark: Bookmark }[] = [];
     const skipped: { n: number; reason: string }[] = [];
     const taskId = newId();
+    const itemResults: { n: number; status: 'applied' | 'skipped'; patch: null; reason: string }[] = [];
     for (const item of items) {
       const patch = item.patch;
       const cleaned: {
@@ -458,13 +460,24 @@ export class WorkspaceService {
           cleaned,
           { taskId, batchId }
         );
-        if (result.status === 'applied') applied.push({ n: item.n, bookmark: result.bookmark });
-        else skipped.push({ n: item.n, reason: '内容没有变化' });
+        if (result.status === 'applied') {
+          applied.push({ n: item.n, bookmark: result.bookmark });
+          itemResults.push({ n: item.n, status: 'applied', patch: null, reason: '' });
+        } else {
+          skipped.push({ n: item.n, reason: '内容没有变化' });
+          itemResults.push({ n: item.n, status: 'skipped', patch: null, reason: '内容没有变化' });
+        }
       } catch (error) {
-        skipped.push({ n: item.n, reason: toUserMessage(error) });
+        const reason = toUserMessage(error);
+        skipped.push({ n: item.n, reason });
+        itemResults.push({ n: item.n, status: 'skipped', patch: null, reason });
       }
     }
-    return { applied, skipped };
+    if (itemResults.length) await this.repos.handoff.saveItemResults(batchId, itemResults);
+    if (applied.length > 0) {
+      await this.repos.handoff.setStatus(batchId, skipped.length === 0 ? 'applied' : 'partial');
+    }
+    return { applied, skipped, taskId };
   }
 
   /** 手动整理材料包：隐私过滤、白名单字段、编号映射与指纹在本地生成。 */
@@ -485,6 +498,7 @@ export class WorkspaceService {
       this.repos.tags.list(),
       this.repos.settings.getPolicy(),
     ]);
+    const settings = await this.repos.settings.getApp();
     const eligible = bookmarks.filter(
       (bookmark) => !bookmark.privacy.localOnly && !bookmark.privacy.aiBlocked && !bookmark.deletedAt
     );
@@ -522,6 +536,23 @@ export class WorkspaceService {
       items,
     });
     const materialText = JSON.stringify(material, null, 2);
+    // 批次与编号映射落库：刷新或重开浏览器后仍能续接这一批，
+    // 而不是靠内存里那份 state（一刷新就丢，回复里的编号就没法对回收藏）。
+    await this.repos.handoff.createBatch({
+      id: batchId,
+      protocolVersion: AI_PROTOCOL_VERSION,
+      policyVersion: policy.policyVersion,
+      libraryId: settings.libraryId,
+      materialText,
+      items: hashes.map((entry) => ({
+        n: entry.n,
+        part: 1,
+        bookmarkId: entry.bookmark.id,
+        baseRevision: entry.bookmark.revision,
+        baseLocalRevision: entry.bookmark.localRevision,
+        inputHash: entry.inputHash,
+      })),
+    });
     return {
       batchId,
       materialText,
@@ -529,6 +560,91 @@ export class WorkspaceService {
       policyVersion: policy.policyVersion,
       notice: warning,
     };
+  }
+
+  /**
+   * 找一批还没走完的整理交接。
+   *
+   * 三种结论分开返回：没有在途批次、可以续接、以及不能续接的原因。
+   * 「换主库」必须明确拒绝——批次里存的是另一套库的收藏 ID 与指纹，
+   * 拿到当前库上应用只会张冠李戴。
+   */
+  async findResumableHandoff(): Promise<
+    | { status: 'none' }
+    | { status: 'stale'; batchId: string; reason: string }
+    | {
+        status: 'ok';
+        batchId: string;
+        materialText: string;
+        policyVersion: number;
+        createdAt: string;
+        items: { n: number; bookmark: Bookmark; inputHash: string }[];
+        invalidCount: number;
+      }
+  > {
+    const [batches, settings] = await Promise.all([
+      this.repos.handoff.listBatches(10),
+      this.repos.settings.getApp(),
+    ]);
+    const pending = batches.find(
+      (batch) => batch.status === 'exported' || batch.status === 'partial'
+    );
+    if (!pending) return { status: 'none' };
+    if (pending.libraryId !== settings.libraryId) {
+      return { status: 'stale', batchId: pending.id, reason: '这批交接来自另一个主库，不能在这里续接。' };
+    }
+    if (!pending.materialText) {
+      return { status: 'stale', batchId: pending.id, reason: '批次缺少材料原文，请重新生成。' };
+    }
+    const stored = await this.repos.handoff.listItems(pending.id);
+    if (stored.length === 0) {
+      return { status: 'stale', batchId: pending.id, reason: '批次缺少编号映射，请重新生成。' };
+    }
+    const items: { n: number; bookmark: Bookmark; inputHash: string }[] = [];
+    let invalidCount = 0;
+    for (const entry of stored) {
+      const bookmark = await this.repos.bookmarks.get(entry.bookmarkId);
+      if (!bookmark || bookmark.deletedAt) {
+        invalidCount += 1;
+        continue;
+      }
+      items.push({ n: entry.n, bookmark, inputHash: entry.inputHash });
+    }
+    return {
+      status: 'ok',
+      batchId: pending.id,
+      materialText: pending.materialText,
+      policyVersion: pending.policyVersion,
+      createdAt: pending.createdAt,
+      items,
+      invalidCount,
+    };
+  }
+
+  /** 丢弃在途批次：不删除日志，只标成失效，避免它继续被当成「可续接」。 */
+  async discardHandoff(batchId: string): Promise<void> {
+    await this.repos.handoff.setStatus(batchId, 'invalidated');
+  }
+
+  /** 撤销一批已应用的建议，逐条报告冲突，绝不覆盖应用之后的人工修改。 */
+  async revertBatch(batchId: string): Promise<{
+    reverted: number;
+    conflicts: { bookmarkId: string; reason: string }[];
+  }> {
+    const changes = await this.repos.handoff.listAppliedChanges(batchId);
+    const conflicts: { bookmarkId: string; reason: string }[] = [];
+    let reverted = 0;
+    for (const change of changes) {
+      const result = await this.repos.bookmarks.revertChange(change.id);
+      if (result.status === 'reverted') reverted += 1;
+      else if (result.status === 'conflict') {
+        conflicts.push({ bookmarkId: change.bookmarkId, reason: result.reason ?? '存在冲突' });
+      }
+    }
+    if (conflicts.length === 0) {
+      await this.repos.handoff.setStatus(batchId, 'invalidated');
+    }
+    return { reverted, conflicts };
   }
 
   async buildAskPack(input: {
@@ -587,6 +703,17 @@ export class WorkspaceService {
     }
     if (envelope.data.batchId !== input.batchId) {
       throw new AppError('INVALID_AI_REPLY', '批次编号不匹配，请使用本次导出的材料包。');
+    }
+    const batch = await this.repos.handoff.getBatch(input.batchId);
+    if (!batch) {
+      throw new AppError('INVALID_AI_REPLY', '本机没有这批交接的记录，请重新生成材料包。');
+    }
+    const settings = await this.repos.settings.getApp();
+    if (batch.libraryId !== settings.libraryId) {
+      throw new AppError('INVALID_AI_REPLY', '这批交接来自另一个主库，不能在这里校验。');
+    }
+    if (batch.status === 'applied' || batch.status === 'invalidated') {
+      throw new AppError('ALREADY_APPLIED', '这批交接已经应用或已失效，请重新生成材料包。');
     }
     const policy = await this.repos.settings.getPolicy();
     if (policy.policyVersion !== input.policyVersion) {
@@ -671,6 +798,22 @@ export class WorkspaceService {
     }
     const missing = input.items.filter((item) => !seen.has(item.n));
     if (missing.length) warnings.push(`有 ${missing.length} 条未返回结果，保持原样。`);
+
+    // 校验结论也要落库：刷新后续接时，预览状态与拒绝原因不该重新算一遍。
+    await this.repos.handoff.saveItemResults(input.batchId, [
+      ...applied.map((item) => ({
+        n: item.n,
+        status: 'pending' as const,
+        patch: item.patch,
+        reason: item.reason,
+      })),
+      ...rejected.map((item) => ({
+        n: item.n,
+        status: 'invalid' as const,
+        patch: null,
+        reason: item.reason,
+      })),
+    ]);
     return { applied, rejected, warnings };
   }
 }

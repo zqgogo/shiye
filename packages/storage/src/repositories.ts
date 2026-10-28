@@ -12,9 +12,13 @@ import {
 import type {
   AIField,
   AISuggestionPatch,
+  AppliedChange,
   Bookmark,
   BookmarkPatch,
   Category,
+  HandoffBatch,
+  HandoffBatchStatus,
+  HandoffItem,
   ImportBatch,
   ImportRow,
   Policy,
@@ -31,7 +35,9 @@ import type {
   CommitImportResult,
   ConvertReadingParams,
   CreateBookmarkParams,
+  CreateHandoffParams,
   CreateReadingParams,
+  HandoffRepository,
   ImportRepository,
   ReadingRepository,
   Repositories,
@@ -428,6 +434,75 @@ export class DexieBookmarkRepository implements BookmarkRepository {
       });
       return { status: 'applied', bookmark: next };
     });
+  }
+
+  /**
+   * 撤销一条应用记录。
+   *
+   * 只有「应用之后没人再动过这条收藏」才允许撤销：`appliedLocalRevision` 与应用时的
+   * 版本对齐才写回 before 值，否则返回冲突。撤销本身也递增版本，于是撤销本身
+   * 也能被下一次撤销的反向检查识别出来，不会互相覆盖。
+   */
+  async revertChange(
+    changeId: string
+  ): Promise<{ status: 'reverted' | 'conflict' | 'skipped'; reason?: string }> {
+    return this.db.transaction(
+      'rw',
+      [this.db.bookmarks, this.db.appliedChanges, this.db.categories, this.db.tags],
+      async () => {
+        const change = await this.db.appliedChanges.get(changeId);
+        if (!change) throw new AppError('NOT_FOUND', '没有找到这条应用记录。');
+        if (change.undoneAt) return { status: 'skipped', reason: '这次修改已经撤销过。' };
+        const current = await this.db.bookmarks.get(change.bookmarkId);
+        if (!current) return { status: 'skipped', reason: '收藏已不存在，无法撤销。' };
+        if (current.deletedAt) return { status: 'skipped', reason: '收藏在回收站中，无法撤销。' };
+        if (current.localRevision !== change.appliedLocalRevision) {
+          return { status: 'conflict', reason: '应用之后这条收藏又被修改过，撤销会覆盖那些修改。' };
+        }
+
+        const next: Bookmark = { ...current };
+        for (const field of change.changedFields) {
+          if (field === 'categoryId') {
+            if (current.lockedFields.includes('categoryId')) {
+              return { status: 'conflict', reason: '分类已被人工锁定，撤销会改动锁定字段。' };
+            }
+            const before = (change.before['categoryId'] ?? null) as string | null;
+            if (before) {
+              const category = await this.db.categories.get(before);
+              if (!category) {
+                return { status: 'conflict', reason: '原来的分类已被删除，无法还原。' };
+              }
+            }
+            next.categoryId = before;
+          } else if (field === 'tagIds') {
+            if (current.lockedFields.includes('tagIds')) {
+              return { status: 'conflict', reason: '标签已被人工锁定，撤销会改动锁定字段。' };
+            }
+            const before = (change.before['tagIds'] ?? []) as string[];
+            if (before.length) {
+              const found = await this.db.tags.bulkGet(before);
+              if (found.some((tag) => !tag)) {
+                return { status: 'conflict', reason: '原来的标签已被删除，无法还原。' };
+              }
+            }
+            next.tagIds = [...before];
+          } else if (field === 'aiPurpose') {
+            if (current.lockedFields.includes('aiPurpose')) {
+              return { status: 'conflict', reason: 'AI 用途已被人工锁定，撤销会改动锁定字段。' };
+            }
+            next.aiPurpose = (change.before['aiPurpose'] ?? '') as string;
+          }
+        }
+
+        next.revision = current.revision + 1;
+        next.localRevision = current.localRevision + 1;
+        next.updatedAt = nowIso();
+        Object.assign(next, deriveIndexFields(next));
+        await this.db.bookmarks.put(next);
+        await this.db.appliedChanges.update(changeId, { undoneAt: next.updatedAt });
+        return { status: 'reverted' };
+      }
+    );
   }
 
   private async assertReferences(categoryId: string | null, tagIds: string[]): Promise<void> {
@@ -967,6 +1042,83 @@ export class DexieImportRepository implements ImportRepository {
   }
 }
 
+export class DexieHandoffRepository implements HandoffRepository {
+  constructor(private readonly db: ShiyeDB) {}
+
+  async createBatch(params: CreateHandoffParams): Promise<HandoffBatch> {
+    return this.db.transaction('rw', [this.db.handoffBatches, this.db.handoffItems], async () => {
+      const batch: HandoffBatch = {
+        id: params.id,
+        protocolVersion: params.protocolVersion,
+        createdAt: nowIso(),
+        policyVersion: params.policyVersion,
+        libraryId: params.libraryId,
+        status: 'exported',
+        parts: 1,
+        itemCount: params.items.length,
+        materialText: params.materialText,
+      };
+      await this.db.handoffBatches.put(batch);
+      await this.db.handoffItems.bulkPut(
+        params.items.map((item) => ({
+          batchId: params.id,
+          n: item.n,
+          part: item.part,
+          bookmarkId: item.bookmarkId,
+          baseRevision: item.baseRevision,
+          baseLocalRevision: item.baseLocalRevision,
+          inputHash: item.inputHash,
+          status: 'pending' as const,
+          patch: null,
+          reason: '',
+        }))
+      );
+      return batch;
+    });
+  }
+
+  async getBatch(id: string): Promise<HandoffBatch | undefined> {
+    return this.db.handoffBatches.get(id);
+  }
+
+  async listBatches(limit = 10): Promise<HandoffBatch[]> {
+    return this.db.handoffBatches.orderBy('createdAt').reverse().limit(limit).toArray();
+  }
+
+  async listItems(batchId: string): Promise<HandoffItem[]> {
+    const items = await this.db.handoffItems.where('[batchId+n]').between([batchId, -Infinity], [batchId, Infinity]).toArray();
+    return items.sort((a, b) => a.n - b.n);
+  }
+
+  async saveItemResults(
+    batchId: string,
+    results: { n: number; status: HandoffItem['status']; patch: AISuggestionPatch | null; reason: string }[]
+  ): Promise<void> {
+    await this.db.transaction('rw', this.db.handoffItems, async () => {
+      for (const result of results) {
+        await this.db.handoffItems.update([batchId, result.n], {
+          status: result.status,
+          patch: result.patch,
+          reason: result.reason,
+        });
+      }
+    });
+  }
+
+  async setStatus(batchId: string, status: HandoffBatchStatus): Promise<void> {
+    await this.db.handoffBatches.update(batchId, { status });
+  }
+
+  async listAppliedChanges(batchId: string): Promise<AppliedChange[]> {
+    // appliedChanges 的索引只有 id / taskId / bookmarkId / appliedAt，没有 batchId；
+    // 应用日志的总量由批次数决定（每批最多一批条目），在内存里筛比加索引更稳妥。
+    const changes = await this.db.appliedChanges.toArray();
+    return changes
+      .filter((change) => change.batchId === batchId && !change.undoneAt)
+      .sort((a, b) => a.appliedAt.localeCompare(b.appliedAt));
+  }
+}
+
 export function createRepositories(db: ShiyeDB, backup?: BackupRepository): Repositories {
   return {
     bookmarks: new DexieBookmarkRepository(db),
@@ -975,6 +1127,7 @@ export function createRepositories(db: ShiyeDB, backup?: BackupRepository): Repo
     tags: new DexieTagRepository(db),
     settings: new DexieSettingsRepository(db),
     imports: new DexieImportRepository(db),
+    handoff: new DexieHandoffRepository(db),
     backup: backup ?? createBackupRepository(db),
   };
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   LIMITS,
   codePointLength,
@@ -119,10 +119,80 @@ export function OrganizePage() {
   const [excluded, setExcluded] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
   const [appliedCount, setAppliedCount] = useState<number | null>(null);
+  const [resume, setResume] = useState<
+    | { kind: 'none' }
+    | { kind: 'stale'; batchId: string; reason: string }
+    | {
+        kind: 'ok';
+        batchId: string;
+        materialText: string;
+        policyVersion: number;
+        createdAt: string;
+        items: { n: number; bookmark: Bookmark; inputHash: string }[];
+        invalidCount: number;
+      }
+  >({ kind: 'none' });
+  const [revertResult, setRevertResult] = useState<{
+    reverted: number;
+    conflicts: { bookmarkId: string; reason: string }[];
+  } | null>(null);
+  const resumeChecked = useRef(false);
 
   const eligibleCount = data.bookmarks.filter(
     (bookmark) => isAiEligible(bookmark) && (scope === 'all' || !bookmark.categoryId)
   ).length;
+
+  /**
+   * 挂载时查一次在途批次：材料包与编号映射已落库，刷新不该让用户从头再导一遍。
+   * 换主库或映射缺失时明确给出原因，而不是静默当成没有。
+   */
+  useEffect(() => {
+    if (resumeChecked.current) return;
+    resumeChecked.current = true;
+    void service.findResumableHandoff().then((found) => {
+      if (found.status === 'none') return;
+      if (found.status === 'stale') {
+        setResume({ kind: 'stale', batchId: found.batchId, reason: found.reason });
+        return;
+      }
+      setResume({
+        kind: 'ok',
+        batchId: found.batchId,
+        materialText: found.materialText,
+        policyVersion: found.policyVersion,
+        createdAt: found.createdAt,
+        items: found.items,
+        invalidCount: found.invalidCount,
+      });
+    });
+  }, [service]);
+
+  const continueResume = () => {
+    if (resume.kind !== 'ok') return;
+    setPack({
+      batchId: resume.batchId,
+      materialText: resume.materialText,
+      items: resume.items,
+      policyVersion: resume.policyVersion,
+      notice:
+        resume.invalidCount > 0
+          ? `有 ${resume.invalidCount} 条资料已删除，导入映射时会自动拒绝。`
+          : null,
+    });
+    setReply('');
+    setAccepted([]);
+    setRejected([]);
+    setWarnings([]);
+    setAppliedCount(null);
+    setRevertResult(null);
+    setStep(2);
+  };
+
+  const dropResume = async () => {
+    if (resume.kind === 'none') return;
+    await run(() => service.discardHandoff(resume.batchId), '已丢弃上次的交接批次。');
+    setResume({ kind: 'none' });
+  };
 
   const generate = async () => {
     setBusy(true);
@@ -139,6 +209,8 @@ export function OrganizePage() {
     setRejected([]);
     setWarnings([]);
     setAppliedCount(null);
+    setRevertResult(null);
+    setResume({ kind: 'none' });
   };
 
   const validate = async () => {
@@ -178,10 +250,31 @@ export function OrganizePage() {
     );
     setBusy(false);
     setAppliedCount(outcome.applied.length);
+    setRevertResult(null);
     await run(async () => undefined);
     toast(
       `已应用 ${outcome.applied.length} 条，跳过 ${outcome.skipped.length} 条。应用日志可用于核对。`
     );
+  };
+
+  const revert = async () => {
+    if (!pack) return;
+    setBusy(true);
+    try {
+      const outcome = await service.revertBatch(pack.batchId);
+      setRevertResult(outcome);
+      await run(async () => undefined);
+      toast(
+        outcome.conflicts.length === 0
+          ? `已撤销 ${outcome.reverted} 条修改。`
+          : `已撤销 ${outcome.reverted} 条，${outcome.conflicts.length} 条存在冲突未撤销。`,
+        outcome.conflicts.length === 0 ? 'ok' : 'error'
+      );
+    } catch (cause) {
+      setError(toUserMessage(cause));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const copyPack = async () => {
@@ -212,6 +305,37 @@ export function OrganizePage() {
           </div>
         ))}
       </div>
+
+      {step === 1 && resume.kind === 'stale' ? (
+        <Notice>
+          上次的交接无法续接：{resume.reason}
+          <button className="btn small" style={{ marginLeft: 12 }} onClick={() => void dropResume()}>
+            清掉这一批
+          </button>
+        </Notice>
+      ) : null}
+
+      {step === 1 && resume.kind === 'ok' ? (
+        <div className="panel" aria-label="在途批次">
+          <h2>上次的交接还在</h2>
+          <p>
+            批次 {resume.batchId.slice(0, 8)}… · {resume.items.length} 条 · 生成于{' '}
+            {new Date(resume.createdAt).toLocaleString('zh-CN')}
+            {resume.invalidCount > 0 ? ` · 其中 ${resume.invalidCount} 条资料已删除` : ''}
+          </p>
+          <p className="micro">
+            材料包与编号映射存在本地，刷新或重开浏览器后可以接着用；换了主库则不能续接。
+          </p>
+          <div className="actions">
+            <button className="btn primary" onClick={continueResume}>
+              继续这一批
+            </button>
+            <button className="btn" onClick={() => void dropResume()}>
+              丢弃
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {step === 1 ? (
         <div className="two">
@@ -362,9 +486,22 @@ export function OrganizePage() {
             <button className="btn primary" onClick={() => void apply()} disabled={busy || accepted.length === 0}>
               {busy ? '应用中…' : '应用勾选项'}
             </button>
+            <button className="btn" onClick={() => void revert()} disabled={busy || appliedCount === null}>
+              撤销本次应用
+            </button>
           </div>
+          {revertResult ? (
+            <div className="notice" aria-label="撤销结果">
+              已撤销 {revertResult.reverted} 条
+              {revertResult.conflicts.length > 0
+                ? `；${revertResult.conflicts.length} 条未撤销（应用后又被修改，不覆盖）`
+                : ''}
+              。
+            </div>
+          ) : null}
           <p className="micro">
-            每条建议单独提交一个事务，并在应用日志中留下前后值与版本；撤销需另做版本保护设计。
+            每条建议单独提交一个事务，并在应用日志中留下前后值与版本；撤销只在「应用后没有再改过」时写回，
+            否则记为冲突并保持现状。
           </p>
         </div>
       ) : null}

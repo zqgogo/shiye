@@ -211,6 +211,12 @@ export interface HandoffBatch {
   status: HandoffBatchStatus;
   parts: number;
   itemCount: number;
+  /**
+   * 实际交给外部 AI 的材料原文。
+   * 刷新后要能原样续接同一批次，不能靠当前数据重新拼——内容一变，
+   * 回复里的编号就对不上当时的输入了。
+   */
+  materialText?: string | undefined;
 }
 
 export interface HandoffItem {

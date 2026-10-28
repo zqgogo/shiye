@@ -17,11 +17,12 @@
     "verify": "npm run typecheck && npm run test && npm run build",
     "verify:browser": "node scripts/verify-p0.mjs",
     "verify:import": "node scripts/verify-p0-import.mjs",
-    "verify:all": "npm run verify && npm run verify:browser && npm run verify:import && npm run verify:p1 && npm run verify:p2 && npm run verify:p3 && npm run verify:p4",
+    "verify:all": "npm run verify && npm run verify:browser && npm run verify:import && npm run verify:p1 && npm run verify:p2 && npm run verify:p3 && npm run verify:p4 && npm run verify:p5",
     "verify:p1": "node scripts/verify-p1.mjs",
     "verify:p2": "node scripts/verify-p2.mjs",
     "verify:p3": "node scripts/verify-p3.mjs",
-    "verify:p4": "node scripts/verify-p4.mjs"
+    "verify:p4": "node scripts/verify-p4.mjs",
+    "verify:p5": "node scripts/verify-p5.mjs"
   },
   "dependencies": {
     "dexie": "4.0.11",
