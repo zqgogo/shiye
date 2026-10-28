@@ -1,5 +1,5 @@
 import {
-  AI_INSTRUCTION,
+  composeOrganizeInstruction,
   toUserMessage,
   AppError,
   BookmarkCreateSchema,
@@ -530,7 +530,8 @@ export class WorkspaceService {
       batchId,
       part: 1,
       policyVersion: policy.policyVersion,
-      instruction: policy.instruction || AI_INSTRUCTION,
+      // 策略决定「怎么分类」，安全条款与输出格式是固定的，不随策略消失。
+      instruction: composeOrganizeInstruction(policy.instruction),
       categories,
       tags,
       items,
@@ -800,20 +801,21 @@ export class WorkspaceService {
     if (missing.length) warnings.push(`有 ${missing.length} 条未返回结果，保持原样。`);
 
     // 校验结论也要落库：刷新后续接时，预览状态与拒绝原因不该重新算一遍。
-    await this.repos.handoff.saveItemResults(input.batchId, [
-      ...applied.map((item) => ({
-        n: item.n,
-        status: 'pending' as const,
-        patch: item.patch,
-        reason: item.reason,
-      })),
-      ...rejected.map((item) => ({
-        n: item.n,
-        status: 'invalid' as const,
-        patch: null,
-        reason: item.reason,
-      })),
-    ]);
+    // 编号映射一行对应一条资料，同一编号可能既被判为可应用、又因重复出现被判无效；
+    // 以第一条可应用的结论为准，否则「后写覆盖前写」会让预览里写着可应用、
+    // 映射里却记成无效，刷新后两处对不上。
+    const conclusions = new Map<
+      number,
+      { n: number; status: 'pending' | 'invalid'; patch: NonNullable<AIReply['results'][number]['patch']> | null; reason: string }
+    >();
+    for (const item of applied) {
+      conclusions.set(item.n, { n: item.n, status: 'pending', patch: item.patch, reason: item.reason });
+    }
+    for (const item of rejected) {
+      if (conclusions.has(item.n)) continue;
+      conclusions.set(item.n, { n: item.n, status: 'invalid', patch: null, reason: item.reason });
+    }
+    await this.repos.handoff.saveItemResults(input.batchId, [...conclusions.values()]);
     return { applied, rejected, warnings };
   }
 }

@@ -53,12 +53,18 @@ function errorText(error) {
   return text.split('\n')[0].slice(0, 240);
 }
 
+/**
+ * 在若干容器里点一个按钮。
+ *
+ * 一个页面上往往不止一个 `.panel`（分类、标签、策略各一块），只取第一个会把
+ * 「保存并升级策略版本」这类按钮漏掉；这里扫全部匹配容器，再按文本精确/包含匹配。
+ */
 async function clickIn(page, container, text) {
   const ok = await page.evaluate(
     (sel, needle) => {
-      const scope = sel ? document.querySelector(sel) : document.body;
-      if (!scope) return false;
-      const nodes = [...scope.querySelectorAll('button, a, [role="button"]')];
+      const scopes = sel ? [...document.querySelectorAll(sel)] : [document.body];
+      if (scopes.length === 0) return false;
+      const nodes = scopes.flatMap((scope) => [...scope.querySelectorAll('button, a, [role="button"]')]);
       const hit =
         nodes.find((node) => (node.textContent ?? '').trim() === needle) ??
         nodes.find((node) => (node.textContent ?? '').trim().includes(needle));
@@ -285,7 +291,7 @@ function organizeSummary(page) {
   });
 }
 
-/** 生成一份整理材料包并返回 JSON 与对应的库内批次。 */
+/** 生成一份整理材料包并返回 JSON、批次号与对应的库内批次。 */
 async function generatePack(page, base) {
   // 上一阶段可能停在整理页的第 2/3 步；只改 hash 不会重新挂载，必须整页重载回第 1 步。
   await reloadWorkspace(page, base, 'organize');
@@ -298,7 +304,8 @@ async function generatePack(page, base) {
   const text = await materialText(page);
   const parsed = JSON.parse(text);
   const stores = await readStores(page, ['handoffBatches', 'handoffItems']);
-  return { text, material: parsed, stores };
+  // batchId 必须一并返回：材料包里才有它，调用方据此拼回复。
+  return { text, material: parsed, batchId: parsed.batchId, stores };
 }
 
 async function submitReply(page, reply) {
@@ -531,7 +538,8 @@ async function main() {
     await sleep(1500);
     const stores = await readStores(page, ['bookmarks', 'appliedChanges', 'handoffBatches']);
     const applied = stores.bookmarks.find((row) => row.id === ctx.ids[T_LIBRARY]);
-    const original = stores.bookmarks.find((row) => row.id === ctx.ids['P5 模板收藏']);
+    // 模板收藏是界面上建的那条，没有记进 ctx.ids，只能按标题找；按 id 找会拿到 undefined。
+    const original = stores.bookmarks.find((row) => row.title === 'P5 模板收藏');
     const change = stores.appliedChanges.find((row) => row.batchId === ctx.batchId);
 
     record(
@@ -547,7 +555,7 @@ async function main() {
     record(
       'P5.3 未勾选的条目保持原样',
       original?.categoryId === null && original?.aiPurpose === '',
-      `模板收藏分类=${original?.categoryId ?? 'null'}`
+      `模板收藏分类=${original?.categoryId ?? 'null'}｜用途=「${original?.aiPurpose ?? '（未找到）'}」`
     );
     record(
       'P5.3 应用日志记录前后值与批次',
@@ -602,8 +610,11 @@ async function main() {
         patch: { categoryId: ctx.categoryId, aiPurpose: PURPOSE },
       }),
     ];
-    await submitReply(page, replyFor(batchId, results));
+    const previewState = await submitReply(page, replyFor(batchId, results));
     await waitForSelectorReady(page, '.diff', 15_000).catch(() => {});
+    if (!previewState.onPreview) {
+      throw new Error(`校验没有进入预览：${previewState.alert || '（无提示）'}`);
+    }
     await clickIn(page, '.panel', '应用勾选项');
     await sleep(1500);
 
@@ -655,12 +666,21 @@ async function main() {
 
   // ---- P5.2 丢弃批次 ----
   phase('P5.2 丢弃后不再提示续接', async () => {
-    await page.reload({ waitUntil: 'domcontentloaded' });
-    await waitForSelectorReady(page, '.brand-mark', 20_000);
-    await goto(page, 'organize', '整理，让收藏各归其位');
-    await sleep(800);
-    await clickIn(page, '[aria-label="在途批次"]', '丢弃');
-    await sleep(1200);
+    // 前面每个阶段都生成过材料包，可能同时留着几批「在途」；横幅一次只显示最新一批，
+    // 丢掉一批还会露出更早的那批。这里逐批丢干净再看横幅。
+    let rounds = 0;
+    for (; rounds < 5; rounds += 1) {
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await waitForSelectorReady(page, '.brand-mark', 20_000);
+      await goto(page, 'organize', '整理，让收藏各归其位');
+      await sleep(800);
+      const hasBanner = await page.evaluate(
+        () => document.querySelector('[aria-label="在途批次"]') !== null
+      );
+      if (!hasBanner) break;
+      await clickIn(page, '[aria-label="在途批次"]', '丢弃');
+      await sleep(1200);
+    }
     await page.reload({ waitUntil: 'domcontentloaded' });
     await waitForSelectorReady(page, '.brand-mark', 20_000);
     await goto(page, 'organize', '整理，让收藏各归其位');
@@ -668,7 +688,11 @@ async function main() {
     const stillThere = await page.evaluate(
       () => document.querySelector('[aria-label="在途批次"]') !== null
     );
-    record('P5.2 丢弃后不再提示续接', stillThere === false, `仍提示=${stillThere}`);
+    record(
+      'P5.2 丢弃后不再提示续接',
+      stillThere === false,
+      `仍提示=${stillThere}｜丢弃轮次=${rounds}`
+    );
   });
 
   // ---- P5.6 策略变化使旧结果失效 ----
@@ -720,7 +744,7 @@ async function main() {
       await clickIn(page, '[aria-label="在途批次"]', '继续这一批');
       await waitForSelectorReady(page, 'textarea[aria-label="AI 回复"]', 15_000);
     }
-    await submitReply(
+    const privacyState = await submitReply(
       page,
       replyFor(batchId, [suggestion(n, { titleEcho: T_LIBRARY, patch: { aiPurpose: '不该应用' } })])
     );
@@ -732,7 +756,7 @@ async function main() {
     record(
       'P5.6 隐私开关变化后旧回复被拒绝',
       reasons.includes('隐私设置已禁止发送') && target?.aiPurpose !== '不该应用',
-      `原因=${reasons.slice(0, 100)}｜用途=「${target?.aiPurpose ?? ''}」`
+      `原因=${reasons.slice(0, 100)}｜用途=「${target?.aiPurpose ?? ''}」｜提示=「${privacyState.alert.slice(0, 60)}」`
     );
     // 复原，避免影响后面的提问包断言。
     await patchBookmark(page, ctx.ids[T_LIBRARY], { privacy: { localOnly: false, aiBlocked: false } });
