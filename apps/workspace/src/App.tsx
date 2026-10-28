@@ -26,8 +26,9 @@ function CurrentPage() {
   if (route === 'reading') return <ReadingPage />;
   if (route === 'reading-history') return <ReadingHistoryPage />;
   if (route === 'search') return <SearchPage />;
-  if (route === 'capture') return <CapturePage />;
-  if (route === 'capture:file') return <CapturePage initialMode="file" />;
+  // 两个路由是同一个组件，用 key 强制重建，避免切换路由后仍停留在上一个模式的页签。
+  if (route === 'capture') return <CapturePage key="capture-paste" />;
+  if (route === 'capture:file') return <CapturePage key="capture-file" initialMode="file" />;
   if (route === 'settings') return <SettingsPage />;
   if (route === 'data') return <DataPage />;
   if (route === 'rules') return <RulesPage />;

@@ -10,6 +10,9 @@
  *
  * 右键菜单与「读取所选文字」依赖浏览器原生 UI / 用户手势，自动化无法触发，如实记为未验证。
  * 所有断言回读 IndexedDB 主库或页面上真实渲染的文本，不信任 toast 文案。
+ *
+ * 每个阶段单独 try/catch：某一阶段抛错只记一条 FAIL，后续阶段继续跑，
+ * 避免一次运行只暴露一个失败点。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -44,12 +47,19 @@ const FIXTURES = {
 const CATEGORY_NAME = 'P3 验证分类';
 const URL_EXISTING = 'https://example.com/p3-new-b';
 const URL_READING_KEEP = 'https://example.net/firefox/notes';
+const URL_SW_BOOKMARK = 'https://example.com/p3-sw-message';
+const URL_SW_READING = 'https://example.com/p3-sw-reading';
 
 const steps = [];
 const record = (step, ok, detail) => {
   steps.push({ step, ok, detail: detail ?? '' });
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${step}  ${detail ?? ''}`);
 };
+
+function errorText(error) {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.split('\n')[0].slice(0, 240);
+}
 
 function setReactInputAt(page, selector, index, value) {
   return page.evaluate(
@@ -96,6 +106,23 @@ function goto(page, route, expectText) {
     .then(() => (expectText ? waitForText(page, expectText, 15_000) : sleep(400)));
 }
 
+/**
+ * 从扩展页面给 service worker 发消息。
+ *
+ * MV3 里 service worker 用 chrome.runtime.sendMessage 发给自己是收不到的
+ * （Chrome 不会把消息投递给发送方所在的上下文），必须由一个扩展页面发起。
+ * 这里统一捕获异常，让「通道不通」表现为一条 FAIL 而不是整轮中断。
+ */
+function sendRuntimeMessage(page, message) {
+  return page.evaluate(async (payload) => {
+    try {
+      return await chrome.runtime.sendMessage(payload);
+    } catch (error) {
+      return { ok: false, error: String(error && error.message ? error.message : error) };
+    }
+  }, message);
+}
+
 /** 读预览面板的统计（总条数 / 可新增 / 重复 / 无效 / 需确认）。 */
 function previewStats(page) {
   return page.evaluate(() => {
@@ -128,10 +155,17 @@ function resultStats(page) {
   });
 }
 
-/** 预览表格的逐行快照：勾选状态、状态列与原因列。 */
+/**
+ * 预览表格的逐行快照：勾选状态、状态列与原因列。
+ * 同页还有一张「目录与分类」映射表也用了 .capturetable，靠表头是否含「状态」把它排除掉。
+ */
 function previewRows(page) {
-  return page.evaluate(() =>
-    [...document.querySelectorAll('.capturetable tbody tr')].map((tr) => {
+  return page.evaluate(() => {
+    const table = [...document.querySelectorAll('.capturetable')].find((node) =>
+      (node.querySelector('thead')?.innerText ?? '').includes('状态')
+    );
+    if (!table) return [];
+    return [...table.querySelectorAll('tbody tr')].map((tr) => {
       const cells = [...tr.querySelectorAll('td')].map((td) => (td.innerText ?? '').replace(/\s+/g, ' ').trim());
       return {
         checked: tr.querySelector('input[type="checkbox"]')?.checked ?? false,
@@ -140,8 +174,8 @@ function previewRows(page) {
         status: cells[2] ?? '',
         reason: cells[3] ?? '',
       };
-    })
-  );
+    });
+  });
 }
 
 function selectedCount(page) {
@@ -230,7 +264,7 @@ async function main() {
   }
 
   const limitations = [
-    '右键菜单（「加入拾页待看」「保存到拾页收藏」）依赖浏览器原生菜单，自动化无法点击；本轮通过 service worker 的 CAPTURE_LINK 消息验证同一写入路径，菜单本身仍需人工点一次。',
+    '右键菜单（「加入拾页待看」「保存到拾页收藏」）依赖浏览器原生菜单，自动化无法点击；本轮由扩展页面向 service worker 发送 CAPTURE_LINK 消息验证同一写入路径（菜单回调调用的是同一个 service 方法），菜单本身仍需人工点一次。',
     '「读取页面所选文字」需要 activeTab 授权（由点击工具栏图标触发生成），自动化打开 popup 页面时不具备该授权；本轮只验证受限时的提示文案。',
     '导入事务中途失败的整体回滚无法在不注入故障的前提下从界面触发；本轮验证「只写勾选行」与「重复提交返回 ALREADY_APPLIED」，回滚由 Dexie 事务保证但未单独取证。',
   ];
@@ -252,6 +286,7 @@ async function main() {
   report.browser.extensionId = attempt.extId;
   const { browser } = attempt;
   const base = `chrome-extension://${attempt.extId}`;
+  const manifest = JSON.parse(fs.readFileSync(path.join(DIST, 'manifest.json'), 'utf8'));
 
   const page = await browser.newPage();
   const errors = [];
@@ -267,8 +302,12 @@ async function main() {
   await page.goto(`${base}/workspace.html#home`, { waitUntil: 'domcontentloaded' });
   await waitForSelectorReady(page, '.brand-mark', 25_000);
 
-  try {
-    // ---- P3.1 首页的多链接粘贴与文件导入入口 ----
+  /** 阶段间共享的数据。 */
+  const ctx = { categoryId: null };
+  const phases = [];
+  const phase = (label, fn) => phases.push({ label, fn });
+
+  phase('P3.1 入口与预置数据', async () => {
     const homeEntry = await page.evaluate(() => ({
       pasteBox: Boolean(document.querySelector('textarea[aria-label="粘贴多个链接"]')),
       fileButton: [...document.querySelectorAll('button')].some((node) =>
@@ -284,21 +323,23 @@ async function main() {
       `粘贴框=${homeEntry.pasteBox}｜文件入口=${homeEntry.fileButton}｜快捷卡片=${homeEntry.hubCard}`
     );
 
-    const categoryId = await ensureCategory(page, CATEGORY_NAME);
-    record('P3.3 可创建分类供目录映射使用', Boolean(categoryId), `categoryId=${categoryId}`);
-    if (!categoryId) throw new Error('分类创建失败，后续映射断言无法进行');
+    ctx.categoryId = await ensureCategory(page, CATEGORY_NAME);
+    record('P3.3 可创建分类供目录映射使用', Boolean(ctx.categoryId), `categoryId=${ctx.categoryId}`);
+    if (!ctx.categoryId) throw new Error('分类创建失败，后续映射断言无法进行');
 
     // 预先收藏一条，用来验证「保存到收藏库」时的跨批次去重
     await goto(page, 'home', '快速操作');
     await createBookmark(page, { url: URL_EXISTING, title: 'P3 已存在样本' });
+  });
 
-    // ---- P3.1 popup 收集 ----
+  phase('P3.1 弹窗收集', async () => {
     const popup = await browser.newPage();
     popup.on('pageerror', (error) => errors.push(`popup: ${String(error)}`));
     await popup.setViewport({ width: 420, height: 640 });
     await popup.goto(`${base}/popup.html`, { waitUntil: 'domcontentloaded' });
     await waitForText(popup, '收藏当前页面', 25_000);
     await sleep(600);
+
     const restrictedNotice = await popup.evaluate(
       () => document.querySelector('.popupframe .notice')?.textContent ?? ''
     );
@@ -307,6 +348,7 @@ async function main() {
       /手动填写合法网址/.test(restrictedNotice),
       `提示=「${restrictedNotice.trim()}」`
     );
+
     const selectionButton = await popup.evaluate(() =>
       [...document.querySelectorAll('button')].some((node) => (node.textContent ?? '').includes('读取页面所选文字'))
     );
@@ -346,7 +388,7 @@ async function main() {
     const categoryOptions = await popup.evaluate(() =>
       [...document.querySelectorAll('.popupframe .field select option')].map((node) => node.textContent ?? '')
     );
-    await popup.select('.popupframe .field select', categoryId);
+    await popup.select('.popupframe .field select', ctx.categoryId);
     await clickIn(popup, '.popupframe', '保存收藏');
     await waitForText(popup, '已保存到收件箱', 20_000);
     await sleep(600);
@@ -359,7 +401,7 @@ async function main() {
     );
     record(
       'P3.1 弹窗「保存收藏」写入收件箱并带分类',
-      popupBookmark?.unreadFlag === 1 && popupBookmark?.categoryId === categoryId,
+      popupBookmark?.unreadFlag === 1 && popupBookmark?.categoryId === ctx.categoryId,
       `unreadFlag=${popupBookmark?.unreadFlag}｜categoryId=${popupBookmark?.categoryId}`
     );
 
@@ -381,40 +423,63 @@ async function main() {
       `提示=「${popupDupError.trim().slice(0, 30)}」｜同 URL 条数=${afterDupSave.bookmarks.filter((row) => row.originalUrl === POPUP_BOOKMARK_URL).length}`
     );
     await popup.close();
+  });
 
-    // ---- P3.1 service worker 消息通道（右键菜单的同一写入路径）----
+  phase('P3.1 service worker 消息通道', async () => {
+    // 先 PING：既验证通道，也把休眠的 service worker 唤醒，后面才找得到目标。
+    const ping = await sendRuntimeMessage(page, { type: 'PING' });
+    record(
+      'P3.1 扩展页面到 service worker 的消息通道可用',
+      ping?.ok === true && ping?.result?.version === manifest.version,
+      `响应=${JSON.stringify(ping)}｜manifest=${manifest.version}`
+    );
+
     const swTarget = await findServiceWorker(browser, attempt.extId);
-    if (!swTarget) {
-      record('P3.1 service worker 消息通道可用', false, '未找到 service worker 目标');
-    } else {
-      const worker = await swTarget.worker();
-      const capture = await worker.evaluate(async (url) => {
-        return await chrome.runtime.sendMessage({
-          type: 'CAPTURE_LINK',
-          destination: 'library',
-          url,
-          title: 'SW 消息样本',
-        });
-      }, 'https://example.com/p3-sw-message');
-      await sleep(800);
-      const afterSw = await page.evaluate(readMainLibrary);
-      const swRow = afterSw.bookmarks.find((row) => row.originalUrl === 'https://example.com/p3-sw-message');
-      record(
-        'P3.1 CAPTURE_LINK 消息写入收藏（与右键菜单同一路径）',
-        capture?.ok === true && Boolean(swRow),
-        `响应=${JSON.stringify(capture)}｜入库=${Boolean(swRow)}`
-      );
-      const bad = await worker.evaluate(async () => {
-        return await chrome.runtime.sendMessage({ type: 'NOT_A_MESSAGE' });
-      });
-      record(
-        'P3.1 未定义的消息类型被运行时校验拒绝',
-        bad?.ok === false,
-        `响应=${JSON.stringify(bad)}`
-      );
-    }
+    record(
+      'P3.1 service worker 处于运行状态',
+      Boolean(swTarget),
+      swTarget ? swTarget.url() : '未找到 service worker 目标'
+    );
 
-    // ---- P3.2 粘贴预览：统计、逐行原因与目标切换 ----
+    const capture = await sendRuntimeMessage(page, {
+      type: 'CAPTURE_LINK',
+      destination: 'library',
+      url: URL_SW_BOOKMARK,
+      title: 'SW 消息样本',
+    });
+    await sleep(800);
+    const afterSw = await page.evaluate(readMainLibrary);
+    const swRow = afterSw.bookmarks.find((row) => row.originalUrl === URL_SW_BOOKMARK);
+    record(
+      'P3.1 CAPTURE_LINK 写入收藏（与右键菜单同一路径）',
+      capture?.ok === true && capture?.result?.ok === true && Boolean(swRow) && swRow?.unreadFlag === 1,
+      `响应=${JSON.stringify(capture)}｜入库=${Boolean(swRow)}｜未读=${swRow?.unreadFlag}`
+    );
+
+    const captureReading = await sendRuntimeMessage(page, {
+      type: 'CAPTURE_LINK',
+      destination: 'reading',
+      url: URL_SW_READING,
+      title: 'SW 待看样本',
+    });
+    await sleep(800);
+    const afterSwReading = await page.evaluate(readMainLibrary);
+    const swReading = afterSwReading.readings.find((row) => row.originalUrl === URL_SW_READING);
+    record(
+      'P3.1 CAPTURE_LINK 写入待看（对应右键「加入待看」）',
+      captureReading?.ok === true && swReading?.status === 'pending',
+      `响应=${JSON.stringify(captureReading)}｜status=${swReading?.status}`
+    );
+
+    const bad = await sendRuntimeMessage(page, { type: 'NOT_A_MESSAGE' });
+    record(
+      'P3.1 未定义的消息类型被运行时校验拒绝',
+      bad?.ok === false,
+      `响应=${JSON.stringify(bad)}`
+    );
+  });
+
+  phase('P3.2 粘贴预览', async () => {
     await goto(page, 'home', '快速操作');
     const pasteText = [
       'https://example.com/p3-new-a',
@@ -482,8 +547,9 @@ async function main() {
       keptText.includes('p3-new-a') && bookmarksAfterCancel === bookmarksBeforeCancel,
       `输入保留=${keptText.split('\n').length} 行｜收藏数 ${bookmarksBeforeCancel}→${bookmarksAfterCancel}`
     );
+  });
 
-    // ---- P3.3 / P3.4 Chrome 书签：目录映射、只写勾选行、批次记录 ----
+  phase('P3.3/P3.4 Chrome 书签导入', async () => {
     await goto(page, 'capture:file', '选择浏览器导出的书签 HTML');
     await uploadFixture(page, FIXTURES.chrome);
     await waitPreview(page);
@@ -505,7 +571,7 @@ async function main() {
     const folderSelects = await page.evaluate(() =>
       [...document.querySelectorAll('.capturetable select')].map((node) => node.getAttribute('aria-label'))
     );
-    await page.select('select[aria-label="其他书签 的目标分类"]', categoryId);
+    await page.select('select[aria-label="其他书签 的目标分类"]', ctx.categoryId);
     await sleep(400);
     record(
       'P3.3 目录映射按原目录分组给出选择器',
@@ -539,7 +605,7 @@ async function main() {
       'P3.4 未勾选、重复与无效行都不入库',
       !afterCommit.bookmarks.some((row) => row.originalUrl === 'https://example.com/same-title')
     );
-    const mapped = afterCommit.bookmarks.filter((row) => row.categoryId === categoryId);
+    const mapped = afterCommit.bookmarks.filter((row) => row.categoryId === ctx.categoryId);
     record(
       'P3.3 目录映射到已有分类后写入生效',
       mapped.length === 3,
@@ -555,8 +621,9 @@ async function main() {
         batches1[0]?.fileName === 'bookmarks-chrome.html',
       JSON.stringify(batches1.map((row) => [row.fileName, row.status, row.inserted, row.total]))
     );
+  });
 
-    // ---- P3.3 Edge 书签格式 ----
+  phase('P3.3 Edge 书签格式', async () => {
     await clickIn(page, '.panel', '继续导入');
     await sleep(500);
     await uploadFixture(page, FIXTURES.edge);
@@ -576,8 +643,9 @@ async function main() {
     );
     await clickIn(page, '.batchbar', '取消预览');
     await waitForSelectorGone(page, '.capturetable', 10_000);
+  });
 
-    // ---- P3.3 Firefox 格式 + P3.5 导入不自动完成待看 ----
+  phase('P3.3/P3.5 Firefox 与待看保留', async () => {
     await goto(page, 'home', '快速操作');
     await clickIn(page, '.hubgrid', '加入待看');
     await waitForSelectorReady(page, '.modal input[placeholder="https://"]', 10_000);
@@ -622,8 +690,9 @@ async function main() {
       batches2.length === 2 && batches2.every((row) => row.status === 'applied'),
       JSON.stringify(batches2.map((row) => [row.fileName, row.inserted]))
     );
+  });
 
-    // ---- P3.3 恶意内容：不执行脚本、不加载外部资源 ----
+  phase('P3.3 恶意内容', async () => {
     await clickIn(page, '.panel', '继续导入');
     await sleep(400);
     externalRequests.length = 0;
@@ -646,8 +715,9 @@ async function main() {
     );
     await clickIn(page, '.batchbar', '取消预览');
     await waitForSelectorGone(page, '.capturetable', 10_000);
+  });
 
-    // ---- P3.3 损坏文件：给出警告而不是静默失败 ----
+  phase('P3.3 损坏文件', async () => {
     const bookmarksBeforeBroken = (await page.evaluate(readMainLibrary)).bookmarks.length;
     await uploadFixture(page, FIXTURES.malformed);
     await waitPreview(page);
@@ -661,8 +731,9 @@ async function main() {
       brokenWarning && Boolean(brokenStats) && bookmarksAfterBroken === bookmarksBeforeBroken,
       `警告=${brokenWarning}｜统计=${JSON.stringify(brokenStats)}｜收藏数 ${bookmarksBeforeBroken}→${bookmarksAfterBroken}`
     );
+  });
 
-    // ---- P3.5 单批条数与文件大小限制 ----
+  phase('P3.5 批量与文件大小限制', async () => {
     await goto(page, 'capture', '一次收下多个链接');
     const tooMany = Array.from({ length: 1001 }, (_, index) => `https://example.com/p3-bulk-${index}`).join('\n');
     await setReactInput(page, 'textarea[aria-label="粘贴链接"]', tooMany);
@@ -676,7 +747,11 @@ async function main() {
     );
 
     const bigFile = path.join(TMP_DIR, 'bookmarks-oversize.html');
-    fs.writeFileSync(bigFile, `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n${'<!-- padding -->\n'.repeat(220000)}</DL><p>\n`, 'utf8');
+    fs.writeFileSync(
+      bigFile,
+      `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n${'<!-- padding -->\n'.repeat(220000)}</DL><p>\n`,
+      'utf8'
+    );
     await goto(page, 'capture:file', '选择浏览器导出的书签 HTML');
     await uploadFixture(page, bigFile);
     await sleep(1500);
@@ -686,8 +761,16 @@ async function main() {
       /3 MB/.test(bigFileError),
       `错误=「${bigFileError.trim()}」｜文件=${(fs.statSync(bigFile).size / 1024 / 1024).toFixed(2)} MB`
     );
+  });
 
-    // ---- 收尾 ----
+  try {
+    for (const item of phases) {
+      try {
+        await item.fn();
+      } catch (error) {
+        record(`${item.label} 中断`, false, errorText(error));
+      }
+    }
     record('页面脚本错误检查', errors.length === 0, `errors=${JSON.stringify(errors)}`);
   } finally {
     await browser.close().catch(() => {});
