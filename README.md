@@ -40,6 +40,7 @@ npm install
 | `npm run verify:import` | 真实浏览器验证书签导入与手机快照（P0.4） |
 | `npm run verify:p1` | 真实浏览器验证并发、版本冲突、墓碑（P1） |
 | `npm run verify:p2` | 真实浏览器验证工作台页面、待看与收藏、编辑冲突（P2） |
+| `npm run verify:p3` | 真实浏览器验证扩展收集、粘贴与书签导入（P3） |
 | `npm run verify:all` | 以上全部 |
 
 手动加载扩展：`chrome://extensions` → 打开「开发者模式」→「加载已解压的扩展程序」→ 选 `apps/extension/dist`。Edge 同理（`edge://extensions`）。

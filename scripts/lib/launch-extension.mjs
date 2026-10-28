@@ -276,6 +276,7 @@ export function readMainLibrary() {
             id: row.id,
             title: row.title,
             status: row.status,
+            originalUrl: row.originalUrl,
           })),
         });
         db.close();
@@ -301,6 +302,41 @@ export function readCategories() {
       const req = tx.objectStore('categories').getAll();
       tx.oncomplete = () => {
         resolve(req.result.map((row) => ({ id: row.id, name: row.name })));
+        db.close();
+      };
+      tx.onerror = () => reject(tx.error);
+    };
+  });
+}
+
+/** 读导入批次表，便于断言「批次与结果可核对」。 */
+export function readImportBatches() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('shiye');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains('importBatches')) {
+        resolve([]);
+        db.close();
+        return;
+      }
+      const tx = db.transaction(['importBatches'], 'readonly');
+      const req = tx.objectStore('importBatches').getAll();
+      tx.oncomplete = () => {
+        resolve(
+          req.result.map((row) => ({
+            id: row.id,
+            source: row.source,
+            fileName: row.fileName,
+            destination: row.destination,
+            status: row.status,
+            total: row.total,
+            inserted: row.inserted,
+            skipped: row.skipped,
+            invalid: row.invalid,
+          }))
+        );
         db.close();
       };
       tx.onerror = () => reject(tx.error);

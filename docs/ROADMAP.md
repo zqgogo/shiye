@@ -4,7 +4,7 @@
 
 ## 当前进度
 
-更新日期：2026-10-28。P0、P1、P2 已完成并留下真实浏览器证据（P2 为 Chrome 156 无头模式下 36 项全通过）。下一项是 **P3 的浏览器回归与逐条勾选**：实现已落地，缺右键菜单实测、多链接粘贴与导入原子提交的页面级证据。
+更新日期：2026-10-28。P0、P1、P2 已完成并留下真实浏览器证据（P2 为 Chrome 156 无头模式下 36 项全通过）。P3 的实现已落地，本轮补了 Edge / Firefox / 恶意书签三份脱敏 fixture 与 `npm run verify:p3`（36 项），脚本尚未在真实浏览器执行。下一项是 **跑 `npm run verify:p3` 并按结果勾选 P3.1–P3.5**。
 
 > 换机器继续：先按根目录 [README](../README.md#在新机器上继续) 安装依赖与构建，再回到本文件读「当前进度」和「记录」两节。进度只在这里维护，不要另建进度文件。
 
@@ -13,7 +13,7 @@
 | P0 | 最小工程与关键能力验证 | 完成（真机与供应商项未验证） | [P0 准备清单](P0.md)、[P0.2/P0.3 记录](verification/p0-browser-verification.md)、[P0.4 记录](verification/p0-import-verification.md) |
 | P1 | 核心规则、数据模型与持久仓库 | 完成 | 11 项 core + 16 项 storage 测试通过；[P1 浏览器记录](verification/p1-browser-verification.md)（并发/版本/墓碑/旧数据 16 项） |
 | P2 | 工作台、待看与收藏 | 完成 | `verify:p2` 在 Chrome 156 无头下 36 项全通过；细节见 [P2 实现与验证状态](verification/p2-implementation.md) |
-| P3 | 扩展收集、粘贴与书签导入 | 进行中（实现完成，右键菜单待实测） | [P0.4 记录](verification/p0-import-verification.md) |
+| P3 | 扩展收集、粘贴与书签导入 | 进行中（回归脚本待跑） | 实现已落地；新增 Edge / Firefox / 恶意书签 fixture 与 `verify:p3`（36 项），见 [P3 回归覆盖](verification/p3-implementation.md)；右键菜单与所选文字仍需人工验证 |
 | P4 | 分类、搜索与提问资料选择 | 进行中（实现完成，浏览器回归待记录） | 500 条搜索用例通过 |
 | P5 | 手动 AI 交接与安全应用 | 进行中（实现完成，浏览器回归待记录） | 校验策略与逐条应用测试通过 |
 | P6 | 备份、恢复与手机快照 | 进行中（实现完成，真机待验证） | [P0.4 记录](verification/p0-import-verification.md#5-手机只读快照) |
@@ -222,3 +222,9 @@ P0 的未验证项：手动「加载已解压的扩展程序」流程需用户�
   验证：补入 P2.3 的 6 项用例后重跑 `npm run verify:p2`，36 项全部通过，页面脚本错误为空。新增结果：编辑标题与备注写回主库且 `localRevision` 从 1 升到 2；锁定分类与本地专用持久化且分类下拉即时禁用；取消修改丢草稿不动主库；两个标签页同时编辑时后保存的一方被 `REVISION_CONFLICT` 拦下、主库保留对方标题、「载入最新版本」后草稿同步；打开原网页只写 `lastOpenedAt` 不改未读；写入 16 条脱敏样本后最近打开只列最新 15 条。
   风险与限制：P2.1 的视觉一致性未做机器断言，留到整体交付的人工走查；最近打开用例用原生 IndexedDB 写入样本，只证明页面筛选与截断，不代替 P4.5 的统计口径验收；浏览器回归需在普通终端执行，AI 会话内的沙箱会拦下 Chrome 的代码签名校验。
   下一步：P3 浏览器回归（扩展 popup 收集、右键菜单、多链接粘贴、书签文件导入的预览/去重/原子提交/失败回滚）。
+- 2026-10-28：准备 P3 页面级回归。
+  交付：① 新增 `scripts/verify-p3.mjs`（`npm run verify:p3`，36 项，覆盖 P3.1–P3.5）；② 新增 `fixtures/bookmarks-edge.html`（Edge 导出格式）、`fixtures/bookmarks-firefox.html`（PLACES 格式，含 `place:` 智能书签）、`fixtures/bookmarks-hostile.html`（`script` / `style` / `img` / `iframe` / `javascript:` / `data:`，外部引用指向 127.0.0.1:9）；③ `readMainLibrary` 补字段并新增 `readImportBatches`；④ 新增 [P3 回归覆盖](verification/p3-implementation.md)。
+  验证：`npm run typecheck` 通过。期望值先用一次性 Node 探针跑 `parseBookmarkHtml` + `planImport` 取得（Chrome 12 条=9/1/2、Edge 6 条=4/1/1、Firefox 5 条=4/0/1、恶意 3 条=1/0/2、损坏 4 条含 `BROKEN_STRUCTURE`），再写进断言，避免凭感觉写期望。
+  未执行：`npm run verify:p3`——本会话的自动化环境启动 Chrome 仍被系统代码签名校验拦下，需在普通终端跑。
+  未验证项（已写入报告 limitations）：右键菜单与「读取页面所选文字」依赖原生 UI / `activeTab` 用户手势，自动化无法触发；导入事务中途失败的整体回滚无法在不注入故障时从界面触发，改为验证「只写勾选行」与重复提交被拒。
+  下一步：跑 `npm run verify:p3`，按失败项修正后勾选 P3.1–P3.5；右键菜单需人工右键点一次并补记录。
