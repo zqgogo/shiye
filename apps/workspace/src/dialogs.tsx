@@ -5,6 +5,7 @@ import {
   domainOf,
   formatDateTime,
   isAppError,
+  isHttpUrl,
   toUserMessage,
   type Bookmark,
   type Category,
@@ -575,13 +576,17 @@ export function DetailDrawer({ bookmarkId }: { bookmarkId: string }) {
         </div>
         <h2 id="detail-title">{bookmark.title}</h2>
         <a
-          href={bookmark.originalUrl}
+          href={isHttpUrl(bookmark.originalUrl) ? bookmark.originalUrl : undefined}
           target="_blank"
           rel="noopener noreferrer"
+          aria-disabled={isHttpUrl(bookmark.originalUrl) ? undefined : true}
           style={{ fontSize: 11, overflowWrap: 'anywhere' }}
-          onClick={() => void service.touchOpened(bookmark.id)}
+          onClick={() => {
+            if (!isHttpUrl(bookmark.originalUrl)) return;
+            void service.touchOpened(bookmark.id);
+          }}
         >
-          {bookmark.originalUrl} ↗
+          {bookmark.originalUrl} {isHttpUrl(bookmark.originalUrl) ? '↗' : '（链接不可用）'}
         </a>
 
         <label className="field">

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   backupFileName,
   formatDateTime,
@@ -38,18 +38,41 @@ export function DataPage() {
         bookmarksAdded: number;
         bookmarksSkipped: number;
         readingAdded: number;
+        readingSkipped: number;
         tombstonesAdded: number;
         danglingReferences: number;
         handoffInvalidated: number;
+        keptLocalDeletes: number;
+        adoptedSettings: boolean;
         librarySwitch: { from: string; to: string } | null;
         safety: { exportedAt: string; bookmarks: number; reading: number; categories: number; tags: number } | null;
         warnings: string[];
-        safetyText?: string;
       }
     | null
   >(null);
+  /** 上一次替换前落库的安全备份：下载被拦或页面被关之后，还在这里。 */
+  const [safetyCopy, setSafetyCopy] = useState<{ text: string; savedAt: string } | null>(null);
 
-  const libraryEmpty = data.bookmarks.length === 0 && data.pendingReading.length === 0;
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const copy = await service.readSafetyCopy().catch(() => null);
+      if (alive) setSafetyCopy(copy);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [service]);
+
+  const libraryEmpty =
+    data.bookmarks.length === 0 &&
+    data.pendingReading.length === 0 &&
+    data.categories.length === 0 &&
+    data.tags.length === 0;
+
+  const saveSafety = (text: string, savedAt: string) => {
+    download(backupFileName(savedAt), text, 'application/json');
+  };
 
   const exportBackup = async () => {
     setBusy(true);
@@ -98,9 +121,12 @@ export function DataPage() {
         bookmarksAdded: outcome.result.bookmarksAdded,
         bookmarksSkipped: outcome.result.bookmarksSkipped,
         readingAdded: outcome.result.readingAdded,
+        readingSkipped: outcome.result.readingSkipped,
         tombstonesAdded: outcome.result.tombstonesAdded,
         danglingReferences: outcome.result.danglingReferences,
         handoffInvalidated: outcome.result.handoffInvalidated,
+        keptLocalDeletes: outcome.result.keptLocalDeletes,
+        adoptedSettings: outcome.result.adoptedSettings,
         librarySwitch: outcome.result.librarySwitch,
         safety: safetyDoc
           ? {
@@ -112,13 +138,20 @@ export function DataPage() {
             }
           : null,
         warnings: outcome.result.warnings,
-        ...(safety ? { safetyText: safety.text } : {}),
       });
-      if (safety) download(backupFileName(new Date().toISOString()), safety.text, 'application/json');
+      if (safety) {
+        // 备份在替换之前就已经落库，这里只是再发起一次下载；下不下来都不影响取回。
+        const savedAt = safetyDoc?.exportedAt ?? new Date().toISOString();
+        setSafetyCopy({ text: safety.text, savedAt });
+        saveSafety(safety.text, savedAt);
+      }
       await run(async () => undefined);
       setConfirmed(false);
     } catch (cause) {
       setError(toUserMessage(cause));
+      // 替换失败时安全备份仍在 meta 里，立刻把它露出来，别等用户刷新页面才发现。
+      const copy = await service.readSafetyCopy().catch(() => null);
+      if (copy) setSafetyCopy(copy);
     } finally {
       setBusy(false);
     }
@@ -196,6 +229,34 @@ export function DataPage() {
       <div className="panel">
         <h2>恢复备份</h2>
         <p>先预览数量与数据截止时间，再选择合并或替换。替换前会自动导出一份当前主库备份。</p>
+
+        {safetyCopy ? (
+          <div className="notice danger">
+            <strong>有一份替换前的安全备份还没确认保存</strong>
+            <span>
+              保存于 {formatDateTime(safetyCopy.savedAt)}，存在本机库里，不随替换清空。
+              替换一旦提交不可撤销，请先把它保存到磁盘再继续。
+            </span>
+            <div className="actions" style={{ justifyContent: 'flex-start' }}>
+              <button className="btn small" onClick={() => saveSafety(safetyCopy.text, safetyCopy.savedAt)}>
+                保存这份安全备份 ↓
+              </button>
+              <button
+                className="btn small"
+                onClick={() => {
+                  void (async () => {
+                    await service.clearSafetyCopy();
+                    setSafetyCopy(null);
+                    toast('已清理本机临时副本（磁盘上的文件不受影响）。');
+                  })();
+                }}
+              >
+                已确认保存，清理本机副本
+              </button>
+            </div>
+          </div>
+        ) : null}
+
         <label className="field">
           <span>备份文件</span>
           <input
@@ -230,17 +291,29 @@ export function DataPage() {
                 导出时间 {formatDateTime(parsed.exportedAt)} · 当前主库：{data.bookmarks.length} 条收藏、
                 {data.pendingReading.length} 条待看
               </p>
+              {parsed.exclusions?.readingForLocalOnly ? (
+                <p className="micro">
+                  这份备份导出时排除了 {parsed.exclusions.readingForLocalOnly} 条关联本地专用收藏的待看，
+                  恢复后不会有这些。
+                </p>
+              ) : null}
               <label className="field">
                 <span>恢复方式</span>
                 <select value={mode} onChange={(event) => setMode(event.target.value as 'merge' | 'replace')}>
                   <option value="merge">
                     {libraryEmpty
-                      ? '合并（当前主库为空，等同于导入）'
-                      : '合并（保留现有，按 ID 与修订号跳过较旧记录）'}
+                      ? '合并（当前主库为空，等同于完整导入，含设置与整理策略）'
+                      : '合并（只新增本机没有的条目，已有内容不覆盖）'}
                   </option>
                   <option value="replace">替换整个主库（先自动备份）</option>
                 </select>
               </label>
+              {mode === 'merge' && !libraryEmpty ? (
+                <p className="micro">
+                  合并不会改动本机已有的收藏、待看、设置与整理策略；本机删掉的条目也不会被备份复活。
+                  要完整变回备份那一刻请用替换。
+                </p>
+              ) : null}
               {mode === 'replace' ? (
                 <div className="notice danger">
                   <strong>替换会清空当前主库</strong>
@@ -284,15 +357,15 @@ export function DataPage() {
                   导出时间 {formatDateTime(result.safety.exportedAt)} · {result.safety.bookmarks} 条收藏 /{' '}
                   {result.safety.reading} 条待看 / {result.safety.categories} 个分类 / {result.safety.tags} 个标签
                 </span>
-                <span>备份文件已发起下载；请在下载目录核对是否保存成功。</span>
-                {result.safetyText ? (
+                <span>
+                  这份备份在替换之前就已写入本机库，并已发起下载；即使下载被拦或页面被关，也能在「数据」页重新保存。
+                </span>
+                {safetyCopy ? (
                   <button
                     className="btn small"
-                    onClick={() =>
-                      download(backupFileName(new Date().toISOString()), result.safetyText ?? '', 'application/json')
-                    }
+                    onClick={() => saveSafety(safetyCopy.text, safetyCopy.savedAt)}
                   >
-                    再次保存安全备份
+                    再次保存安全备份 ↓
                   </button>
                 ) : null}
               </div>
@@ -300,9 +373,18 @@ export function DataPage() {
             <div className="notice">
               <strong>恢复完成（{result.mode === 'replace' ? '替换' : '合并'}）</strong>
               <span>
-                新增收藏 {result.bookmarksAdded} 条，跳过 {result.bookmarksSkipped} 条，待看 {result.readingAdded} 条，
+                新增收藏 {result.bookmarksAdded} 条，跳过 {result.bookmarksSkipped} 条，待看 {result.readingAdded} 条
+                {result.readingSkipped > 0 ? `（另有 ${result.readingSkipped} 条因网址重复跳过）` : ''}，
                 删除标记 {result.tombstonesAdded} 条。
               </span>
+              {result.keptLocalDeletes > 0 ? (
+                <span>
+                  其中 {result.keptLocalDeletes} 条在本机已删除、备份里仍为活跃，已保留本机的删除。
+                </span>
+              ) : null}
+              {result.adoptedSettings && result.mode === 'merge' ? (
+                <span>当前主库原本为空，已一并恢复备份里的设置与整理策略。</span>
+              ) : null}
               {result.danglingReferences > 0 ? (
                 <span>有 {result.danglingReferences} 处引用指向备份里没有的分类或标签，已清空。</span>
               ) : null}

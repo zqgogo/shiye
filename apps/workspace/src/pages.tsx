@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { LIMITS, TRASH_RETENTION_DAYS, formatDateTime, toUserMessage, type Bookmark } from '@shiye/core';
+import { LIMITS, TRASH_RETENTION_DAYS, formatDateTime, isHttpUrl, toUserMessage, type Bookmark } from '@shiye/core';
 import { BookmarkRow, EmptyState, ICONS, Notice, PageHeader, ReadingRow } from './components.js';
 import { useWorkspace } from './state.js';
 import { setPendingPaste } from './capture.js';
@@ -383,7 +383,7 @@ export function SearchPage() {
 }
 
 export function ReadingPage() {
-  const { data, service, run, openModal, openBookmark, navigate } = useWorkspace();
+  const { data, service, run, openModal, openBookmark, navigate, toast } = useWorkspace();
   const [lastCompleted, setLastCompleted] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState('');
@@ -485,6 +485,11 @@ export function ReadingPage() {
                 item={item}
                 linkedBookmark={linked}
                 onOpen={() => {
+                  // 与收藏列表同一套纵深防御：只放行 http / https。
+                  if (!isHttpUrl(item.originalUrl)) {
+                    toast('这条待看的链接不是 http / https，已阻止打开。');
+                    return;
+                  }
                   window.open(item.originalUrl, '_blank', 'noopener,noreferrer');
                 }}
                 onComplete={() => void complete(item.id)}

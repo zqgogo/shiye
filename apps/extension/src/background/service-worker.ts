@@ -1,6 +1,7 @@
 import {
   AppError,
   LIMITS,
+  clampForStorage,
   parseExtensionMessage,
   tryCanonicalizeUrl,
   type ExtensionMessage,
@@ -49,7 +50,9 @@ async function saveFromMenu(
     flashBadge('!', '#a44b40');
     return;
   }
-  const title = (info.selectionText ?? tab?.title ?? '').trim().slice(0, LIMITS.title);
+  const title = clampForStorage((info.selectionText || tab?.title || '').trim(), LIMITS.title);
+  // 选中文字按码点截断：菜单点击没有可以显示提示的界面，至少不能把 emoji 切成半个。
+  const selectedText = [...(info.selectionText ?? '')].slice(0, LIMITS.selectedText).join('');
   const api = getService();
   try {
     if (destination === 'reading') {
@@ -62,7 +65,7 @@ async function saveFromMenu(
       await api.createBookmark({
         originalUrl: checked.originalUrl,
         title,
-        selectedText: info.menuItemId === MENU_LIBRARY ? (info.selectionText ?? '').slice(0, LIMITS.selectedText) : '',
+        selectedText: info.menuItemId === MENU_LIBRARY ? selectedText : '',
         sourceType: 'extension',
       });
     }

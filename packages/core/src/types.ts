@@ -297,6 +297,15 @@ export interface AiTask {
   errorCode: string | null;
 }
 
+/**
+ * 备份里被有意排除的条目。恢复端据此解释「为什么条数比主库少」，
+ * 而不是让用户自己发现少了东西。
+ */
+export interface BackupExclusions {
+  /** 关联到本地专用收藏的待看：收藏不进默认备份，它的衍生待看也不该进。 */
+  readingForLocalOnly: number;
+}
+
 export interface BackupDocument {
   schemaVersion: number;
   libraryId: Id;
@@ -311,6 +320,7 @@ export interface BackupDocument {
   bookmarks: Bookmark[];
   readingItems: ReadingItem[];
   tombstones: Tombstone[];
+  exclusions?: BackupExclusions;
 }
 
 export type LocalWriteStatus = 'applied' | 'unchanged' | 'conflict' | 'rejected';

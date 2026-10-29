@@ -993,3 +993,242 @@ describe('导入预览编排', () => {
     expect(preview.plan.rows.some((row) => row.sourceFolder === '书签栏 / 开发 / 前端')).toBe(true);
   });
 });
+
+/**
+ * 独立检查（docs/verification/independent-review-2026-10-29.md）里复现的问题。
+ * 这里的断言写的是「期望的正确行为」，不再依赖当时观察到的缺陷。
+ */
+describe('恢复安全与隐私边界', () => {
+  it('合并不会复活本机已删除的收藏，即使备份的修订号更大', async () => {
+    const bookmark = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/deleted-locally',
+      title: '本机删掉的',
+    });
+    const exported = await service.exportBackup(true);
+    const document = JSON.parse(exported.text) as {
+      bookmarks: Record<string, unknown>[];
+    };
+    // 另一台设备写入次数更多：localRevision 是各自的计数，跨设备比较没有意义。
+    document.bookmarks[0]!.localRevision = 20;
+    document.bookmarks[0]!.revision = 20;
+
+    await repos.bookmarks.softDelete(bookmark.id);
+    const restored = await service.restoreBackup(JSON.stringify(document), 'merge');
+
+    const after = await repos.bookmarks.get(bookmark.id);
+    expect(after?.deletedAt).not.toBeNull();
+    expect(restored.result.keptLocalDeletes).toBe(1);
+    expect(restored.result.warnings.join(' ')).toContain('已保留本机的删除');
+  });
+
+  it('合并不覆盖本机同 ID 的人工修改', async () => {
+    const bookmark = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/local-edit',
+      title: '本机改过的标题',
+    });
+    const exported = await service.exportBackup(true);
+    const document = JSON.parse(exported.text) as { bookmarks: Record<string, unknown>[] };
+    document.bookmarks[0]!.title = '备份里的旧标题';
+    document.bookmarks[0]!.localRevision = 99;
+
+    const restored = await service.restoreBackup(JSON.stringify(document), 'merge');
+    expect((await repos.bookmarks.get(bookmark.id))?.title).toBe('本机改过的标题');
+    expect(restored.result.bookmarksSkipped).toBe(1);
+  });
+
+  it('结构合法但条目损坏的备份在替换时被拒绝，主库不动', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/survivor', title: '原库唯一收藏' });
+    const exported = await service.exportBackup(true);
+    const document = JSON.parse(exported.text) as { bookmarks: unknown[] };
+    document.bookmarks = [{ title: '没有编号也没有网址' }];
+
+    await expect(service.restoreBackup(JSON.stringify(document), 'replace')).rejects.toMatchObject({
+      code: 'INVALID_BACKUP_RECORDS',
+    });
+    const active = await repos.bookmarks.listActive();
+    expect(active).toHaveLength(1);
+    expect(active[0]?.title).toBe('原库唯一收藏');
+  });
+
+  it('合并时跳过损坏条目并说明跳过了几条', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/merge-ok', title: '好的' });
+    const exported = await service.exportBackup(true);
+    const document = JSON.parse(exported.text) as { bookmarks: unknown[] };
+    document.bookmarks = [{ title: '坏的' }, ...document.bookmarks];
+
+    const restored = await service.restoreBackup(JSON.stringify(document), 'merge');
+    expect(restored.result.bookmarksAdded).toBe(0);
+    expect(restored.result.bookmarksSkipped).toBe(1);
+    expect(restored.result.warnings.join(' ')).toContain('无法恢复');
+  });
+
+  it('伪造 canonicalUrl 不能把 javascript: 链接带进主库', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/safe', title: '安全链接' });
+    const exported = await service.exportBackup(true);
+    const document = JSON.parse(exported.text) as { bookmarks: Record<string, unknown>[] };
+    // canonicalUrl 是派生字段：带着它伪造，恢复端必须重新校验原始链接。
+    document.bookmarks[0]!.originalUrl = 'javascript:alert(1)';
+
+    await expect(service.restoreBackup(JSON.stringify(document), 'replace')).rejects.toMatchObject({
+      code: 'INVALID_BACKUP_RECORDS',
+    });
+    expect((await repos.bookmarks.listActive())[0]?.originalUrl).toBe('https://example.com/safe');
+  });
+
+  it('替换前的安全备份在提交前就落库，替换失败也能取回', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/safety', title: '安全样本' });
+    expect(await service.readSafetyCopy()).toBeNull();
+
+    // 让替换在写库阶段失败：安全备份必须已经存下来，否则这份数据就没了。
+    const originalPut = db.bookmarks.put.bind(db.bookmarks);
+    (db.bookmarks as unknown as { put: unknown }).put = async () => {
+      throw new Error('注入写入失败');
+    };
+    const incoming = {
+      schemaVersion: 2,
+      libraryId: 'other-device',
+      exportedAt: nowIso(),
+      scope: 'device',
+      includesLocalOnly: true,
+      categories: [],
+      tags: [],
+      policy: null,
+      settings: null,
+      bookmarks: [{ id: 'incoming-1', originalUrl: 'https://example.com/incoming', title: '外部记录' }],
+      readingItems: [],
+      tombstones: [],
+    };
+    try {
+      await expect(service.restoreBackup(JSON.stringify(incoming), 'replace')).rejects.toBeTruthy();
+    } finally {
+      (db.bookmarks as unknown as { put: unknown }).put = originalPut;
+    }
+
+    const copy = await service.readSafetyCopy();
+    expect(copy).not.toBeNull();
+    expect(copy?.text).toContain('安全样本');
+    await service.clearSafetyCopy();
+    expect(await service.readSafetyCopy()).toBeNull();
+  });
+
+  it('本地专用收藏关联的待看不进默认备份，但会说明排除了几条', async () => {
+    const priv = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/private-project',
+      title: '私密项目',
+      privacy: { localOnly: true },
+    });
+    await repos.reading.add({
+      originalUrl: priv.originalUrl,
+      title: priv.title,
+      relatedBookmarkId: priv.id,
+    });
+    await repos.reading.add({ originalUrl: 'https://example.com/public-queue', title: '公开待看' });
+
+    const exported = await service.exportBackup(false);
+    expect(exported.text).not.toContain('私密项目');
+    expect(exported.text).not.toContain('https://example.com/private-project');
+    expect(exported.document.readingItems).toHaveLength(1);
+    expect(exported.document.exclusions?.readingForLocalOnly).toBe(1);
+
+    // 勾选「包含本地专用条目」时应当完整导出。
+    const full = await service.exportBackup(true);
+    expect(full.text).toContain('私密项目');
+    expect(full.document.exclusions).toBeUndefined();
+  });
+
+  it('备份往返保留来源目录、导入批次与待看来源', async () => {
+    await repos.bookmarks.create({
+      originalUrl: 'https://example.com/source-folder',
+      sourceType: 'html',
+      sourceFolder: '开发/文档',
+      importBatchId: 'import-one',
+    });
+    await repos.reading.add({
+      originalUrl: 'https://example.com/reading-source',
+      sourceType: 'html',
+      sourceFolder: '开发/待看',
+      importBatchId: 'import-one',
+    });
+    const exported = await service.exportBackup(true);
+    await service.restoreBackup(exported.text, 'replace');
+
+    const [bookmark] = await repos.bookmarks.listActive();
+    expect(bookmark?.sources[0]).toMatchObject({
+      sourceType: 'html',
+      originalFolder: '开发/文档',
+      importBatchId: 'import-one',
+    });
+    const [reading] = await repos.reading.listPending();
+    expect(reading?.sources[0]).toMatchObject({
+      sourceType: 'html',
+      originalFolder: '开发/待看',
+      importBatchId: 'import-one',
+    });
+  });
+
+  it('合并时同网址不同 ID 的待看只留一条', async () => {
+    await repos.reading.add({ originalUrl: 'https://example.com/queue-dup', title: '本机待看' });
+    const exported = await service.exportBackup(true);
+    const document = JSON.parse(exported.text) as { readingItems: Record<string, unknown>[] };
+    document.readingItems[0]!.id = 'other-device-id';
+
+    const restored = await service.restoreBackup(JSON.stringify(document), 'merge');
+    expect(await repos.reading.listPending()).toHaveLength(1);
+    expect(restored.result.readingSkipped).toBe(1);
+  });
+
+  it('空库用合并恢复时一并带回设置与整理策略', async () => {
+    const category = await repos.categories.create('置顶分类');
+    await repos.settings.updateApp({ pinnedCategoryIds: [category.id], includeNoteInSnapshot: false });
+    await repos.settings.updatePolicy('我的整理策略');
+    const exported = await service.exportBackup(true);
+
+    const freshName = `shiye-fresh-${Date.now()}`;
+    const freshDb = new ShiyeDB(freshName);
+    const freshRepos = createRepositories(freshDb);
+    const freshService = createWorkspaceService(freshRepos);
+    try {
+      await freshService.snapshot();
+      const restored = await freshService.restoreBackup(exported.text, 'merge');
+      expect(restored.result.adoptedSettings).toBe(true);
+      expect((await freshRepos.settings.getPolicy()).instruction).toBe('我的整理策略');
+      expect((await freshRepos.settings.getApp()).pinnedCategoryIds).toEqual([category.id]);
+    } finally {
+      freshDb.close();
+      await Dexie.delete(freshName);
+    }
+  });
+
+  it('校验通过后策略被改，应用阶段拒绝并说明原因', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/policy-window', title: '资料' });
+    const pack = await service.buildOrganizePack({ scope: 'all', selectedIds: [] });
+    const checked = await service.validateAiReply({
+      text: JSON.stringify({
+        protocolVersion: 2,
+        batchId: pack.batchId,
+        part: 1,
+        results: [
+          {
+            n: pack.items[0]!.n,
+            domain: 'example.com',
+            titleEcho: '资料',
+            patch: { aiPurpose: '旧策略输出' },
+            reason: '',
+            status: 'ok',
+          },
+        ],
+      }),
+      batchId: pack.batchId,
+      items: pack.items,
+      policyVersion: pack.policyVersion,
+    });
+    expect(checked.applied).toHaveLength(1);
+
+    // 用户在这段时间里去改了整理策略。
+    await repos.settings.updatePolicy('新的整理规则');
+    await expect(service.applySuggestions(pack.batchId, checked.applied)).rejects.toMatchObject({
+      code: 'STALE_SUGGESTION',
+    });
+    expect((await repos.bookmarks.listActive())[0]?.aiPurpose).toBe('');
+  });
+});

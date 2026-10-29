@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import type { Bookmark, Category } from '@shiye/core';
-import { domainOf, formatDateTime } from '@shiye/core';
+import { domainOf, formatDateTime, isHttpUrl } from '@shiye/core';
 import { useWorkspace } from './state.js';
 
 export const ICONS = {
@@ -211,6 +211,11 @@ export function BookmarkRow({
   };
 
   const openExternal = async () => {
+    // 纵深防御：保存与恢复都只放行 http/https，但历史数据、迁移脚本仍可能带进别的协议。
+    if (!isHttpUrl(bookmark.originalUrl)) {
+      toast('这条记录的链接不是 http / https，已阻止打开。');
+      return;
+    }
     await service.touchOpened(bookmark.id);
     window.open(bookmark.originalUrl, '_blank', 'noopener,noreferrer');
     void run(async () => undefined);
@@ -358,9 +363,15 @@ export function ReadingRow({
         </div>
       </div>
       <div className="rowactions">
-        <a className="btn small" href={item.originalUrl} target="_blank" rel="noopener noreferrer">
-          打开 ↗
-        </a>
+        {isHttpUrl(item.originalUrl) ? (
+          <a className="btn small" href={item.originalUrl} target="_blank" rel="noopener noreferrer">
+            打开 ↗
+          </a>
+        ) : (
+          <span className="btn small" aria-disabled="true" title="链接不是 http / https，已禁用">
+            链接不可用
+          </span>
+        )}
         <button className="btn small" onClick={onConvert}>
           {linkedBookmark ? '查看收藏' : '转入收藏'}
         </button>

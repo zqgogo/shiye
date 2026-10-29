@@ -1,13 +1,14 @@
 import {
   AppError,
   SCHEMA_VERSION,
-  canonicalizeUrl,
   clampForStorage,
   LIMITS,
   newId,
   nowIso,
   toIso,
   toIsoOrNull,
+  tryCanonicalizeUrl,
+  truncateMiddle,
 } from '@shiye/core';
 import type {
   BackupDocument,
@@ -15,13 +16,17 @@ import type {
   Category,
   Policy,
   ReadingItem,
+  SourceInfo,
   Tag,
   Tombstone,
 } from '@shiye/core';
-import type { BackupRepository, RestoreResult } from '@shiye/application';
+import type { BackupRepository, RestoreResult, SafetyCopy } from '@shiye/application';
 import { ShiyeDB, DEFAULT_POLICY, deriveIndexFields } from './db.js';
 
 type Raw = Record<string, unknown>;
+
+/** 一条记录被拒的原因：收集起来一次性告诉用户，而不是 filter 掉之后静默。 */
+type Reject = (reason: string) => void;
 
 function str(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback;
@@ -39,17 +44,54 @@ function arr(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-function sanitizeBookmark(raw: Raw, warnings: Set<string>): Bookmark | null {
+/**
+ * 网址只认「原始链接重新解析」的结果。
+ *
+ * 备份里的 canonicalUrl 是派生字段：如果直接采信它，一条 javascript: 链接配上一个
+ * 合法的 canonicalUrl 就能通过校验进入主库，界面再把它渲染成可点的 href。
+ */
+function urlPair(
+  raw: Raw,
+  reject: Reject
+): { originalUrl: string; canonicalUrl: string } | null {
   const originalUrl = str(raw['originalUrl'], str(raw['url']));
-  let canonicalUrl = str(raw['canonicalUrl'], '');
-  try {
-    canonicalUrl = canonicalizeUrl(originalUrl).canonicalUrl;
-  } catch {
-    if (!canonicalUrl) return null;
+  if (!originalUrl) {
+    reject('缺少网址');
+    return null;
   }
-  if (!canonicalUrl) return null;
+  const checked = tryCanonicalizeUrl(originalUrl);
+  if (!checked) {
+    reject(`网址不是有效的 http / https 链接（${truncateMiddle(originalUrl, 48)}）`);
+    return null;
+  }
+  return { originalUrl: checked.originalUrl, canonicalUrl: checked.canonicalUrl };
+}
+
+/** 来源信息按 SourceInfo 白名单逐字段还原：目录与导入批次是用户能看见的历史。 */
+function sanitizeSource(entry: unknown, now: string): SourceInfo | null {
+  if (!entry || typeof entry !== 'object') return null;
+  const sourceRaw = entry as Raw;
+  const sourceType = str(sourceRaw['sourceType'], 'json');
+  if (!['extension', 'manual', 'html', 'json'].includes(sourceType)) return null;
+  const source: SourceInfo = {
+    sourceType: sourceType as SourceInfo['sourceType'],
+    capturedAt: toIso(sourceRaw['capturedAt'], now),
+  };
+  const batchId = str(sourceRaw['importBatchId'], '');
+  if (batchId) source.importBatchId = batchId.slice(0, 64);
+  const folder = str(sourceRaw['originalFolder'], '');
+  if (folder) source.originalFolder = clampForStorage(folder, 1000);
+  return source;
+}
+
+function sanitizeBookmark(raw: Raw, reject: Reject, warnings: Set<string>): Bookmark | null {
   const id = str(raw['id'], '');
-  if (!id) return null;
+  if (!id) {
+    reject('缺少编号（id）');
+    return null;
+  }
+  const pair = urlPair(raw, reject);
+  if (!pair) return null;
   const deletedAt = toIsoOrNull(raw['deletedAt']);
   const categoryId = typeof raw['categoryId'] === 'string' ? raw['categoryId'] : null;
   if (raw['valueLevel'] !== undefined || raw['valueReason'] !== undefined) {
@@ -74,8 +116,8 @@ function sanitizeBookmark(raw: Raw, warnings: Set<string>): Bookmark | null {
       : categoryId === null && deletedAt === null;
   const bookmark: Bookmark = {
     id,
-    originalUrl,
-    canonicalUrl,
+    originalUrl: pair.originalUrl,
+    canonicalUrl: pair.canonicalUrl,
     title,
     sourceDescription,
     aiPurpose: clampForStorage(str(raw['aiPurpose']), LIMITS.aiPurpose),
@@ -92,16 +134,8 @@ function sanitizeBookmark(raw: Raw, warnings: Set<string>): Bookmark | null {
         value === 'categoryId' || value === 'tagIds' || value === 'aiPurpose'
     ),
     sources: arr(raw['sources']).flatMap((entry) => {
-      if (!entry || typeof entry !== 'object') return [];
-      const sourceRaw = entry as Raw;
-      const sourceType = str(sourceRaw['sourceType'], 'json');
-      if (!['extension', 'manual', 'html', 'json'].includes(sourceType)) return [];
-      return [
-        {
-          sourceType: sourceType as 'extension' | 'manual' | 'html' | 'json',
-          capturedAt: toIso(sourceRaw['capturedAt'], now),
-        },
-      ];
+      const source = sanitizeSource(entry, now);
+      return source ? [source] : [];
     }),
     revision: num(raw['revision']),
     localRevision: num(raw['localRevision'], num(raw['revision'])),
@@ -116,40 +150,48 @@ function sanitizeBookmark(raw: Raw, warnings: Set<string>): Bookmark | null {
   return bookmark;
 }
 
-function sanitizeReading(raw: Raw): ReadingItem | null {
-  const originalUrl = str(raw['originalUrl'], str(raw['url']));
-  let canonicalUrl = str(raw['canonicalUrl'], '');
-  try {
-    canonicalUrl = canonicalizeUrl(originalUrl).canonicalUrl;
-  } catch {
-    if (!canonicalUrl) return null;
-  }
+function sanitizeReading(raw: Raw, reject: Reject): ReadingItem | null {
   const id = str(raw['id'], '');
-  if (!id || !canonicalUrl) return null;
+  if (!id) {
+    reject('缺少编号（id）');
+    return null;
+  }
+  const pair = urlPair(raw, reject);
+  if (!pair) return null;
   const now = nowIso();
   const completedAt = toIsoOrNull(raw['completedAt']);
   const status = raw['status'] === 'completed' || Boolean(completedAt) ? 'completed' : 'pending';
   return {
     id,
-    originalUrl,
-    canonicalUrl,
+    originalUrl: pair.originalUrl,
+    canonicalUrl: pair.canonicalUrl,
     title: clampForStorage(str(raw['title'], '未命名阅读'), LIMITS.title),
     note: clampForStorage(str(raw['note']), LIMITS.note),
     status,
     addedAt: toIso(raw['addedAt'], now),
     completedAt: status === 'completed' ? completedAt ?? now : null,
     relatedBookmarkId: typeof raw['relatedBookmarkId'] === 'string' ? raw['relatedBookmarkId'] : null,
-    sources: [],
+    sources: arr(raw['sources']).flatMap((entry) => {
+      const source = sanitizeSource(entry, now);
+      return source ? [source] : [];
+    }),
     revision: num(raw['revision']),
     localRevision: num(raw['localRevision'], num(raw['revision'])),
     changeVersion: null,
   };
 }
 
-function sanitizeCategory(raw: Raw): Category | null {
+function sanitizeCategory(raw: Raw, reject: Reject): Category | null {
   const id = str(raw['id']);
   const name = clampForStorage(str(raw['name'], '未命名分类'), LIMITS.categoryName);
-  if (!id || !name) return null;
+  if (!id) {
+    reject('缺少编号（id）');
+    return null;
+  }
+  if (!name) {
+    reject('缺少名称');
+    return null;
+  }
   return {
     id,
     name,
@@ -160,17 +202,27 @@ function sanitizeCategory(raw: Raw): Category | null {
   };
 }
 
-function sanitizeTag(raw: Raw): Tag | null {
+function sanitizeTag(raw: Raw, reject: Reject): Tag | null {
   const id = str(raw['id']);
   const name = clampForStorage(str(raw['name']), LIMITS.tagName);
-  if (!id || !name) return null;
+  if (!id) {
+    reject('缺少编号（id）');
+    return null;
+  }
+  if (!name) {
+    reject('缺少名称');
+    return null;
+  }
   return { id, name, revision: num(raw['revision']), createdAt: toIso(raw['createdAt'], nowIso()) };
 }
 
-function sanitizeTombstone(raw: Raw): Tombstone | null {
+function sanitizeTombstone(raw: Raw, reject: Reject): Tombstone | null {
   const id = str(raw['id']);
   const entityType = str(raw['entityType'], 'bookmark');
-  if (!id) return null;
+  if (!id) {
+    reject('缺少编号（id）');
+    return null;
+  }
   if (!['bookmark', 'readingItem', 'category', 'tag', 'policy'].includes(entityType)) return null;
   return {
     entityType: entityType as Tombstone['entityType'],
@@ -210,6 +262,18 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
             db.tombstones.toArray(),
           ]);
           const settings = settingsRow?.value as BackupDocument['settings'];
+          const localOnlyBookmarkIds = new Set(
+            bookmarks.filter((bookmark) => bookmark.privacy.localOnly).map((bookmark) => bookmark.id)
+          );
+          // 待看没有自己的隐私字段，但它可能是「加入待看」从某条收藏复制出来的（带
+          // relatedBookmarkId，标题与网址都一样）。收藏被排除而待看照样导出，
+          // 本地专用就会从这条缝里漏出去。
+          const exportedReading = includeLocalOnly
+            ? readingItems
+            : readingItems.filter(
+                (item) => !item.relatedBookmarkId || !localOnlyBookmarkIds.has(item.relatedBookmarkId)
+              );
+          const excludedReading = readingItems.length - exportedReading.length;
           return {
             schemaVersion: SCHEMA_VERSION,
             libraryId: settings?.libraryId ?? 'local-library',
@@ -226,10 +290,13 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
             bookmarks: includeLocalOnly
               ? bookmarks
               : bookmarks.filter((bookmark) => !bookmark.privacy.localOnly),
-            readingItems,
+            readingItems: exportedReading,
             tombstones: includeLocalOnly
               ? tombstones
               : tombstones.filter((tombstone) => tombstone.privacyScope !== 'local'),
+            ...(excludedReading > 0
+              ? { exclusions: { readingForLocalOnly: excludedReading } }
+              : {}),
           };
         }
       );
@@ -239,26 +306,77 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
       return db.tombstones.toArray();
     },
 
+    /**
+     * 替换前的安全备份不能只活在内存里：替换一旦提交就不可撤销，
+     * 而下载可能被拦、被取消，或者页面直接被关掉。
+     */
+    async saveSafetyCopy(text: string): Promise<void> {
+      await db.meta.put({ key: 'safetyBackup', value: { text, savedAt: nowIso() } });
+    },
+
+    async readSafetyCopy(): Promise<SafetyCopy | null> {
+      const row = await db.meta.get('safetyBackup');
+      const value = row?.value as Raw | undefined;
+      const text = str(value?.['text'], '');
+      const savedAt = str(value?.['savedAt'], '');
+      if (!text) return null;
+      return { text, savedAt };
+    },
+
+    async clearSafetyCopy(): Promise<void> {
+      await db.meta.delete('safetyBackup');
+    },
+
     async restore(document: BackupDocument, mode: 'merge' | 'replace'): Promise<RestoreResult> {
       if (document.schemaVersion > SCHEMA_VERSION) {
         throw new AppError('UNSUPPORTED_VERSION', '备份来自更新版本，请先升级扩展。');
       }
       const warnings = new Set<string>();
-      const categories = document.categories
-        .map((raw) => sanitizeCategory(raw as unknown as Raw))
-        .filter((row): row is Category => row !== null);
-      const tags = document.tags
-        .map((raw) => sanitizeTag(raw as unknown as Raw))
-        .filter((row): row is Tag => row !== null);
-      const bookmarks = document.bookmarks
-        .map((raw) => sanitizeBookmark(raw as unknown as Raw, warnings))
-        .filter((row): row is Bookmark => row !== null);
-      const readingItems = document.readingItems
-        .map((raw) => sanitizeReading(raw as unknown as Raw))
-        .filter((row): row is ReadingItem => row !== null);
-      const tombstones = (document.tombstones ?? [])
-        .map((raw) => sanitizeTombstone(raw as unknown as Raw))
-        .filter((row): row is Tombstone => row !== null);
+      const issues: string[] = [];
+
+      /** 逐条清洗并收集被拒原因：静默 filter 会让「恢复成功」变成假象。 */
+      const collect = <T>(
+        rows: unknown[],
+        label: string,
+        sanitize: (raw: Raw, reject: Reject) => T | null
+      ): T[] => {
+        const out: T[] = [];
+        rows.forEach((raw, index) => {
+          const value = sanitize(
+            (raw ?? {}) as Raw,
+            (reason) => issues.push(`${label}第 ${index + 1} 条${reason}`)
+          );
+          if (value !== null) out.push(value);
+        });
+        return out;
+      };
+
+      const categories = collect(document.categories, '分类', (raw, reject) =>
+        sanitizeCategory(raw, reject)
+      );
+      const tags = collect(document.tags, '标签', (raw, reject) => sanitizeTag(raw, reject));
+      const bookmarks = collect(document.bookmarks, '收藏', (raw, reject) =>
+        sanitizeBookmark(raw, reject, warnings)
+      );
+      const readingItems = collect(document.readingItems, '待看', (raw, reject) =>
+        sanitizeReading(raw, reject)
+      );
+      const tombstones = collect(document.tombstones ?? [], '墓碑', (raw, reject) =>
+        sanitizeTombstone(raw, reject)
+      );
+
+      if (issues.length > 0) {
+        const preview = issues.slice(0, 3).join('；');
+        const rest = issues.length > 3 ? ` 等 ${issues.length} 条` : '';
+        if (mode === 'replace') {
+          // 替换会先清空主库：带着无法恢复的记录提交，结果就是「显示成功、数据没了」。
+          throw new AppError(
+            'INVALID_BACKUP_RECORDS',
+            `备份里有条目无法恢复（${preview}${rest}）。替换会清空当前主库，已停止，数据未改动。请回原环境重新导出，或改用「合并」逐条跳过。`
+          );
+        }
+        warnings.add(`备份里有条目无法恢复，已跳过：${preview}${rest}`);
+      }
 
       // 备份可能来自另一台设备或只恢复了部分数据：引用到不存在的分类/标签时清空，
       // 否则恢复后会出现指向空气的条目，「未分类」计数与分类页都会对不上。
@@ -290,18 +408,27 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
       if (!document.includesLocalOnly) {
         warnings.add('备份未包含本地专用条目，这部分内容不会恢复。');
       }
+      if (document.exclusions?.readingForLocalOnly) {
+        warnings.add(
+          `导出时排除了 ${document.exclusions.readingForLocalOnly} 条关联本地专用收藏的待看，恢复后不会有这些。`
+        );
+      }
 
       const result: RestoreResult = {
         mode,
         bookmarksAdded: 0,
         bookmarksSkipped: 0,
         readingAdded: 0,
+        readingSkipped: 0,
         categoriesAdded: 0,
         tagsAdded: 0,
         tombstonesAdded: 0,
         danglingReferences,
         handoffInvalidated: 0,
         librarySwitch: null,
+        keptLocalDeletes: 0,
+        adoptedSettings: false,
+        excludedReading: document.exclusions?.readingForLocalOnly ?? 0,
         warnings: [...warnings],
       };
 
@@ -345,6 +472,14 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
             ]);
           }
 
+          // 「当前主库为空吗」必须在写入任何一条之前问：写完分类再问，答案永远是否。
+          const freshLibrary =
+            (await db.bookmarks.count()) === 0 &&
+            (await db.readingItems.count()) === 0 &&
+            (await db.categories.count()) === 0 &&
+            (await db.tags.count()) === 0;
+          const adoptSettings = mode === 'replace' || freshLibrary;
+
           for (const category of categories) {
             const existing = await db.categories.get(category.id);
             if (!existing || mode === 'replace') {
@@ -362,9 +497,19 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
 
           for (const bookmark of bookmarks) {
             const existing = await db.bookmarks.get(bookmark.id);
-            if (existing && mode === 'merge') {
-              if (existing.localRevision >= bookmark.localRevision) {
+            if (mode === 'merge') {
+              // 合并只新增：文档承诺「同 ID 保留本机现有版本」。localRevision 是各自的
+              // 写入次数，跨设备比较没有意义，用它决定胜负会覆盖本机的人工修改。
+              if (existing) {
                 result.bookmarksSkipped += 1;
+                if (existing.deletedAt && !bookmark.deletedAt) result.keptLocalDeletes += 1;
+                continue;
+              }
+              // 本机删过、实体已被清掉只剩墓碑：不能因为备份里修订号更大就复活它。
+              const localTombstone = await db.tombstones.get(['bookmark', bookmark.id]);
+              if (localTombstone && !bookmark.deletedAt) {
+                result.bookmarksSkipped += 1;
+                result.keptLocalDeletes += 1;
                 continue;
               }
             }
@@ -381,32 +526,87 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
             Object.assign(bookmark, deriveIndexFields(bookmark));
             await db.bookmarks.put(bookmark);
             result.bookmarksAdded += 1;
+            if (bookmark.deletedAt) {
+              // 删除态必须同时留墓碑：否则同一条网址之后能被静默重新创建，
+              // 回收站里也找不到这次删除。
+              await db.tombstones.put({
+                entityType: 'bookmark',
+                id: bookmark.id,
+                revision: bookmark.revision,
+                changeVersion: null,
+                deletedAt: bookmark.deletedAt,
+                privacyScope: bookmark.privacy.localOnly ? 'local' : 'main',
+                canonicalUrl: bookmark.canonicalUrl,
+                title: bookmark.title,
+              });
+            } else {
+              // 活跃条目与同 ID 墓碑不能并存，否则「已删除」与「在库里」同时成立。
+              await db.tombstones.delete(['bookmark', bookmark.id]);
+            }
+          }
+          if (result.keptLocalDeletes > 0) {
+            warnings.add(
+              `有 ${result.keptLocalDeletes} 条收藏在备份里仍是活跃状态，但本机已删除，已保留本机的删除；需要找回请到回收站单独恢复。`
+            );
           }
 
+          /** 同一条网址只留一条待看：普通新增路径本来就拒绝重复，恢复不能破例。 */
+          const pendingUrls = new Set<string>();
+          if (mode === 'merge') {
+            for (const row of await db.readingItems.toArray()) {
+              if (!row.completedAt) pendingUrls.add(row.canonicalUrl);
+            }
+          }
           for (const item of readingItems) {
-            const existing = await db.readingItems.get(item.id);
-            if (existing && mode === 'merge' && existing.status === item.status) {
+            if (pendingUrls.has(item.canonicalUrl)) {
+              result.readingSkipped += 1;
               continue;
             }
-            if (existing && mode === 'merge' && existing.status === 'pending') {
+            const existing = await db.readingItems.get(item.id);
+            if (mode === 'merge' && existing) {
+              // 本机同 ID 已有这条：已完成的不会被降级回待看，已存在的也不覆盖。
+              result.readingSkipped += 1;
               continue;
             }
             await db.readingItems.put(item);
             result.readingAdded += 1;
+            if (!item.completedAt) pendingUrls.add(item.canonicalUrl);
+          }
+          if (result.readingSkipped > 0) {
+            warnings.add(
+              `有 ${result.readingSkipped} 条待看因为同一条网址已经存在（或本机已有同编号记录）而跳过。`
+            );
           }
 
+          // 恢复写入的活跃收藏与备份里的同 ID 墓碑冲突时，以活跃为准并丢弃那条墓碑：
+          // 两个都留下会让「已删除」与「在库里」同时成立。
+          const restoredActiveIds = new Set(
+            bookmarks.filter((bookmark) => !bookmark.deletedAt).map((bookmark) => bookmark.id)
+          );
+          let conflictingTombstones = 0;
           for (const tombstone of tombstones) {
+            if (tombstone.entityType === 'bookmark' && restoredActiveIds.has(tombstone.id)) {
+              conflictingTombstones += 1;
+              continue;
+            }
             await db.tombstones.put(tombstone);
             result.tombstonesAdded += 1;
           }
+          if (conflictingTombstones > 0) {
+            warnings.add(
+              `备份里有 ${conflictingTombstones} 条墓碑对应本次恢复为活跃的收藏，已忽略这些墓碑。`
+            );
+          }
 
+          // 空库合并（换新设备的默认选择）应当等于一次完整导入：库里没有可被覆盖的东西，
+          // 设置与整理策略都该跟着备份走，否则用户会以为「恢复完成」却还在用默认策略。
           const incomingSettings =
             document.settings && typeof document.settings === 'object'
               ? (document.settings as unknown as Raw)
               : null;
           const currentRow = await db.settings.get('app');
           const currentSettings = (currentRow?.value as Raw) ?? null;
-          if (mode === 'replace' || !currentRow) {
+          if (adoptSettings) {
             const base = incomingSettings ?? currentSettings ?? {};
             if (!incomingSettings && mode === 'replace') {
               warnings.add('备份不含设置，已保留当前设备的显示设置，并采用备份中的主库身份。');
@@ -425,25 +625,28 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
               },
             });
           }
-          if (mode === 'replace') {
-            const policy = document.policy as unknown as Policy | null | undefined;
-            if (policy) {
-              await db.policies.put({
-                ...policy,
-                id: 'default',
-                examples: Array.isArray(policy.examples) ? policy.examples : [],
-              });
-            } else {
-              // 替换是「让主库变回备份那一刻」：备份没有策略就该回到默认策略，
-              // 否则本机旧策略会悄悄影响接下来的整理版本号。
-              await db.policies.put(DEFAULT_POLICY());
-              warnings.add('备份不含整理策略，已重置为默认策略。');
+          const policy = document.policy as unknown as Policy | null | undefined;
+          if (policy && adoptSettings) {
+            // 空库合并也写：换新设备默认选「合并」，不跟着备份走就会一直用默认策略整理。
+            await db.policies.put({
+              ...policy,
+              id: 'default',
+              examples: Array.isArray(policy.examples) ? policy.examples : [],
+            });
+            if (mode === 'merge') {
+              warnings.add('当前主库为空，已按首次迁移恢复整理策略与显示设置。');
             }
+          } else if (mode === 'replace') {
+            // 替换是「让主库变回备份那一刻」：备份没有策略就该回到默认策略，
+            // 否则本机旧策略会悄悄影响接下来的整理版本号。
+            await db.policies.put(DEFAULT_POLICY());
+            warnings.add('备份不含整理策略，已重置为默认策略。');
           }
+          result.adoptedSettings = adoptSettings;
 
           const afterSettings = await db.settings.get('app');
           const afterLibraryId = str((afterSettings?.value as Raw)?.['libraryId'], '');
-          if (mode === 'replace' && beforeLibraryId && afterLibraryId && beforeLibraryId !== afterLibraryId) {
+          if (adoptSettings && beforeLibraryId && afterLibraryId && beforeLibraryId !== afterLibraryId) {
             result.librarySwitch = { from: beforeLibraryId, to: afterLibraryId };
           }
           if (result.handoffInvalidated > 0) {

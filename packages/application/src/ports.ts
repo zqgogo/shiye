@@ -195,6 +195,8 @@ export interface RestoreResult {
   bookmarksAdded: number;
   bookmarksSkipped: number;
   readingAdded: number;
+  /** 合并时按网址判定为重复而跳过的待看数（同一条链接只会留一条 pending）。 */
+  readingSkipped: number;
   categoriesAdded: number;
   tagsAdded: number;
   tombstonesAdded: number;
@@ -204,7 +206,19 @@ export interface RestoreResult {
   handoffInvalidated: number;
   /** 替换让主库身份发生变化时给出前后值；合并或身份未变时为 null。 */
   librarySwitch: { from: string; to: string } | null;
+  /** 合并时本机已删除、备份里仍为活跃而保留删除的条数（不静默复活）。 */
+  keptLocalDeletes: number;
+  /** 合并时本机为空，已按「首次迁移」把设置与整理策略一起恢复。 */
+  adoptedSettings: boolean;
+  /** 备份引用了本地专用收藏的待看，按隐私规则未导出，此数只用于提示。 */
+  excludedReading: number;
   warnings: string[];
+}
+
+/** 安全备份的持久化副本：替换前先落库，下载失败或页面崩溃后仍能取回。 */
+export interface SafetyCopy {
+  text: string;
+  savedAt: string;
 }
 
 export interface BackupRepository {
@@ -214,6 +228,10 @@ export interface BackupRepository {
     mode: 'merge' | 'replace'
   ): Promise<RestoreResult>;
   listTombstones(): Promise<Tombstone[]>;
+  /** 替换前把当前主库的完整备份写进 meta：它不参与替换清空，下载失败也能重取。 */
+  saveSafetyCopy(text: string): Promise<void>;
+  readSafetyCopy(): Promise<SafetyCopy | null>;
+  clearSafetyCopy(): Promise<void>;
 }
 
 export interface Repositories {

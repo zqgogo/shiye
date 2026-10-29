@@ -42,7 +42,7 @@ import {
 } from '@shiye/core';
 import { AIReplySchema, AISuggestionSchema } from '@shiye/core';
 import { z } from 'zod';
-import type { CommitImportResult, Repositories, RestoreResult } from './ports.js';
+import type { CommitImportResult, Repositories, RestoreResult, SafetyCopy } from './ports.js';
 import { createSearchIndex, type LocalSearchIndex, type SearchHit } from './search.js';
 
 export interface WorkspaceSnapshot {
@@ -401,9 +401,24 @@ export class WorkspaceService {
     if (document.schemaVersion > SCHEMA_VERSION) {
       throw new AppError('UNSUPPORTED_VERSION', '备份来自更新版本，请先升级扩展。');
     }
-    const safety = mode === 'replace' ? await this.exportBackup(true) : null;
+    // 顺序很关键：先把当前主库整份落到 meta（替换不会清 meta），再提交替换。
+    // 反过来一旦下载被拦或页面被关，替换已经不可撤销，而唯一副本只在内存里。
+    let safety: BackupBundle | null = null;
+    if (mode === 'replace') {
+      safety = await this.exportBackup(true);
+      await this.repos.backup.saveSafetyCopy(safety.text);
+    }
     const result = await this.repos.backup.restore(document, mode);
     return { result, safety };
+  }
+
+  /** 上一次替换前自动保存的安全备份；确认保存到磁盘后由界面清除。 */
+  async readSafetyCopy(): Promise<SafetyCopy | null> {
+    return this.repos.backup.readSafetyCopy();
+  }
+
+  async clearSafetyCopy(): Promise<void> {
+    return this.repos.backup.clearSafetyCopy();
   }
 
   async exportSnapshot(options: {
@@ -426,7 +441,12 @@ export class WorkspaceService {
     };
   }
 
-  /** 逐条应用 AI 建议：每条一个事务，版本、隐私、锁定在事务内复核。 */
+  /**
+   * 逐条应用 AI 建议：每条一个事务，版本、隐私、锁定在事务内复核。
+   *
+   * 校验阶段的策略版本检查不算数：校验通过到点「应用」之间隔着用户读结果的几分钟，
+   * 期间另一个标签页可能改了整理策略，或者主库被替换。所以应用前重查，写入途中也重查。
+   */
   async applySuggestions(
     batchId: string,
     items: {
@@ -439,11 +459,49 @@ export class WorkspaceService {
     skipped: { n: number; reason: string }[];
     taskId: string;
   }> {
+    const batch = await this.repos.handoff.getBatch(batchId);
+    if (!batch) {
+      throw new AppError('INVALID_AI_REPLY', '本机没有这批交接的记录，请重新生成材料包。');
+    }
+    const settings = await this.repos.settings.getApp();
+    if (batch.libraryId !== settings.libraryId) {
+      throw new AppError('STALE_SUGGESTION', '这批交接来自另一个主库，不能在这里应用。');
+    }
+    if (batch.status === 'applied' || batch.status === 'invalidated') {
+      throw new AppError('ALREADY_APPLIED', '这批交接已经应用或已失效，请重新生成材料包。');
+    }
+    if ((await this.repos.settings.getPolicy()).policyVersion !== batch.policyVersion) {
+      throw new AppError(
+        'STALE_SUGGESTION',
+        '整理策略在校验之后又变了，这批建议按旧规则生成，已停止应用。请重新生成材料包。'
+      );
+    }
+
+    /** 返回停止原因；null 表示还能继续写。 */
+    const staleReason = async (): Promise<string | null> => {
+      const current = await this.repos.handoff.getBatch(batchId);
+      if (!current) return '这批交接已被删除，停止应用。';
+      if (current.status === 'invalidated') return '这批交接已失效（主库被替换过），停止应用。';
+      const app = await this.repos.settings.getApp();
+      if (app.libraryId !== current.libraryId) return '主库身份已变化，停止应用。';
+      const policy = await this.repos.settings.getPolicy();
+      if (policy.policyVersion !== current.policyVersion) {
+        return '整理策略已更新，这批建议按旧规则生成，未继续应用。请重新生成材料包。';
+      }
+      return null;
+    };
+
     const applied: { n: number; bookmark: Bookmark }[] = [];
     const skipped: { n: number; reason: string }[] = [];
     const taskId = newId();
     const itemResults: { n: number; status: 'applied' | 'skipped'; patch: null; reason: string }[] = [];
     for (const item of items) {
+      const stop = await staleReason();
+      if (stop) {
+        skipped.push({ n: item.n, reason: stop });
+        itemResults.push({ n: item.n, status: 'skipped', patch: null, reason: stop });
+        continue;
+      }
       const patch = item.patch;
       const cleaned: {
         categoryId?: string | null;

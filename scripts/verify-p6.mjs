@@ -573,6 +573,9 @@ async function main() {
     );
 
     await toggleCheckbox(page, '包含本地专用条目');
+    // 文件名精确到秒：脚本连点两次会落在同一秒里，等于自己造出「同名覆盖」。
+    // 真实用户两次点导出之间必然隔了几秒，这里等一下把节奏还原成人工操作。
+    await sleep(1200);
     const second = await exportVia(page, '导出完整 JSON', '.json');
     ctx.localOnlyBackup = JSON.parse(second.text);
     record(
@@ -585,6 +588,7 @@ async function main() {
     // 复原勾选，免得影响后面的快照导出。
     await toggleCheckbox(page, '包含本地专用条目');
     // 文件名只到「日」时，同一天导出第二次会覆盖第一份：这里要求磁盘上真的留下两份。
+    // 两次导出之间已隔开 1.2 秒，所以「同名」不再可能由脚本节奏造成。
     record(
       'P6.1 同一天连续导出得到两个不同文件，前一份没有被覆盖',
       path.basename(first.file) !== path.basename(second.file) && listDownloads().length === 2,

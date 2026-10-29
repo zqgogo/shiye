@@ -14,7 +14,7 @@
   - **阻塞**：外部条件不具备，代码也没做，不在本轮范围。
 - 所有断言名都能在 `.verify/reports/*.json` 的 `steps[].step` 里搜到；单测名在 `npm test` 的 verbose 输出里。
 
-最近一次执行：Chrome 156 无头模式，`verify:browser` + `verify:import` + `verify:p1`～`verify:p6` + `verify:a11y` 共 **262 项全部通过**（按各报告 `steps` 计：41+16+37+40+45+36+31+16；P0 主库验证是结构化报告、不含 step 列表。阶段文档里的条数取自当时那轮脚本，脚本迭代后有个位数差异），`npm test` **68 项通过**，`npm run typecheck` 通过。
+最近一次执行：Chrome 156 无头模式，`verify:browser` + `verify:import` + `verify:p1`～`verify:p6` + `verify:a11y` 共 **262 项全部通过**（按各报告 `steps` 计：41+16+37+40+45+36+31+16；P0 主库验证是结构化报告、不含 step 列表。阶段文档里的条数取自当时那轮脚本，脚本迭代后有个位数差异），`npm test` **79 项通过**，`npm run typecheck` 通过。
 
 ## 逐条对照
 
@@ -66,7 +66,7 @@
 
 ```bash
 npm install
-npm run verify        # typecheck + 68 项单测 + build
+npm run verify        # typecheck + 79 项单测 + build
 npm run verify:all    # 加上 9 个浏览器回归脚本，共 262 项
 ```
 

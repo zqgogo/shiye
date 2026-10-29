@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { isAppError, newId, toUserMessage, type Category } from '@shiye/core';
+import { isAppError, LIMITS, newId, toUserMessage, type Category } from '@shiye/core';
 import type { WorkspaceService } from '@shiye/application';
 import { notifyDataChanged } from '@shiye/application';
 
@@ -61,14 +61,25 @@ export function Popup({ service }: { service: WorkspaceService }) {
       return;
     }
     try {
+      // 在页面上下文里按码点切：.slice 走 UTF-16，遇到 emoji 会在代理对中间断开，
+      // 也会比真实字符数更早到达上限。超出时要告诉用户被截了，不能悄悄丢。
       const results = await chrome.scripting.executeScript({
         target: { tabId: tab.tabId },
-        func: () => String(window.getSelection()?.toString() ?? '').slice(0, 4000),
+        args: [LIMITS.selectedText],
+        func: (limit: number) => {
+          const raw = String(window.getSelection()?.toString() ?? '');
+          const chars = Array.from(raw);
+          return { total: chars.length, text: chars.slice(0, limit).join('') };
+        },
       });
-      const text = results[0]?.result;
-      if (typeof text === 'string' && text.trim()) {
-        setSelectedText(text);
-        setNotice('已读取当前页面所选文字，仅在保存时写入。');
+      const read = results[0]?.result as { total: number; text: string } | undefined;
+      if (read && read.text.trim()) {
+        setSelectedText(read.text);
+        setNotice(
+          read.total > LIMITS.selectedText
+            ? `所选文字共 ${read.total} 个字符，超过 ${LIMITS.selectedText} 的上限，已截取前 ${LIMITS.selectedText} 个。保存的是截取后的内容。`
+            : '已读取当前页面所选文字，仅在保存时写入。'
+        );
       } else {
         setNotice('没有检测到所选文字。');
       }

@@ -24,7 +24,9 @@ export type AppErrorCode =
   | 'OUTCOME_UNKNOWN'
   | 'INVALID_AI_REPLY'
   | 'STORAGE_FAILED'
-  | 'UNSUPPORTED_VERSION';
+  | 'UNSUPPORTED_VERSION'
+  /** 备份结构合法但条目内容不可恢复：破坏性的替换必须在写之前停下。 */
+  | 'INVALID_BACKUP_RECORDS';
 
 export class AppError extends Error {
   readonly code: AppErrorCode;
