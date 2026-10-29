@@ -75,6 +75,10 @@ docs/                    进度规划、安装说明、技术决定、未解决�
 
 见 [docs/install.md](docs/install.md)：首次安装、加载扩展、升级后刷新、换机器怎么搬数据、备份恢复与卸载会怎样。**卸载扩展会连同 IndexedDB 一起删除，删之前先导出备份。**
 
+## 亲手验一遍
+
+自动化覆盖不到的部分（浏览器原生右键菜单、真实划词、真机快照，以及几条要眼睛判断的路径）按 [docs/manual-test.md](docs/manual-test.md) 走，19 项、30–40 分钟，附记录表。测试材料在 `fixtures/`：`bookmarks-edge.html`（重复与无效链接）、`bookmarks-deep.html`（40 层目录）、`bookmarks-hostile.html`、`legacy-backup-v1.json`（v1 迁移）。
+
 ## 已知限制
 
 - P7 内置 AI 未实现，界面明示并禁用；接真实模型需要供应商凭据与显式授权。
