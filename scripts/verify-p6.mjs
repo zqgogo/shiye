@@ -335,6 +335,9 @@ async function createBookmark(page, { url, title }) {
 
 /* ---------- 下载目录：只认磁盘上真实落盘的导出文件 ---------- */
 
+/** CDP 的下载事件流水，用来区分「点了没反应」和「下载了但没落在这里」。 */
+const downloadTrail = [];
+
 function listDownloads() {
   if (!fs.existsSync(DOWNLOAD_DIR)) return [];
   return fs
@@ -362,7 +365,14 @@ async function waitForDownload(known, timeout = 20_000) {
     }
     await sleep(200);
   }
-  throw new Error('等待下载超时：没有出现新的导出文件');
+  // 超时时把「磁盘上有什么」「浏览器报了什么」一起带出去，省得下次还要猜。
+  const partial = fs.existsSync(DOWNLOAD_DIR)
+    ? fs.readdirSync(DOWNLOAD_DIR).filter((name) => name.endsWith('.crdownload')).length
+    : 0;
+  const trail = downloadTrail.length === 0 ? '无下载事件' : downloadTrail.slice(-3).join(' / ');
+  throw new Error(
+    `等待下载超时：没有出现新的导出文件（目录内已有 ${listDownloads().length} 个、未完成 ${partial} 个；下载事件：${trail}）`
+  );
 }
 
 function readDownloaded(file) {
@@ -370,15 +380,35 @@ function readDownloaded(file) {
   return { text, size: Buffer.byteLength(text, 'utf8') };
 }
 
+/** 导出按钮在导出期间是 disabled 的：disabled 上的 click() 什么都不会发生，先等它可用。 */
+async function clickExport(page, buttonText) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const ready = await page.evaluate((needle) => {
+      const nodes = [...document.querySelectorAll('.griddata button')];
+      const hit = nodes.find((node) => (node.textContent ?? '').trim().includes(needle));
+      return Boolean(hit) && !hit.disabled;
+    }, buttonText);
+    if (ready) break;
+    await sleep(150);
+  }
+  await clickIn(page, '.griddata', buttonText);
+}
+
 /** 点一次导出，返回落盘文件内容。 */
 async function exportVia(page, buttonText, expectExt) {
   const known = listDownloads();
-  await clickIn(page, '.griddata', buttonText);
+  await clickExport(page, buttonText);
   const file = await waitForDownload(known);
   if (expectExt && !file.endsWith(expectExt)) {
     throw new Error(`导出文件类型不符：${path.basename(file)}`);
   }
   return { file, ...readDownloaded(file) };
+}
+
+/** 前置导出失败时，后续阶段不该抛 TypeError，直接说清缺什么。 */
+function requireContext(ctx, key, label) {
+  if (!ctx[key]) throw new Error(`缺少前置数据：${label} 未取得，本项无法判断`);
 }
 
 async function main() {
@@ -448,6 +478,14 @@ async function main() {
   let downloadReady = false;
   try {
     const browserSession = await browser.target().createCDPSession();
+    // 记下浏览器侧看到的下载：有事件却没文件＝落盘路径不对，没事件＝根本没触发下载。
+    browserSession.on('Browser.downloadWillBegin', (event) => {
+      downloadTrail.push(`开始 ${event.suggestedFilename ?? '未命名'}`);
+    });
+    browserSession.on('Browser.downloadProgress', (event) => {
+      if (event.state === 'completed') downloadTrail.push(`完成 ${event.totalBytes ?? '?'}B`);
+      if (event.state === 'canceled') downloadTrail.push('被取消');
+    });
     await browserSession.send('Browser.setDownloadBehavior', {
       behavior: 'allow',
       downloadPath: DOWNLOAD_DIR,
@@ -546,6 +584,12 @@ async function main() {
     );
     // 复原勾选，免得影响后面的快照导出。
     await toggleCheckbox(page, '包含本地专用条目');
+    // 文件名只到「日」时，同一天导出第二次会覆盖第一份：这里要求磁盘上真的留下两份。
+    record(
+      'P6.1 同一天连续导出得到两个不同文件，前一份没有被覆盖',
+      path.basename(first.file) !== path.basename(second.file) && listDownloads().length === 2,
+      `第一份=${path.basename(first.file)}｜第二份=${path.basename(second.file)}`
+    );
   });
 
   // ---- P6.3 手机只读快照 ----
@@ -610,6 +654,7 @@ async function main() {
 
   // ---- P6.2 恢复预览与合并 ----
   phase('P6.2 预览与合并恢复', async () => {
+    requireContext(ctx, 'localOnlyBackup', '含本地专用的完整备份');
     await goto(page, 'data', '数据在手里，才放心。');
     // 造一份「比本机多一条」的备份：合并应新增这一条，其余按 ID 跳过。
     const merged = JSON.parse(JSON.stringify(ctx.localOnlyBackup));
@@ -653,6 +698,7 @@ async function main() {
 
   // ---- P6.2 替换恢复、安全备份与主库身份 ----
   phase('P6.2 替换恢复与安全备份', async () => {
+    requireContext(ctx, 'localOnlyBackup', '含本地专用的完整备份');
     const before = await readStores(page, ['bookmarks']);
     const replaceDoc = JSON.parse(JSON.stringify(ctx.localOnlyBackup));
     replaceDoc.libraryId = NEW_LIBRARY_ID;
@@ -740,6 +786,7 @@ async function main() {
 
   // ---- P6.2 版本与损坏文件 ----
   phase('P6.2 拒绝未知新版与损坏文件', async () => {
+    requireContext(ctx, 'localOnlyBackup', '含本地专用的完整备份');
     await goto(page, 'data', '数据在手里，才放心。');
     const future = JSON.parse(JSON.stringify(ctx.localOnlyBackup));
     future.schemaVersion = 99;
@@ -797,6 +844,8 @@ async function main() {
   }
 
   report.counts.downloads = listDownloads().length;
+  report.counts.downloadEvents = downloadTrail.length;
+  report.downloadTrail = downloadTrail;
   report.ok = steps.every((step) => step.ok);
   const rel = writeReport(OUT_DIR, 'p6-browser-verification.json', report);
   console.log(`\n汇总：${report.ok ? '全部通过' : '存在未通过项'} → ${rel}`);

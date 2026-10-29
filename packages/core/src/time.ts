@@ -41,3 +41,16 @@ export function formatDateTime(iso: string | null): string {
 export function startOfDay(date: Date): number {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 }
+
+/**
+ * 文件名用的本地时间戳，精确到秒。
+ *
+ * 导出文件名曾经只到「日」，同一天导出第二次就会和第一次同名：用户分不清哪份更新，
+ * 替换前的安全备份还会和当天已有备份撞名，无交互下载时甚至直接覆盖掉上一份。
+ */
+export function fileStamp(iso: string | null, fallback: Date = new Date()): string {
+  const parsed = iso ? new Date(iso) : fallback;
+  const date = Number.isNaN(parsed.getTime()) ? fallback : parsed;
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}

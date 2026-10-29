@@ -1,7 +1,7 @@
 import type { Bookmark, Category } from './types.js';
 import { tryCanonicalizeUrl } from './url.js';
 import { isSnapshotEligible } from './privacy.js';
-import { formatDateTime } from './time.js';
+import { fileStamp, formatDateTime } from './time.js';
 
 export function escapeHtml(value: string): string {
   return value
@@ -132,11 +132,9 @@ ${items || '<p class="muted">这份快照没有可展示的收藏。</p>'}
 }
 
 export function snapshotFileName(exportedAt: string): string {
-  const date = exportedAt.slice(0, 10).replace(/-/g, '');
-  return `shiye-collection-${date}.html`;
+  return `shiye-collection-${fileStamp(exportedAt)}.html`;
 }
 
 export function backupFileName(exportedAt: string): string {
-  const date = exportedAt.slice(0, 10).replace(/-/g, '');
-  return `shiye-backup-${date}.json`;
+  return `shiye-backup-${fileStamp(exportedAt)}.json`;
 }
