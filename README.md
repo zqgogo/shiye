@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-v1a 主体已实现并可构建：Chrome / Edge MV3 扩展 + React 工作台，数据落在扩展 origin 下的单一 IndexedDB 主库。P0（工程与能力验证）与 P1（核心规则、数据模型、持久仓库）已完成并留下真实浏览器证据；P2–P6 的实现已落地，浏览器内逐条回归仍在进行。**逐阶段进度与证据只以 [开发进度规划](docs/ROADMAP.md) 为准**，本文件不重复记录状态。
+v1a 主体已实现并可构建：Chrome / Edge MV3 扩展 + React 工作台，数据落在扩展 origin 下的单一 IndexedDB 主库。P0–P6 已完成并留下真实浏览器证据（9 个回归脚本共 262 项断言、68 项单测）；P7 内置 AI 未实现，界面明确禁用；P6.4 手机真机与读屏播报仍待人工验证。**逐阶段进度与证据只以 [开发进度规划](docs/ROADMAP.md) 为准**，本文件不重复记录状态。
 
 产品与技术依据位于 `resource/拾页开发交付包_v2_1/`。开发前先读其中的 `00_先读我.md`、`02_产品与技术实现说明_v2_1.md`、`03_AI开发任务书_v2_1.md`。该目录只作为输入资料归档，其中的原型、参考类型和 SQL 不作为正式实现代码。
 
@@ -42,7 +42,10 @@ npm install
 | `npm run verify:p2` | 真实浏览器验证工作台页面、待看与收藏、编辑冲突（P2） |
 | `npm run verify:p3` | 真实浏览器验证扩展收集、粘贴与书签导入（P3） |
 | `npm run verify:p4` | 真实浏览器验证分类、搜索与提问资料选择（P4，含 500 条造数） |
-| `npm run verify:all` | 以上全部 |
+| `npm run verify:p5` | 真实浏览器验证手动 AI 交接、校验、应用与撤销（P5） |
+| `npm run verify:p6` | 真实浏览器验证备份、恢复与手机快照（P6，断言真实落盘的文件） |
+| `npm run verify:a11y` | 真实浏览器验证键盘焦点、Tab、Escape、长链接与小屏（整体交付） |
+| `npm run verify:all` | 以上全部，共 262 项 |
 
 手动加载扩展：`chrome://extensions` → 打开「开发者模式」→「加载已解压的扩展程序」→ 选 `apps/extension/dist`。Edge 同理（`edge://extensions`）。
 
@@ -65,12 +68,19 @@ packages/storage/        IndexedDB / Dexie 实现、schema 迁移、备份恢复
 packages/adapters/ai/    AI 服务适配器（P7，默认关闭，尚未实现）
 fixtures/                脱敏测试样例（书签 HTML、旧版备份）
 scripts/                 真实浏览器验证脚本
-docs/                    进度规划、技术决定与验证记录
+docs/                    进度规划、安装说明、技术决定、未解决问题与验证记录
 ```
+
+## 安装、升级与数据迁移
+
+见 [docs/install.md](docs/install.md)：首次安装、加载扩展、升级后刷新、换机器怎么搬数据、备份恢复与卸载会怎样。**卸载扩展会连同 IndexedDB 一起删除，删之前先导出备份。**
 
 ## 已知限制
 
 - P7 内置 AI 未实现，界面明示并禁用；接真实模型需要供应商凭据与显式授权。
-- 手机只读快照只在移动视口下验证过，真机打开仍列为未验证。
-- 右键菜单、所选文字读取、手动加载扩展流程尚未逐项实测。
+- 手机只读快照只在桌面浏览器的移动视口下验证过，真机打开（P6.4）仍列为未验证。
+- 右键菜单真实点击、正常页面划词读取、读屏播报尚未实测。
+- 没有自动备份；数据只在一个浏览器 profile 内共享，两个 profile 之间不同步。
 - 验证记录里的未验证项一律标注「未验证」，不当作通过。
+
+未解决的问题、数据风险与下一步见 [docs/open-issues.md](docs/open-issues.md)，验收清单的逐项对照见 [docs/verification/delivery-acceptance.md](docs/verification/delivery-acceptance.md)。
