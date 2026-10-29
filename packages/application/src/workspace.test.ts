@@ -1,6 +1,6 @@
 import Dexie from 'dexie';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AppError } from '@shiye/core';
+import { AppError, newId, nowIso } from '@shiye/core';
 import { ShiyeDB } from '@shiye/storage';
 import { createRepositories } from '@shiye/storage';
 import { createWorkspaceService, type WorkspaceService } from './workspace.js';
@@ -768,6 +768,26 @@ describe('手机只读快照', () => {
     expect(withNote.html).toContain('内部备注');
     expect(withNote.html).toContain('选中文字');
   });
+
+  it('快照带分类与关键词的组合筛选数据，且不加载任何外部资源', async () => {
+    const category = await repos.categories.create('研究');
+    const bookmark = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/snap',
+      title: '快照样本',
+      sourceDescription: '可搜索描述',
+    });
+    await repos.bookmarks.update(bookmark.id, bookmark.localRevision, { categoryId: category.id }, 'human');
+
+    const snapshot = await service.exportSnapshot({ includeNote: false, includeText: false });
+    // 组合筛选取自同一行上的两个属性：分类用 data-cat，关键词用 data-text。
+    expect(snapshot.html).toContain(`data-cat="${category.id}"`);
+    expect(snapshot.html).toContain('data-text="');
+    expect(snapshot.html).toContain(`<option value="${category.id}">研究</option>`);
+    expect(snapshot.html).toMatch(/导出于/);
+    // 手机可能离线打开：不得引用外部样式、脚本、图片或字体。
+    expect(snapshot.html).not.toMatch(/<link\b|<img\b|<iframe\b/i);
+    expect(snapshot.html).not.toMatch(/src="https?:/i);
+  });
 });
 
 describe('备份编排', () => {
@@ -793,6 +813,148 @@ describe('备份编排', () => {
     const document = JSON.parse(exported.text) as Record<string, unknown>;
     document['schemaVersion'] = 99;
     await expect(service.restoreBackup(JSON.stringify(document), 'merge')).rejects.toBeInstanceOf(AppError);
+  });
+
+  it('清空指向备份里不存在的分类与标签，并逐处计数', async () => {
+    const category = await repos.categories.create('会消失的分类');
+    const tag = await repos.tags.create('会消失的标签');
+    const bookmark = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/dangling',
+      title: '悬空引用',
+    });
+    await repos.bookmarks.update(
+      bookmark.id,
+      bookmark.localRevision,
+      { categoryId: category.id, tagIds: [tag.id] },
+      'human'
+    );
+
+    const exported = await service.exportBackup(true);
+    const document = JSON.parse(exported.text) as Record<string, unknown>;
+    // 模拟「只带收藏、没带分类与标签」的部分备份。
+    document['categories'] = [];
+    document['tags'] = [];
+
+    const restored = await service.restoreBackup(JSON.stringify(document), 'replace');
+    expect(restored.result.danglingReferences).toBe(2);
+    const [row] = await repos.bookmarks.listActive();
+    expect(row?.categoryId).toBeNull();
+    expect(row?.tagIds).toEqual([]);
+    expect(row?.categoryKey).toBe('uncategorized');
+    expect(restored.result.warnings.join(' ')).toContain('已清空这些引用');
+  });
+
+  it('替换时不带策略就重置为默认策略，避免旧策略残留', async () => {
+    const custom = await repos.settings.updatePolicy('我的自定义整理策略');
+    expect(custom.instruction).toBe('我的自定义整理策略');
+
+    const exported = await service.exportBackup(true);
+    const document = JSON.parse(exported.text) as Record<string, unknown>;
+    document['policy'] = null;
+
+    const restored = await service.restoreBackup(JSON.stringify(document), 'replace');
+    const policy = await repos.settings.getPolicy();
+    expect(policy.instruction).not.toContain('我的自定义整理策略');
+    expect(policy.policyVersion).toBe(1);
+    expect(restored.result.warnings.join(' ')).toContain('重置为默认策略');
+  });
+
+  it('替换记录主库身份变化并作废在途 AI 批次', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/switch', title: '换库样本' });
+    const before = await repos.settings.getApp();
+    await db.handoffBatches.put({
+      id: newId(),
+      protocolVersion: 2,
+      createdAt: nowIso(),
+      policyVersion: 1,
+      libraryId: before.libraryId,
+      status: 'exported',
+      parts: 1,
+      itemCount: 1,
+    });
+
+    const exported = await service.exportBackup(true);
+    const document = JSON.parse(exported.text) as Record<string, unknown>;
+    document['libraryId'] = 'library-from-another-device';
+
+    const restored = await service.restoreBackup(JSON.stringify(document), 'replace');
+    expect(restored.result.librarySwitch).toEqual({
+      from: before.libraryId,
+      to: 'library-from-another-device',
+    });
+    expect(restored.result.handoffInvalidated).toBe(1);
+    expect(await db.handoffBatches.count()).toBe(0);
+    const after = await repos.settings.getApp();
+    expect(after.libraryId).toBe('library-from-another-device');
+    expect(restored.result.warnings.join(' ')).toContain('旧主库的编号映射不再可用');
+  });
+
+  it('替换中途失败时整体回退，主库保持原样', async () => {
+    await repos.categories.create('回退分类');
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/rollback-a', title: '回退 A' });
+    await repos.reading.add({ originalUrl: 'https://example.com/rollback-q', title: '回退待看' });
+
+    const exported = await service.exportBackup(true);
+    const document = JSON.parse(exported.text) as { bookmarks: Record<string, unknown>[] };
+    document.bookmarks.push({
+      ...document.bookmarks[0],
+      id: 'boom-id',
+      originalUrl: 'https://example.com/boom',
+      canonicalUrl: 'https://example.com/boom',
+      title: '触发失败的写入',
+    });
+
+    // 注入写入失败：替换已经 clear 过全库，仍必须整段回滚。
+    const originalPut = db.bookmarks.put.bind(db.bookmarks);
+    let calls = 0;
+    (db.bookmarks as unknown as { put: unknown }).put = async (...args: unknown[]) => {
+      calls += 1;
+      if (calls === 1) throw new Error('注入写入失败');
+      return originalPut(...(args as [never]));
+    };
+    try {
+      await expect(service.restoreBackup(JSON.stringify(document), 'replace')).rejects.toThrow('注入写入失败');
+    } finally {
+      (db.bookmarks as unknown as { put: unknown }).put = originalPut;
+    }
+
+    expect(await repos.bookmarks.listActive()).toHaveLength(1);
+    expect(await repos.categories.list()).toHaveLength(1);
+    expect(await repos.reading.listPending()).toHaveLength(1);
+  });
+
+  it('合并恢复跳过较旧的同 ID 记录，保留本地修改', async () => {
+    const bookmark = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/merge',
+      title: '合并前',
+    });
+    const exported = await service.exportBackup(true);
+    await repos.bookmarks.update(bookmark.id, bookmark.localRevision, { title: '合并后人工' }, 'human');
+
+    const restored = await service.restoreBackup(exported.text, 'merge');
+    expect(restored.result.bookmarksSkipped).toBeGreaterThanOrEqual(1);
+    const [row] = await repos.bookmarks.listActive();
+    expect(row?.title).toBe('合并后人工');
+  });
+
+  it('空主库合并恢复等同于导入', async () => {
+    await repos.categories.create('导入分类');
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/empty-merge', title: '导入样本' });
+    await repos.reading.add({ originalUrl: 'https://example.com/empty-queue', title: '导入待看' });
+    const exported = await service.exportBackup(true);
+
+    await db.bookmarks.clear();
+    await db.readingItems.clear();
+    await db.categories.clear();
+    await db.tags.clear();
+    await db.tombstones.clear();
+
+    const restored = await service.restoreBackup(exported.text, 'merge');
+    expect(restored.result.bookmarksAdded).toBe(1);
+    expect(restored.result.readingAdded).toBe(1);
+    expect(restored.result.categoriesAdded).toBe(1);
+    expect(await repos.bookmarks.listActive()).toHaveLength(1);
+    expect(await repos.reading.listPending()).toHaveLength(1);
   });
 });
 

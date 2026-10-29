@@ -19,7 +19,7 @@ import type {
   Tombstone,
 } from '@shiye/core';
 import type { BackupRepository, RestoreResult } from '@shiye/application';
-import { ShiyeDB, deriveIndexFields } from './db.js';
+import { ShiyeDB, DEFAULT_POLICY, deriveIndexFields } from './db.js';
 
 type Raw = Record<string, unknown>;
 
@@ -219,7 +219,9 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
             includesLocalOnly: includeLocalOnly,
             categories,
             tags,
-            policy: policy ?? null,
+            // 从没打开过策略页时库里没有 default 行，导出的是「此刻生效的默认策略」，
+            // 否则备份会写着 policy: null，恢复后说不清当时用的是哪一版。
+            policy: policy ?? DEFAULT_POLICY(),
             settings: settings ?? null,
             bookmarks: includeLocalOnly
               ? bookmarks
@@ -242,21 +244,42 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
         throw new AppError('UNSUPPORTED_VERSION', '备份来自更新版本，请先升级扩展。');
       }
       const warnings = new Set<string>();
-      const bookmarks = document.bookmarks
-        .map((raw) => sanitizeBookmark(raw as unknown as Raw, warnings))
-        .filter((row): row is Bookmark => row !== null);
-      const readingItems = document.readingItems
-        .map((raw) => sanitizeReading(raw as unknown as Raw))
-        .filter((row): row is ReadingItem => row !== null);
       const categories = document.categories
         .map((raw) => sanitizeCategory(raw as unknown as Raw))
         .filter((row): row is Category => row !== null);
       const tags = document.tags
         .map((raw) => sanitizeTag(raw as unknown as Raw))
         .filter((row): row is Tag => row !== null);
+      const bookmarks = document.bookmarks
+        .map((raw) => sanitizeBookmark(raw as unknown as Raw, warnings))
+        .filter((row): row is Bookmark => row !== null);
+      const readingItems = document.readingItems
+        .map((raw) => sanitizeReading(raw as unknown as Raw))
+        .filter((row): row is ReadingItem => row !== null);
       const tombstones = (document.tombstones ?? [])
         .map((raw) => sanitizeTombstone(raw as unknown as Raw))
         .filter((row): row is Tombstone => row !== null);
+
+      // 备份可能来自另一台设备或只恢复了部分数据：引用到不存在的分类/标签时清空，
+      // 否则恢复后会出现指向空气的条目，「未分类」计数与分类页都会对不上。
+      const knownCategories = new Set(categories.map((row) => row.id));
+      const knownTags = new Set(tags.map((row) => row.id));
+      let danglingReferences = 0;
+      for (const bookmark of bookmarks) {
+        if (bookmark.categoryId && !knownCategories.has(bookmark.categoryId)) {
+          bookmark.categoryId = null;
+          danglingReferences += 1;
+        }
+        const keptTags = bookmark.tagIds.filter((id) => knownTags.has(id));
+        if (keptTags.length !== bookmark.tagIds.length) {
+          danglingReferences += bookmark.tagIds.length - keptTags.length;
+          bookmark.tagIds = keptTags;
+        }
+        Object.assign(bookmark, deriveIndexFields(bookmark));
+      }
+      if (danglingReferences > 0) {
+        warnings.add(`有 ${danglingReferences} 处引用指向本次未恢复的分类或标签，已清空这些引用。`);
+      }
 
       if (document.schemaVersion < SCHEMA_VERSION) {
         warnings.add(`备份为旧版格式（v${document.schemaVersion}），已显式迁移到 v${SCHEMA_VERSION}。`);
@@ -276,6 +299,9 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
         categoriesAdded: 0,
         tagsAdded: 0,
         tombstonesAdded: 0,
+        danglingReferences,
+        handoffInvalidated: 0,
+        librarySwitch: null,
         warnings: [...warnings],
       };
 
@@ -298,7 +324,12 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
           db.meta,
         ],
         async () => {
+          const beforeSettings = await db.settings.get('app');
+          const beforeLibraryId = str((beforeSettings?.value as Raw)?.['libraryId'], '');
           if (mode === 'replace') {
+            // 替换前先记下会被作废的在途批次：旧主库的编号映射对新主库没有意义，
+            // 留着会让「继续这一批」把建议应用到同 ID 的另一条记录上。
+            result.handoffInvalidated = await db.handoffBatches.count();
             await Promise.all([
               db.bookmarks.clear(),
               db.readingItems.clear(),
@@ -369,30 +400,58 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
             result.tombstonesAdded += 1;
           }
 
-          const incomingSettings = document.settings;
-          if (incomingSettings && typeof incomingSettings === 'object') {
-            const currentRow = await db.settings.get('app');
-            if (!currentRow || mode === 'replace') {
-              await db.settings.put({
-                key: 'app',
-                value: {
-                  ...incomingSettings,
-                  libraryId: str((incomingSettings as unknown as Raw)['libraryId'], newId()),
-                  pinnedCategoryIds: arr((incomingSettings as unknown as Raw)['pinnedCategoryIds']).filter(
-                    (value): value is string => typeof value === 'string'
-                  ),
-                },
-              });
+          const incomingSettings =
+            document.settings && typeof document.settings === 'object'
+              ? (document.settings as unknown as Raw)
+              : null;
+          const currentRow = await db.settings.get('app');
+          const currentSettings = (currentRow?.value as Raw) ?? null;
+          if (mode === 'replace' || !currentRow) {
+            const base = incomingSettings ?? currentSettings ?? {};
+            if (!incomingSettings && mode === 'replace') {
+              warnings.add('备份不含设置，已保留当前设备的显示设置，并采用备份中的主库身份。');
             }
-          }
-          if (document.policy && mode === 'replace') {
-            const policy = document.policy as unknown as Policy;
-            await db.policies.put({
-              ...policy,
-              id: 'default',
-              examples: Array.isArray(policy.examples) ? policy.examples : [],
+            // 身份以信封顶层的 libraryId 为准：settings 里的那份可能被手改或来自旧格式，
+            // 而顶层字段是导出时写死的主库标识，恢复后要靠它判断「是不是同一份库」。
+            const identity = str(document.libraryId, '') || str(base['libraryId'], '') || newId();
+            await db.settings.put({
+              key: 'app',
+              value: {
+                ...base,
+                libraryId: identity,
+                pinnedCategoryIds: arr(base['pinnedCategoryIds']).filter(
+                  (value): value is string => typeof value === 'string'
+                ),
+              },
             });
           }
+          if (mode === 'replace') {
+            const policy = document.policy as unknown as Policy | null | undefined;
+            if (policy) {
+              await db.policies.put({
+                ...policy,
+                id: 'default',
+                examples: Array.isArray(policy.examples) ? policy.examples : [],
+              });
+            } else {
+              // 替换是「让主库变回备份那一刻」：备份没有策略就该回到默认策略，
+              // 否则本机旧策略会悄悄影响接下来的整理版本号。
+              await db.policies.put(DEFAULT_POLICY());
+              warnings.add('备份不含整理策略，已重置为默认策略。');
+            }
+          }
+
+          const afterSettings = await db.settings.get('app');
+          const afterLibraryId = str((afterSettings?.value as Raw)?.['libraryId'], '');
+          if (mode === 'replace' && beforeLibraryId && afterLibraryId && beforeLibraryId !== afterLibraryId) {
+            result.librarySwitch = { from: beforeLibraryId, to: afterLibraryId };
+          }
+          if (result.handoffInvalidated > 0) {
+            warnings.add(
+              `替换已作废 ${result.handoffInvalidated} 个在途 AI 交接批次；旧主库的编号映射不再可用，请勿回到旧库继续整理。`
+            );
+          }
+
           await db.meta.put({ key: 'schemaVersion', value: SCHEMA_VERSION });
           await db.meta.put({ key: 'lastRestoreAt', value: nowIso() });
         }

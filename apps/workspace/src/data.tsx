@@ -39,11 +39,17 @@ export function DataPage() {
         bookmarksSkipped: number;
         readingAdded: number;
         tombstonesAdded: number;
+        danglingReferences: number;
+        handoffInvalidated: number;
+        librarySwitch: { from: string; to: string } | null;
+        safety: { exportedAt: string; bookmarks: number; reading: number; categories: number; tags: number } | null;
         warnings: string[];
         safetyText?: string;
       }
     | null
   >(null);
+
+  const libraryEmpty = data.bookmarks.length === 0 && data.pendingReading.length === 0;
 
   const exportBackup = async () => {
     setBusy(true);
@@ -66,7 +72,12 @@ export function DataPage() {
       setParsed(document);
     } catch (cause) {
       setParsed(null);
-      setError(toUserMessage(cause));
+      // 直接抛 V8 的 "Unexpected end of JSON input" 对用户没有意义，统一说人话。
+      setError(
+        cause instanceof SyntaxError
+          ? '文件不是有效的 JSON，请确认选对了备份文件。'
+          : toUserMessage(cause)
+      );
     }
   };
 
@@ -81,12 +92,25 @@ export function DataPage() {
     try {
       const outcome = await service.restoreBackup(restoreFile.text, mode);
       const safety = outcome.safety;
+      const safetyDoc = safety?.document ?? null;
       setResult({
         mode: outcome.result.mode,
         bookmarksAdded: outcome.result.bookmarksAdded,
         bookmarksSkipped: outcome.result.bookmarksSkipped,
         readingAdded: outcome.result.readingAdded,
         tombstonesAdded: outcome.result.tombstonesAdded,
+        danglingReferences: outcome.result.danglingReferences,
+        handoffInvalidated: outcome.result.handoffInvalidated,
+        librarySwitch: outcome.result.librarySwitch,
+        safety: safetyDoc
+          ? {
+              exportedAt: safetyDoc.exportedAt,
+              bookmarks: safetyDoc.bookmarks.length,
+              reading: safetyDoc.readingItems.length,
+              categories: safetyDoc.categories.length,
+              tags: safetyDoc.tags.length,
+            }
+          : null,
         warnings: outcome.result.warnings,
         ...(safety ? { safetyText: safety.text } : {}),
       });
@@ -209,14 +233,21 @@ export function DataPage() {
               <label className="field">
                 <span>恢复方式</span>
                 <select value={mode} onChange={(event) => setMode(event.target.value as 'merge' | 'replace')}>
-                  <option value="merge">合并（保留现有，按 ID 与修订号跳过较旧记录）</option>
+                  <option value="merge">
+                    {libraryEmpty
+                      ? '合并（当前主库为空，等同于导入）'
+                      : '合并（保留现有，按 ID 与修订号跳过较旧记录）'}
+                  </option>
                   <option value="replace">替换整个主库（先自动备份）</option>
                 </select>
               </label>
               {mode === 'replace' ? (
                 <div className="notice danger">
                   <strong>替换会清空当前主库</strong>
-                  <span>包括收藏、待看、分类、标签、导入批次与 AI 日志。旧库将停止写入。</span>
+                  <span>
+                    包括收藏、待看、分类、标签、导入批次与 AI 日志；在途 AI 交接批次也会作废，旧库应停止写入。
+                  </span>
+                  <span>替换前会先导出一份当前主库的完整备份（含时间与条数），未能保存时可就地再次保存。</span>
                   <label className="checkline" style={{ margin: 0 }}>
                     <input
                       type="checkbox"
@@ -235,6 +266,9 @@ export function DataPage() {
                   {busy ? '恢复中…' : mode === 'replace' ? '替换并恢复' : '合并恢复'}
                 </button>
               </div>
+              {/* 文件已选好时，写入前/写入中的失败也必须就地可见，
+                  否则「替换未勾选确认」这类拒绝只会写进 state，用户看不到。 */}
+              {error ? <p className="alert">{error}</p> : null}
             </>
           ) : (
             <p className="alert">{error}</p>
@@ -242,26 +276,55 @@ export function DataPage() {
         ) : null}
 
         {result ? (
-          <div className="notice">
-            <strong>恢复完成（{result.mode === 'replace' ? '替换' : '合并'}）</strong>
-            <span>
-              新增收藏 {result.bookmarksAdded} 条，跳过 {result.bookmarksSkipped} 条，待看 {result.readingAdded} 条，
-              删除标记 {result.tombstonesAdded} 条。
-            </span>
-            {result.warnings.map((warning) => (
-              <span key={warning}>{warning}</span>
-            ))}
-            {result.safetyText ? (
-              <button
-                className="btn small"
-                onClick={() => download(backupFileName(new Date().toISOString()), result.safetyText ?? '', 'application/json')}
-              >
-                再次保存安全备份
-              </button>
+          <>
+            {result.safety ? (
+              <div className="notice">
+                <strong>替换前已自动备份当前主库</strong>
+                <span>
+                  导出时间 {formatDateTime(result.safety.exportedAt)} · {result.safety.bookmarks} 条收藏 /{' '}
+                  {result.safety.reading} 条待看 / {result.safety.categories} 个分类 / {result.safety.tags} 个标签
+                </span>
+                <span>备份文件已发起下载；请在下载目录核对是否保存成功。</span>
+                {result.safetyText ? (
+                  <button
+                    className="btn small"
+                    onClick={() =>
+                      download(backupFileName(new Date().toISOString()), result.safetyText ?? '', 'application/json')
+                    }
+                  >
+                    再次保存安全备份
+                  </button>
+                ) : null}
+              </div>
             ) : null}
-          </div>
+            <div className="notice">
+              <strong>恢复完成（{result.mode === 'replace' ? '替换' : '合并'}）</strong>
+              <span>
+                新增收藏 {result.bookmarksAdded} 条，跳过 {result.bookmarksSkipped} 条，待看 {result.readingAdded} 条，
+                删除标记 {result.tombstonesAdded} 条。
+              </span>
+              {result.danglingReferences > 0 ? (
+                <span>有 {result.danglingReferences} 处引用指向备份里没有的分类或标签，已清空。</span>
+              ) : null}
+              {result.warnings.map((warning) => (
+                <span key={warning}>{warning}</span>
+              ))}
+            </div>
+            {result.librarySwitch ? (
+              <div className="notice danger">
+                <strong>主库身份已切换</strong>
+                <span>
+                  {result.librarySwitch.from} → {result.librarySwitch.to}
+                </span>
+                <span>
+                  旧设备或旧配置上的 AI 交接映射已失效（{result.handoffInvalidated} 个在途批次作废）。请只保留这一份主库继续整理，
+                  在另一处停止写入并关闭旧工作台，避免同一收藏在两份库里分叉。
+                </span>
+              </div>
+            ) : null}
+          </>
         ) : null}
-        <p className="alert">{error && !restoreFile ? error : ''}</p>
+        {error && !restoreFile ? <p className="alert">{error}</p> : null}
       </div>
 
       <Notice>

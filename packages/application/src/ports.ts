@@ -198,6 +198,12 @@ export interface RestoreResult {
   categoriesAdded: number;
   tagsAdded: number;
   tombstonesAdded: number;
+  /** 备份引用了本次未恢复的分类或标签：引用已清空，逐处计数。 */
+  danglingReferences: number;
+  /** 替换时被作废的在途 AI 交接批次数量（旧主库的编号映射不再可用）。 */
+  handoffInvalidated: number;
+  /** 替换让主库身份发生变化时给出前后值；合并或身份未变时为 null。 */
+  librarySwitch: { from: string; to: string } | null;
   warnings: string[];
 }
 
