@@ -554,7 +554,15 @@ export function DetailDrawer({ bookmarkId }: { bookmarkId: string }) {
   };
 
   return (
-    <aside className="drawer" role="dialog" aria-modal="true" aria-labelledby="detail-title" style={{ zIndex: 45 }}>
+    <aside
+      className="drawer"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="detail-title"
+      data-focus-container="true"
+      tabIndex={-1}
+      style={{ zIndex: 45 }}
+    >
       <div className="drawerhead">
         <span>收藏详情 · {bookmark.deletedAt ? '已删除' : '本地已保存'}</span>
         <button className="iconbtn" onClick={closeDrawer} aria-label="关闭详情">

@@ -1,4 +1,4 @@
-import { Sidebar, Topbar } from './components.js';
+import { FocusGuard, Sidebar, Topbar } from './components.js';
 import { ModalHost, DetailDrawer } from './dialogs.js';
 import { useWorkspace } from './state.js';
 import {
@@ -83,6 +83,7 @@ export function App() {
       </main>
       {drawerId ? <DetailDrawer bookmarkId={drawerId} /> : null}
       <ModalHost />
+      <FocusGuard />
     </div>
   );
 }

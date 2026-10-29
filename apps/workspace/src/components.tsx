@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import type { Bookmark, Category } from '@shiye/core';
 import { domainOf, formatDateTime } from '@shiye/core';
 import { useWorkspace } from './state.js';
@@ -369,4 +370,102 @@ export function ReadingRow({
       </div>
     </article>
   );
+}
+
+/* ---------- 对话框焦点管理 ---------- */
+
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** 当前最上层的对话框：抽屉与模态可以同时存在，DOM 里靠后的那个才是用户正在操作的。 */
+function topDialog(): HTMLElement | null {
+  const dialogs = [...document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')];
+  return dialogs.filter((node) => node.getClientRects().length > 0).at(-1) ?? null;
+}
+
+function focusablesIn(dialog: HTMLElement): HTMLElement[] {
+  return [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+    (node) => node.getClientRects().length > 0
+  );
+}
+
+function focusInto(dialog: HTMLElement): void {
+  // 抽屉这类长面板聚焦容器本身即可，直接跳进输入框会让页面自己滚一段。
+  if (dialog.dataset.focusContainer === 'true') {
+    dialog.focus();
+    return;
+  }
+  const target =
+    dialog.querySelector<HTMLElement>('[data-autofocus]') ??
+    dialog.querySelector<HTMLElement>('input:not([type="hidden"]), textarea, select') ??
+    focusablesIn(dialog)[0] ??
+    dialog;
+  target.focus();
+}
+
+/**
+ * 把 Tab 关在对话框里，并在关闭后把焦点还回去。
+ *
+ * 没有这一层时，Shift+Tab 会退到遮罩后的页面上继续操作——视觉上「弹窗挡着」，
+ * 键盘用户却已经跑到弹窗外面，`aria-modal="true"` 也就成了空话。
+ */
+export function FocusGuard() {
+  useEffect(() => {
+    let current = topDialog();
+    /** 逐层记录：抽屉里再开删除确认，关掉确认要回到抽屉，而不是回到列表。 */
+    const stack: HTMLElement[] = [];
+    if (current) {
+      stack.push(document.activeElement instanceof HTMLElement ? document.activeElement : document.body);
+      focusInto(current);
+    }
+
+    const observer = new MutationObserver(() => {
+      const next = topDialog();
+      if (next === current) return;
+      if (next) {
+        stack.push(document.activeElement instanceof HTMLElement ? document.activeElement : document.body);
+        focusInto(next);
+      } else {
+        const back = stack.pop();
+        // 原来的按钮可能已随列表重渲染消失，那就落到文档开头，别把焦点丢在 body 上。
+        if (back && document.contains(back) && back.getClientRects().length > 0) back.focus();
+        else (document.querySelector<HTMLElement>('.topbar button, .topbar a') ?? document.body).focus();
+      }
+      current = next;
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return;
+      const dialog = topDialog();
+      if (!dialog) return;
+      const items = focusablesIn(dialog);
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (!first || !last) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement) || !dialog.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
+      if (event.shiftKey && active === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('keydown', onKeyDown, true);
+    };
+  }, []);
+  return null;
 }

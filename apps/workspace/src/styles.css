@@ -29,6 +29,8 @@ button { cursor: pointer; border: 0; background: none; }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
 a { color: var(--accent); }
 button:focus-visible, a:focus-visible { outline: 2px solid #698971; outline-offset: 3px; }
+/* 抽屉容器只是接住焦点（Tab 被关在里面），不需要给整块面板描边。 */
+.drawer:focus { outline: none; }
 input:focus, textarea:focus, select:focus { outline: 2px solid #afc2ac; outline-offset: 1px; }
 
 input, select, textarea {
