@@ -27,7 +27,7 @@ npm install
 要求：Node 20+（开发时用 22.22.2）、npm 10+。若 `registry.npmjs.org` 不可达，改用镜像：
 `npm install --registry=https://registry.npmmirror.com --strict-ssl=false`。
 
-接手前按顺序读三份：`docs/ROADMAP.md` 的「当前进度」看做到哪、`docs/next-step-cloudflare-ai-implementation.md` 看下一阶段（自有 Cloudflare 后端、自配 AI、Safari 支持）的要求、`docs/purge-by-criteria-design.md` 看清理功能的待评估设计。进度只在 ROADMAP 维护。
+接手前按顺序读四份：`docs/ROADMAP.md` 的「当前进度」看做到哪、`docs/next-step-cloudflare-ai-implementation.md` 看下一阶段（自有 Cloudflare 后端、自配 AI、Safari 支持）的要求、`docs/import-rollback-and-bulk-cleanup-design.md` 看撤回与清理的场景与已定默认值、`docs/purge-by-criteria-design.md` 看 P9 的分层与接口。进度只在 ROADMAP 维护。
 
 常用命令：
 
