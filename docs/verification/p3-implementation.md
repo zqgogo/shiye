@@ -88,3 +88,18 @@ npm run verify:all             # P0 + P0.4 + P1 + P2 + P3 全量回归
 原始 JSON 写到 `.verify/reports/p3-browser-verification.json`（不入库）。失败项按报告里的 `step` 与 `detail` 修正实现或选择器。
 
 > 执行状态：2026-10-28 第 3 轮 41 项全部通过，P3.1–P3.5 已勾选。三轮的修正过程见第 3 节。
+
+## 6. 使用反馈后的补充（2026-10-30）
+
+真实导入时暴露出两件事：① 「导入收藏夹」沿用了「粘贴链接」的默认目标（待看），整批书签静默进待看，而待看没有分类字段、目录映射区只在收藏库目标下渲染，看起来就是「分类丢了」；② 导错之后没有退路——只能逐条删，而且删掉的记录会留下墓碑，同一批书签再也导不进来。
+
+| 改动 | 落点 | 断言 |
+| --- | --- | --- |
+| 默认目标跟随入口：`capture:file` / 切到「导入收藏夹」→ `library`；粘贴仍为 `reading` | `apps/workspace/src/capture.tsx` | `verify:p3`「导入收藏夹默认保存到收藏库」「默认目标下目录映射区直接可见」 |
+| 按批次撤销：`undoBatch()` 删掉这一批新建的条目，`localRevision > 1` 的保留并报数；连墓碑一起清，批次记 `reverted` | `packages/storage/src/repositories.ts`、`packages/application/src/ports.ts`、`packages/application/src/workspace.ts` | 单测「撤销导入只移除这一批新建的收藏，导入后改过的保留」「撤销后同一批网址可以重新导入（不留下墓碑）」「同一批只能撤销一次」 |
+| 撤销入口：结果面板 + 数据页「最近导入」 | `apps/workspace/src/capture.tsx`、`apps/workspace/src/data.tsx` | `verify:p3`「撤销导入移除这一批」「批次记为 reverted」「数据页列出批次并可从那里撤销」 |
+| 批量清空：`purgeAll()` / `purgeCategory()` / `purgePending()`，**连墓碑一起删** | `packages/storage/src/repositories.ts`、`apps/workspace/src/pages.tsx` | 单测「彻底清空收藏库连墓碑一起清掉，之后可以重新导入」「清空分类只移除该分类下的收藏」「清空待看只清队列」；`verify:p3`「彻底清空后收藏与墓碑都归零」「清空待看只清队列，收藏数量不变」 |
+
+为什么清空要删墓碑：导入去重会看墓碑，只软删的话重新导入会全部判成「存在已删除收藏，未绕过墓碑」，用户看到的是「清空了却导不进来」。代价（不可恢复；更早的备份合并时会把它们带回来）记在 [open-issues](../open-issues.md) ⑨。
+
+复跑：`verify:p3` **42 → 48 项全通过**，`npm test` 89 → 96 项，`verify:p2/p4/p5/p6` 无回归。

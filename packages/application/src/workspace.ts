@@ -30,6 +30,7 @@ import {
   type BookmarkPatch,
   type Category,
   type ImportDestination,
+  type ImportBatch,
   type ImportParseResult,
   type ImportPlan,
   type ImportRow,
@@ -42,7 +43,13 @@ import {
 } from '@shiye/core';
 import { AIReplySchema, AISuggestionSchema } from '@shiye/core';
 import { z } from 'zod';
-import type { CommitImportResult, Repositories, RestoreResult, SafetyCopy } from './ports.js';
+import type {
+  CommitImportResult,
+  ImportUndoResult,
+  Repositories,
+  RestoreResult,
+  SafetyCopy,
+} from './ports.js';
 import { createSearchIndex, type LocalSearchIndex, type SearchHit } from './search.js';
 
 export interface WorkspaceSnapshot {
@@ -376,6 +383,28 @@ export class WorkspaceService {
       destination: input.destination,
       rows: input.rows,
     });
+  }
+
+  /** 最近导入过的批次：撤销入口要靠它找回「刚刚那一次」。 */
+  async listImportBatches(): Promise<ImportBatch[]> {
+    return this.repos.imports.listBatches();
+  }
+
+  async undoImport(batchId: string): Promise<ImportUndoResult> {
+    return this.repos.imports.undoBatch(batchId);
+  }
+
+  /** 彻底清空收藏库（含墓碑）：清空后同一网址可以重新导入。不可恢复。 */
+  async purgeAllBookmarks(): Promise<number> {
+    return this.repos.bookmarks.purgeAll();
+  }
+
+  async purgeCategoryBookmarks(categoryId: string | null): Promise<number> {
+    return this.repos.bookmarks.purgeCategory(categoryId);
+  }
+
+  async purgePendingReading(): Promise<number> {
+    return this.repos.reading.purgePending();
   }
 
   async exportBackup(includeLocalOnly: boolean): Promise<BackupBundle> {

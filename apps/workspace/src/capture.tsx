@@ -51,7 +51,8 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ inserted: number; skipped: number; skippedReasons: { line: number; reason: string }[]; destination: ImportDestination } | null>(null);
+  const [result, setResult] = useState<{ inserted: number; skipped: number; skippedReasons: { line: number; reason: string }[]; destination: ImportDestination; batchId: string } | null>(null);
+  const [undone, setUndone] = useState<{ removed: number; kept: number; missing: number } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -81,6 +82,7 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
   const parse = async (source?: { mode: 'bookmarkHtml'; text: string; fileName: string }) => {
     setError('');
     setResult(null);
+    setUndone(null);
     setBusy(true);
     try {
       if (source) {
@@ -206,15 +208,36 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
     );
     setBusy(false);
     if (!committed) return;
+    setUndone(null);
     setResult({
       inserted: committed.inserted,
       skipped: committed.skipped,
       skippedReasons: committed.skippedReasons,
       destination: preview.destination,
+      batchId: preview.batchId,
     });
     setPreview(null);
     setText('');
     toast(`已保存 ${committed.inserted} 条，跳过 ${committed.skipped} 条。`);
+  };
+
+  /**
+   * 撤销刚才这一批。
+   *
+   * 只删「导入后原样留着」的条目：改过的、应用过 AI 的、转成收藏的会保留并如实报数。
+   * 撤销后同时清掉这批的删除标记，否则同一批书签重新导入会被自己留下的墓碑挡住。
+   */
+  const undoImport = async () => {
+    if (!result) return;
+    setBusy(true);
+    const outcome = await run(
+      () => service.undoImport(result.batchId),
+      '已撤销这次导入，条目已从库里移除。'
+    );
+    setBusy(false);
+    if (!outcome) return;
+    setUndone({ removed: outcome.removed, kept: outcome.kept, missing: outcome.missing });
+    setResult(null);
   };
 
   const visibleRows = (preview?.rows ?? []).filter((row) => (view === 'all' ? true : row.status === view));
@@ -290,8 +313,27 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
             >
               查看保存结果 →
             </button>
+            {result.inserted > 0 ? (
+              // 误选了「待看」或导错了文件时，这是最直接的一步：把刚建出来的条目整批撤掉，
+              // 不必去列表里逐条删，也不会留下挡住重新导入的痕迹。
+              <button className="btn danger" onClick={() => void undoImport()} disabled={busy}>
+                {busy ? '撤销中…' : '撤销这次导入'}
+              </button>
+            ) : null}
           </div>
         </div>
+      ) : null}
+
+      {undone ? (
+        <Notice>
+          <strong>已撤销这次导入</strong>
+          <span>
+            移除 {undone.removed} 条
+            {undone.kept > 0 ? `；${undone.kept} 条导入后被改过，已保留` : ''}
+            {undone.missing > 0 ? `；${undone.missing} 条已不在库里` : ''}。
+          </span>
+          <span>这批的删除标记也一并清掉了，同一批书签可以重新导入。</span>
+        </Notice>
       ) : null}
 
       <div className="panel">

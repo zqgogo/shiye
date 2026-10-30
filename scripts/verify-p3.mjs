@@ -716,8 +716,60 @@ async function main() {
     );
   });
 
+  phase('P3.4 撤销刚导入的一批', async () => {
+    const before = await page.evaluate(readMainLibrary);
+    const clicked = await page.evaluate(() => {
+      const hit = [...document.querySelectorAll('button')].find((node) =>
+        (node.textContent ?? '').includes('撤销这次导入')
+      );
+      if (!hit) return false;
+      hit.click();
+      return true;
+    });
+    if (!clicked) throw new Error('结果面板里没有「撤销这次导入」按钮');
+    await waitForText(page, '已撤销这次导入', 20_000);
+    await sleep(800);
+
+    const after = await page.evaluate(readMainLibrary);
+    record(
+      'P3.4 撤销导入移除这一批新建的收藏',
+      before.bookmarks.length - after.bookmarks.length === 4,
+      `收藏 ${before.bookmarks.length}→${after.bookmarks.length}`
+    );
+    const batches = await page.evaluate(readImportBatches);
+    record(
+      'P3.4 撤销后批次状态记为 reverted',
+      batches.find((row) => row.fileName === 'bookmarks-firefox.html')?.status === 'reverted',
+      JSON.stringify(batches.map((row) => [row.fileName, row.status]))
+    );
+
+    // 重新解析同一份文件：还能算成「可新增」才说明撤销没有留下挡住重导的墓碑。
+    // 先把 file input 清空——同一个路径再 uploadFile 一次不会触发 change，页面不会有反应。
+    await page.evaluate(() => {
+      const input = document.querySelector('input[type="file"]');
+      if (input instanceof HTMLInputElement) input.value = '';
+    });
+    await uploadFixture(page, FIXTURES.firefox);
+    await waitPreview(page);
+    await sleep(1000);
+    const againStats = await previewStats(page);
+    record(
+      'P3.4 撤销后同一批书签可以重新导入（未留下删除标记）',
+      againStats?.['可新增'] === 4,
+      JSON.stringify(againStats)
+    );
+    await clickIn(page, '.batchbar', '取消预览');
+    await waitForSelectorGone(page, '.capturetable', 10_000);
+  });
+
   phase('P3.3 恶意内容', async () => {
-    await clickIn(page, '.panel', '继续导入');
+    // 上一阶段可能已经撤销导入，结果面板不在了：「继续导入」只在它存在时才需要点。
+    await page.evaluate(() => {
+      const hit = [...document.querySelectorAll('.panel button')].find(
+        (node) => (node.textContent ?? '').trim() === '继续导入'
+      );
+      if (hit instanceof HTMLElement) hit.click();
+    });
     await sleep(400);
     externalRequests.length = 0;
     await uploadFixture(page, FIXTURES.hostile);
@@ -784,6 +836,96 @@ async function main() {
       'P3.5 超过 3 MB 的书签文件被拒绝',
       /3 MB/.test(bigFileError),
       `错误=「${bigFileError.trim()}」｜文件=${(fs.statSync(bigFile).size / 1024 / 1024).toFixed(2)} MB`
+    );
+  });
+
+  phase('P3.5 清空待看', async () => {
+    await goto(page, 'reading', '先留着，稍后再看。');
+    const before = await page.evaluate(readMainLibrary);
+    const pendingBefore = before.readings.filter((row) => row.status === 'pending').length;
+    await clickIn(page, '.toolbar', '清空待看…');
+    await waitForText(page, '确认清空待看的', 10_000);
+    await clickIn(page, '', '确认清空');
+    await sleep(900);
+    const after = await page.evaluate(readMainLibrary);
+    record(
+      'P3.5 清空待看只清队列，收藏数量不变',
+      pendingBefore > 0 &&
+        after.readings.filter((row) => row.status === 'pending').length === 0 &&
+        after.bookmarks.length === before.bookmarks.length,
+      `待看 ${pendingBefore}→${after.readings.filter((row) => row.status === 'pending').length}｜收藏 ${before.bookmarks.length}→${after.bookmarks.length}`
+    );
+  });
+
+  phase('P3.4 彻底清空收藏库', async () => {
+    await goto(page, 'all', '全部收藏');
+    const before = await page.evaluate(readMainLibrary);
+    await clickIn(page, '.toolbar', '彻底清空…');
+    await waitForText(page, '确认彻底清空', 10_000);
+    await clickIn(page, '', '确认清空');
+    await sleep(1200);
+
+    // 墓碑必须是 0：只删记录不清墓碑的话，重新导入同一批书签会全被挡住。
+    const tombstones = await page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          const request = indexedDB.open('shiye');
+          request.onerror = () => resolve(-1);
+          request.onsuccess = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains('tombstones')) {
+              db.close();
+              resolve(0);
+              return;
+            }
+            const tx = db.transaction('tombstones', 'readonly');
+            const all = tx.objectStore('tombstones').getAll();
+            tx.oncomplete = () => {
+              resolve(all.result.length);
+              db.close();
+            };
+          };
+        })
+    );
+    const after = await page.evaluate(readMainLibrary);
+    record(
+      'P3.4 彻底清空后收藏与删除标记都归零',
+      before.bookmarks.length > 0 && after.bookmarks.length === 0 && tombstones === 0,
+      `收藏 ${before.bookmarks.length}→${after.bookmarks.length}｜墓碑=${tombstones}`
+    );
+  });
+
+  phase('P3.4 从数据页撤销最近一次导入', async () => {
+    // 用户导入完关掉页面之后，唯一找得回来的入口就在这里：数据页的「最近导入」。
+    await goto(page, 'capture', '一次收下多个链接');
+    await setReactInput(
+      page,
+      'textarea[aria-label="粘贴链接"]',
+      'https://example.com/undo-a\nhttps://example.com/undo-b'
+    );
+    await clickIn(page, '.panel', '预览链接 →');
+    await waitPreview(page);
+    await page.select('select[aria-label="保存目标"]', 'library');
+    await sleep(1000);
+    await clickIn(page, '.batchbar', '确认写入');
+    await waitForText(page, '导入完成', 30_000);
+    await sleep(600);
+    const imported = await page.evaluate(readMainLibrary);
+    const listedOk = await page.evaluate(() => document.body.innerText.includes('导入完成'));
+
+    await goto(page, 'data', '数据在手里');
+    const panelShown = await page.evaluate(() =>
+      document.body.innerText.includes('最近导入')
+    );
+    await clickIn(page, '', '撤销这次导入');
+    await sleep(400);
+    await clickIn(page, '', '确认撤销');
+    await sleep(1200);
+    const after = await page.evaluate(readMainLibrary);
+    record(
+      'P3.4 数据页列出导入批次并可从那里整批撤销',
+      listedOk && panelShown && after.bookmarks.length === imported.bookmarks.length - 2,
+      `导入后面板=${panelShown}｜收藏 ${imported.bookmarks.length}→${after.bookmarks.length}`
     );
   });
 

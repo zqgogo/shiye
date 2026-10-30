@@ -140,7 +140,8 @@ export interface ImportBatch {
   fileName: string;
   fileHash: string | null;
   destination: ImportDestination;
-  status: 'planned' | 'applied' | 'failed';
+  /** reverted = 这批写入已被撤销；批次本身留着，撤销与重导都有据可查。 */
+  status: 'planned' | 'applied' | 'failed' | 'reverted';
   total: number;
   inserted: number;
   skipped: number;

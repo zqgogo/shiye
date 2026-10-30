@@ -186,6 +186,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
   const { data, navigate, openModal, run, service } = useWorkspace();
   const [sort, setSort] = useState<'recent' | 'title'>('recent');
   const [trash, setTrash] = useState<Bookmark[] | null>(null);
+  const [confirmPurge, setConfirmPurge] = useState(false);
   const category = categoryId ? data.categories.find((entry) => entry.id === categoryId) : undefined;
 
   useEffect(() => {
@@ -225,6 +226,45 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
       ? [category?.name ?? '分类', category?.description || '这个分类下的收藏。']
       : LIST_TITLES[mode] ?? ['收藏', '当前列表'];
 
+  /**
+   * 彻底清空的作用范围。
+   *
+   * 「清空」必须是硬删除：只软删的话，墓碑会让重新导入的同一批书签全部被判成
+   * 「存在已删除收藏」而跳过——用户看到的是「清空了却导不进来」。所以这里
+   * 连墓碑一起清，界面上也按不可恢复来说明。
+   */
+  const purge =
+    mode === 'all'
+      ? {
+          label: '整个收藏库',
+          count: data.bookmarks.length,
+          note: '回收站里的记录以及它们的删除标记也会一起清掉。',
+          action: () => service.purgeAllBookmarks(),
+          done: '收藏库已清空，可以重新导入。',
+        }
+      : mode === 'category' && categoryId
+        ? {
+            label: `「${category?.name ?? '这个分类'}」下的收藏`,
+            count: items.length,
+            note: '分类本身保留，只清空它下面的收藏。',
+            action: () => service.purgeCategoryBookmarks(categoryId),
+            done: '这个分类已清空。',
+          }
+        : mode === 'uncategorized'
+          ? {
+              label: '未分类的收藏',
+              count: items.length,
+              note: '',
+              action: () => service.purgeCategoryBookmarks(null),
+              done: '未分类的收藏已清空。',
+            }
+          : null;
+
+  useEffect(() => {
+    // 换页后不能保留上一页的确认状态，否则在另一页按一次就误清空了这一页的数据。
+    setConfirmPurge(false);
+  }, [mode, categoryId]);
+
   return (
     <>
       <PageHeader
@@ -260,9 +300,39 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
         <Notice>只统计在工作台内的打开动作；外部直接访问无法可靠记录，因此不宣称完整浏览历史。</Notice>
       ) : null}
 
+      {confirmPurge && purge ? (
+        <Notice tone="danger">
+          <strong>
+            确认彻底清空{purge.label}（{purge.count} 条）？
+          </strong>
+          <span>
+            会同时删除这些网址的删除标记，之后可以重新导入同一批书签。
+            {purge.note ? ` ${purge.note}` : ''}
+          </span>
+          <span>不可恢复。想留后路请先到「数据与备份」导出完整 JSON。</span>
+          <button
+            className="btn small danger"
+            onClick={async () => {
+              const removed = await run(purge.action, purge.done);
+              if (removed !== null) setConfirmPurge(false);
+            }}
+          >
+            确认清空
+          </button>
+          <button className="btn small" onClick={() => setConfirmPurge(false)}>
+            取消
+          </button>
+        </Notice>
+      ) : null}
+
       <div className="toolbar">
         <span className="micro">共 {items.length} 条</span>
         <span className="spacer" />
+        {purge && purge.count > 0 ? (
+          <button className="btn small" onClick={() => setConfirmPurge(true)}>
+            彻底清空…
+          </button>
+        ) : null}
         {mode !== 'trash' ? (
           <select aria-label="排序" value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}>
             <option value="recent">最近新增</option>
@@ -387,6 +457,7 @@ export function ReadingPage() {
   const [lastCompleted, setLastCompleted] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState('');
+  const [confirmPurge, setConfirmPurge] = useState(false);
   const pending = [...data.pendingReading].sort((a, b) => b.addedAt.localeCompare(a.addedAt));
   // 待看独立搜索：只查队列本身，不混入收藏库。
   const term = search.trim().toLowerCase();
@@ -435,6 +506,26 @@ export function ReadingPage() {
         ) : null}
       </Notice>
 
+      {confirmPurge ? (
+        <Notice tone="danger">
+          <strong>确认清空待看的 {pending.length} 条？</strong>
+          <span>只清空待看队列，不影响任何收藏；完成历史单独清理。</span>
+          <span>待看没有回收站，清空后不可恢复。</span>
+          <button
+            className="btn small danger"
+            onClick={async () => {
+              const removed = await run(() => service.purgePendingReading(), '待看已清空。');
+              if (removed !== null) setConfirmPurge(false);
+            }}
+          >
+            确认清空
+          </button>
+          <button className="btn small" onClick={() => setConfirmPurge(false)}>
+            取消
+          </button>
+        </Notice>
+      ) : null}
+
       <div className="toolbar">
         <input
           placeholder="搜索待看的标题、网址或备注…"
@@ -445,6 +536,11 @@ export function ReadingPage() {
         <span className="micro">
           {term ? `匹配 ${items.length} / 共 ${pending.length} 条` : `共 ${pending.length} 条`}
         </span>
+        {pending.length ? (
+          <button className="btn small" onClick={() => setConfirmPurge(true)}>
+            清空待看…
+          </button>
+        ) : null}
         {term ? (
           <>
             <span className="spacer" />

@@ -87,6 +87,16 @@ export interface BookmarkRepository {
   ): Promise<Bookmark>;
   softDelete(id: string): Promise<Bookmark>;
   restore(id: string): Promise<Bookmark>;
+  /**
+   * 彻底清空：删除记录**连同墓碑**，之后同一网址可以重新导入。
+   *
+   * 只软删除是不够的：墓碑会让重新导入的同一批书签全部被判成「存在已删除收藏」而跳过，
+   * 用户看到的仍是「清空了却导不进来」。所以清空必须把删除标记一起带走，
+   * 这也意味着它不可恢复——界面上要按这个语义提示。
+   */
+  purgeAll(): Promise<number>;
+  /** 彻底清空某个分类（传 null 表示未分类）下的收藏与对应墓碑；分类本身保留。 */
+  purgeCategory(categoryId: string | null): Promise<number>;
   markRead(ids: string[]): Promise<number>;
   markUnread(ids: string[]): Promise<number>;
   setPinned(id: string, pinned: boolean): Promise<Bookmark>;
@@ -116,6 +126,8 @@ export interface ReadingRepository {
   add(params: CreateReadingParams): Promise<{ item: ReadingItem; reactivated: boolean }>;
   complete(id: string): Promise<ReadingItem>;
   reopen(id: string): Promise<ReadingItem>;
+  /** 清空整个待看队列（只处理 pending）；不涉及收藏。 */
+  purgePending(): Promise<number>;
   purgeCompleted(): Promise<number>;
   convertToBookmark(
     queueId: string,
@@ -163,10 +175,28 @@ export interface CommitImportResult {
   createdIds: string[];
 }
 
+export interface ImportUndoResult {
+  batch: ImportBatch;
+  /** 真正被移除的条目数。 */
+  removed: number;
+  /** 导入后被改过（编辑、应用 AI、完成待看…），因此保留不动的条目数。 */
+  kept: number;
+  /** 已经不在库里的条目数：用户自己删了、转了收藏，或已被别的操作清掉。 */
+  missing: number;
+}
+
 export interface ImportRepository {
   commit(params: CommitImportParams): Promise<CommitImportResult>;
   getBatch(id: string): Promise<ImportBatch | undefined>;
   listBatches(): Promise<ImportBatch[]>;
+  /**
+   * 撤销一批导入：把这一批新建的收藏或待看删掉，回到「导入之前」。
+   *
+   * 只删「原样留着」的条目——导入后被人工改过、应用过 AI 建议、转换过形态的记录一律保留，
+   * 撤销是回滚一次误操作，不是覆盖用户之后的决定。已经删掉的条目按墓碑一起清，
+   * 否则同一网址重新导入会被自己留下的删除标记挡住。
+   */
+  undoBatch(batchId: string): Promise<ImportUndoResult>;
 }
 
 export interface CreateHandoffParams {

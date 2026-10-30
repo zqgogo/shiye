@@ -1,3 +1,4 @@
+import Dexie from 'dexie';
 import {
   AppError,
   BookmarkPatchSchema,
@@ -40,6 +41,7 @@ import type {
   CreateReadingParams,
   HandoffRepository,
   ImportRepository,
+  ImportUndoResult,
   ReadingRepository,
   Repositories,
   SettingsRepository,
@@ -255,8 +257,7 @@ export class DexieBookmarkRepository implements BookmarkRepository {
     });
   }
 
-  async restore(id: string): Promise<Bookmark> {
-    return this.db.transaction('rw', this.db.bookmarks, this.db.tombstones, this.db.categories, async () => {
+  async restore(id: string): Promise<Bookmark> {    return this.db.transaction('rw', this.db.bookmarks, this.db.tombstones, this.db.categories, async () => {
       const current = await this.db.bookmarks.get(id);
       if (!current) throw new AppError('NOT_FOUND', '没有找到这条收藏。');
       if (!current.deletedAt) return current;
@@ -277,6 +278,47 @@ export class DexieBookmarkRepository implements BookmarkRepository {
       await this.db.bookmarks.put(next);
       await this.db.tombstones.delete(['bookmark', id]);
       return next;
+    });
+  }
+
+  /**
+   * 清空整库：删记录，也删这本书的墓碑。
+   *
+   * 只清记录不清墓碑，重新导入同一批书签会全部撞在「存在已删除收藏，未绕过墓碑」上，
+   * 用户会以为「清空了却导不进来」。所以清空必须把墓碑一起带走——代价是它不可恢复，
+   * 界面上必须按「彻底清空」说清楚，不能和「移到回收站」混为一谈。
+   */
+  async purgeAll(): Promise<number> {
+    return this.db.transaction('rw', this.db.bookmarks, this.db.tombstones, async () => {
+      const rows = await this.db.bookmarks.toArray();
+      await this.db.bookmarks.clear();
+      const tombstones = await this.db.tombstones.toArray();
+      const bookmarkTombstones = tombstones.filter(
+        (tombstone) => tombstone.entityType === 'bookmark'
+      );
+      await this.db.tombstones.bulkDelete(
+        bookmarkTombstones.map((tombstone) => [tombstone.entityType, tombstone.id] as [string, string])
+      );
+      return rows.length;
+    });
+  }
+
+  /** 清空一个分类（null = 未分类）：移走该分类下的收藏与墓碑，分类本身不动。 */
+  async purgeCategory(categoryId: string | null): Promise<number> {
+    return this.db.transaction('rw', this.db.bookmarks, this.db.tombstones, async () => {
+      const rows = (
+        await this.db.bookmarks.toArray()
+      ).filter((bookmark) => (bookmark.categoryId ?? null) === categoryId);
+      if (rows.length === 0) return 0;
+      await this.db.bookmarks.bulkDelete(rows.map((bookmark) => bookmark.id));
+      const tombstones = await this.db.tombstones.toArray();
+      const ids = new Set(rows.map((bookmark) => bookmark.id));
+      await this.db.tombstones.bulkDelete(
+        tombstones
+          .filter((tombstone) => tombstone.entityType === 'bookmark' && ids.has(tombstone.id))
+          .map((tombstone) => [tombstone.entityType, tombstone.id] as [string, string])
+      );
+      return rows.length;
     });
   }
 
@@ -672,6 +714,15 @@ export class DexieReadingRepository implements ReadingRepository {
     });
   }
 
+  /** 清空待看队列。待看没有墓碑，重新加入同一网址不会被挡住。 */
+  async purgePending(): Promise<number> {
+    return this.db.transaction('rw', this.db.readingItems, async () => {
+      const pending = await this.listPending();
+      await this.db.readingItems.bulkDelete(pending.map((item) => item.id));
+      return pending.length;
+    });
+  }
+
   async purgeCompleted(): Promise<number> {
     return this.db.transaction('rw', this.db.readingItems, async () => {
       const completed = await this.listCompleted();
@@ -944,6 +995,82 @@ export class DexieImportRepository implements ImportRepository {
 
   async listBatches(): Promise<ImportBatch[]> {
     return this.db.importBatches.orderBy('createdAt').reverse().limit(20).toArray();
+  }
+
+  /**
+   * 撤销一批导入：把这批新建的条目删掉，回到「导入之前」。
+   *
+   * 判据用 localRevision：导入时新建的记录是 1，之后被人工编辑、应用 AI 建议、标记已读、
+   * 完成或转入收藏都会让它变大。撤销只回滚「原样留着」的条目——用户之后做的决定
+   * 不该被一次「撤销导入」抹掉，宁可少删并如实报数。
+   *
+   * 收藏的墓碑必须一起删：这批条目是新建的，本身没有墓碑，但如果在撤销前被用户删过，
+   * 留下的墓碑会让同一网址的下一次导入被判成「存在已删除收藏」。
+   */
+  async undoBatch(batchId: string): Promise<ImportUndoResult> {
+    return this.db.transaction(
+      'rw',
+      [
+        this.db.bookmarks,
+        this.db.readingItems,
+        this.db.tombstones,
+        this.db.importBatches,
+        this.db.importItems,
+      ],
+      async () => {
+        const batch = await this.db.importBatches.get(batchId);
+        if (!batch) throw new AppError('NOT_FOUND', '找不到这次导入的记录。');
+        if (batch.status === 'reverted') {
+          throw new AppError('INVALID_INPUT', '这一批已经撤销过了。');
+        }
+        if (batch.status !== 'applied') {
+          throw new AppError('INVALID_INPUT', '这一批没有写入任何条目，不需要撤销。');
+        }
+        const items = await this.db.importItems
+          .where('[batchId+sourceKey]')
+          .between([batchId, Dexie.minKey], [batchId, Dexie.maxKey])
+          .toArray();
+
+        let removed = 0;
+        let kept = 0;
+        let missing = 0;
+        for (const item of items) {
+          if (batch.destination === 'library') {
+            const row = await this.db.bookmarks.get(item.entityId);
+            if (!row) {
+              missing += 1;
+              continue;
+            }
+            if (row.localRevision > 1) {
+              kept += 1;
+              continue;
+            }
+            await this.db.bookmarks.delete(row.id);
+            await this.db.tombstones.delete(['bookmark', row.id]);
+            removed += 1;
+          } else {
+            const row = await this.db.readingItems.get(item.entityId);
+            if (!row) {
+              missing += 1;
+              continue;
+            }
+            if (row.localRevision > 1) {
+              kept += 1;
+              continue;
+            }
+            await this.db.readingItems.delete(row.id);
+            removed += 1;
+          }
+        }
+
+        await this.db.importItems.bulkDelete(
+          items.map((item) => [item.batchId, item.sourceKey] as [string, string])
+        );
+        const reverted: ImportBatch = { ...batch, status: 'reverted' };
+        await this.db.importBatches.put(reverted);
+        return { batch: reverted, removed, kept, missing };
+      }
+    );
   }
 
   async commit(params: CommitImportParams): Promise<CommitImportResult> {

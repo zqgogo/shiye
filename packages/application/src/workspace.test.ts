@@ -1,6 +1,6 @@
 import Dexie from 'dexie';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AppError, newId, nowIso } from '@shiye/core';
+import { AppError, newId, nowIso, type ImportRow } from '@shiye/core';
 import { ShiyeDB } from '@shiye/storage';
 import { createRepositories } from '@shiye/storage';
 import { createWorkspaceService, type WorkspaceService } from './workspace.js';
@@ -1541,5 +1541,146 @@ describe('恢复安全与隐私边界', () => {
     const backup = await service.exportBackup(false);
     expect(backup.text).not.toContain(bookmark.originalUrl);
     expect(backup.text).not.toContain('同网址私密');
+  });
+});
+
+describe('导入撤销与批量清空', () => {
+  /** 直接构造已选中的新行：这一组测的是写入之后的撤销，不重复测解析。 */
+  const rowsOf = (urls: string[]): ImportRow[] =>
+    urls.map((url, index) => ({
+      sourceKey: `row-${index}`,
+      line: index + 1,
+      originalUrl: url,
+      canonicalUrl: url,
+      title: `导入 ${index}`,
+      sourceFolder: '',
+      targetCategoryId: null,
+      status: 'new',
+      reason: '',
+      selected: true,
+      duplicateOf: null,
+    }));
+
+  const commit = (batchId: string, urls: string[], destination: 'library' | 'reading') =>
+    service.commitImport({
+      batchId,
+      source: 'bookmarkHtml',
+      fileName: 'bookmarks.html',
+      fileHash: null,
+      destination,
+      rows: rowsOf(urls),
+    });
+
+  it('撤销导入只移除这一批新建的收藏，导入后改过的保留', async () => {
+    const committed = await commit(
+      'batch-a',
+      ['https://example.com/a1', 'https://example.com/a2'],
+      'library'
+    );
+    expect(committed.inserted).toBe(2);
+
+    // 模拟导入之后人工改过其中一条：撤销回滚的是那次导入，不该抹掉之后的决定。
+    const [first] = (await service.snapshot()).bookmarks;
+    await service.updateBookmark(first!.id, first!.localRevision, { title: '改过的标题' });
+
+    const undone = await service.undoImport('batch-a');
+    expect(undone.removed).toBe(1);
+    expect(undone.kept).toBe(1);
+
+    const left = (await service.snapshot()).bookmarks;
+    expect(left).toHaveLength(1);
+    expect(left[0]?.title).toBe('改过的标题');
+  });
+
+  it('撤销后同一批网址可以重新导入（不留下墓碑）', async () => {
+    await commit('batch-c', ['https://example.com/c1'], 'library');
+    await service.undoImport('batch-c');
+    expect((await service.snapshot()).bookmarks).toHaveLength(0);
+
+    // 如果撤销只删记录、留下墓碑，这一步会被判成「存在已删除收藏，未绕过墓碑」。
+    const again = await commit('batch-d', ['https://example.com/c1'], 'library');
+    expect(again.inserted).toBe(1);
+  });
+
+  it('撤销导入的待看不会碰收藏', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/keep', title: '保留的收藏' });
+    await commit('batch-e', ['https://example.com/queue-1', 'https://example.com/queue-2'], 'reading');
+
+    const undone = await service.undoImport('batch-e');
+    expect(undone.removed).toBe(2);
+
+    const snapshot = await service.snapshot();
+    expect(snapshot.pendingReading).toHaveLength(0);
+    expect(snapshot.bookmarks).toHaveLength(1);
+  });
+
+  it('同一批只能撤销一次，批次状态记为 reverted', async () => {
+    await commit('batch-f', ['https://example.com/f1'], 'library');
+    await service.undoImport('batch-f');
+
+    expect((await repos.imports.getBatch('batch-f'))?.status).toBe('reverted');
+    await expect(service.undoImport('batch-f')).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('彻底清空收藏库连墓碑一起清掉，之后可以重新导入', async () => {
+    const created = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/purge-1',
+      title: '待清空',
+    });
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/purge-2', title: '待清空 2' });
+    // 先删一条留下墓碑：清空如果只删记录，重新导入会被这条墓碑挡住。
+    await service.deleteBookmark(created.id);
+    expect(await repos.backup.listTombstones()).toHaveLength(1);
+
+    const removed = await service.purgeAllBookmarks();
+    expect(removed).toBe(2);
+    expect((await service.snapshot()).bookmarks).toHaveLength(0);
+    expect(await repos.backup.listTombstones()).toHaveLength(0);
+
+    const reimported = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/purge-1',
+      title: '重新导入',
+    });
+    expect(reimported.title).toBe('重新导入');
+  });
+
+  it('清空分类只移除该分类下的收藏，分类与其它收藏保留', async () => {
+    const keep = await repos.categories.create('保留分类');
+    const drop = await repos.categories.create('要清空的分类');
+    await repos.bookmarks.create({
+      originalUrl: 'https://example.com/cat-keep',
+      title: '留住',
+      categoryId: keep.id,
+    });
+    await repos.bookmarks.create({
+      originalUrl: 'https://example.com/cat-drop',
+      title: '清掉',
+      categoryId: drop.id,
+    });
+
+    const removed = await service.purgeCategoryBookmarks(drop.id);
+    expect(removed).toBe(1);
+
+    const snapshot = await service.snapshot();
+    expect(snapshot.bookmarks.map((bookmark) => bookmark.title)).toEqual(['留住']);
+    expect(snapshot.categories.map((category) => category.name).sort()).toEqual(
+      ['保留分类', '要清空的分类'].sort()
+    );
+  });
+
+  it('清空待看只清队列，完成历史与收藏都不动', async () => {
+    const first = await repos.reading.add({
+      originalUrl: 'https://example.com/r1',
+      title: '待看 1',
+    });
+    await repos.reading.add({ originalUrl: 'https://example.com/r2', title: '待看 2' });
+    await service.completeReading(first.item.id);
+
+    const removed = await service.purgePendingReading();
+    expect(removed).toBe(1);
+
+    const snapshot = await service.snapshot();
+    expect(snapshot.pendingReading).toHaveLength(0);
+    expect(snapshot.completedReading).toHaveLength(1);
   });
 });

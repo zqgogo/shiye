@@ -5,6 +5,7 @@ import {
   parseBackup,
   toUserMessage,
   type BackupDocument,
+  type ImportBatch,
 } from '@shiye/core';
 import { Notice, PageHeader } from './components.js';
 import { useWorkspace } from './state.js';
@@ -54,6 +55,22 @@ export function DataPage() {
   const [safetyCopy, setSafetyCopy] = useState<{ id: string; text: string; savedAt: string } | null>(
     null
   );
+  /** 最近导入过的批次：撤销入口要靠它找回「刚刚那一次」，刷新页面也不会丢。 */
+  const [batches, setBatches] = useState<ImportBatch[] | null>(null);
+  const [undoing, setUndoing] = useState('');
+  /** 待确认撤销的批次编号：删除是不可逆的，先问一句再动手。 */
+  const [pendingUndo, setPendingUndo] = useState<string | null>(null);
+
+  const reloadBatches = async () => {
+    const rows = await service.listImportBatches().catch(() => [] as ImportBatch[]);
+    setBatches(rows);
+  };
+
+  useEffect(() => {
+    void reloadBatches();
+    // 主库变化（导入、撤销、恢复）后批次列表要跟着变，否则会一直显示已撤销的那一条。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [service, data.bookmarks.length, data.pendingReading.length]);
 
   useEffect(() => {
     let alive = true;
@@ -165,8 +182,7 @@ export function DataPage() {
     }
   };
 
-  const exportSnapshot = async () => {
-    setBusy(true);
+  const exportSnapshot = async () => {    setBusy(true);
     const snapshot = await run(() => service.exportSnapshot({ includeNote, includeText }));
     setBusy(false);
     if (!snapshot) return;
@@ -177,6 +193,19 @@ export function DataPage() {
       preview.document.close();
     }
     toast('已导出发送下载，并在新标签页打开预览。');
+  };
+
+  const undoBatch = async (batch: ImportBatch) => {
+    setPendingUndo(null);
+    setUndoing(batch.id);
+    const outcome = await run(() => service.undoImport(batch.id));
+    setUndoing('');
+    if (!outcome) return;
+    const parts = [`移除 ${outcome.removed} 条`];
+    if (outcome.kept > 0) parts.push(`保留 ${outcome.kept} 条（导入后被改过）`);
+    if (outcome.missing > 0) parts.push(`${outcome.missing} 条已不在库里`);
+    toast(`已撤销「${batch.fileName}」：${parts.join('，')}。`);
+    await reloadBatches();
   };
 
   return (
@@ -232,6 +261,71 @@ export function DataPage() {
             无脚本时仍展示完整静态列表；筛选只在本文件内生效。
           </p>
         </div>
+      </div>
+
+      <div className="panel">
+        <h2>最近导入</h2>
+        <p>
+          导错了文件或选错了目标时，在这里整批撤回。撤销只移除这一批新建的条目；导入后被改过、
+          转成收藏或已完成的会保留并如实报数。
+        </p>
+        {batches === null ? (
+          <p className="micro">正在读取导入记录…</p>
+        ) : batches.length === 0 ? (
+          <p className="micro">还没有导入记录。从「粘贴 / 导入」页导入后，批次会出现在这里。</p>
+        ) : (
+          <div className="listbox">
+            <div className="listhead">
+              <span>批次</span>
+              <span>新增 · 跳过 · 时间</span>
+            </div>
+            {batches.map((batch) => (
+              <article className="bookmark" key={batch.id}>
+                <div className="favicon" aria-hidden="true">
+                  {batch.destination === 'library' ? '藏' : '看'}
+                </div>
+                <div className="rowbody" role="group">
+                  <h3>{batch.fileName}</h3>
+                  <div className="rowmeta">
+                    <span>{batch.destination === 'library' ? '收藏库' : '待看'}</span>
+                    <span>·</span>
+                    <span>新增 {batch.inserted} 条</span>
+                    <span>·</span>
+                    <span>跳过 {batch.skipped} 条</span>
+                    <span>·</span>
+                    <span>{formatDateTime(batch.createdAt)}</span>
+                    {batch.status === 'reverted' ? <span>· 已撤销</span> : null}
+                  </div>
+                </div>
+                <div className="rowactions">
+                  {batch.status === 'applied' && batch.inserted > 0 ? (
+                    pendingUndo === batch.id ? (
+                      <>
+                        <button
+                          className="btn small danger"
+                          disabled={undoing === batch.id}
+                          onClick={() => void undoBatch(batch)}
+                        >
+                          {undoing === batch.id ? '撤销中…' : '确认撤销'}
+                        </button>
+                        <button className="btn small" onClick={() => setPendingUndo(null)}>
+                          取消
+                        </button>
+                      </>
+                    ) : (
+                      <button className="btn small" onClick={() => setPendingUndo(batch.id)}>
+                        撤销这次导入
+                      </button>
+                    )
+                  ) : null}
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+        <p className="micro">
+          撤销会连这批条目的删除标记一起清掉，所以之后可以重新导入同一批书签；代价是撤销本身不可恢复。
+        </p>
       </div>
 
       <div className="panel">
