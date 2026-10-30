@@ -242,12 +242,29 @@ export interface SafetyCopy {
   savedAt: string;
 }
 
+/** 替换前拍下的当前主库快照：既是一份可恢复的文档，也是界面提示要展示的统计来源。 */
+export interface SafetySnapshot {
+  document: BackupDocument;
+  text: string;
+  copy: SafetyCopy;
+}
+
 export interface BackupRepository {
   exportDocument(options: { includeLocalOnly: boolean }): Promise<BackupDocument>;
   restore(
     document: BackupDocument,
     mode: 'merge' | 'replace'
   ): Promise<RestoreResult>;
+  /**
+   * 替换专用：快照当前主库、保存安全副本、清库与写入在**同一个事务**里完成。
+   *
+   * 分开做会留下一个窗口——快照拍完之后、替换提交之前，别的标签页写进来的收藏会被
+   * 清库抹掉，而快照里也不含它们：刚显示「已保存」的内容在主库和副本里同时消失。
+   */
+  restoreWithSafety(
+    document: BackupDocument,
+    mode: 'merge' | 'replace'
+  ): Promise<{ result: RestoreResult; safety: SafetySnapshot | null }>;
   listTombstones(): Promise<Tombstone[]>;
   /**
    * 只校验不写入：替换前先确认整份文件可恢复。

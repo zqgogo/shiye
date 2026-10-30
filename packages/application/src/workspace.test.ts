@@ -1075,11 +1075,11 @@ describe('恢复安全与隐私边界', () => {
     expect((await repos.bookmarks.listActive())[0]?.originalUrl).toBe('https://example.com/safe');
   });
 
-  it('替换前的安全备份在提交前就落库，替换失败也能取回', async () => {
+  it('替换写库失败时主库原样还在，也不留下半份安全副本', async () => {
     await repos.bookmarks.create({ originalUrl: 'https://example.com/safety', title: '安全样本' });
     expect(await service.readSafetyCopy()).toBeNull();
 
-    // 让替换在写库阶段失败：安全备份必须已经存下来，否则这份数据就没了。
+    // 让替换在写库阶段失败：快照、清库、写入都在同一个事务里，回滚后主库必须原样还在。
     const originalPut = db.bookmarks.put.bind(db.bookmarks);
     (db.bookmarks as unknown as { put: unknown }).put = async () => {
       throw new Error('注入写入失败');
@@ -1104,11 +1104,64 @@ describe('恢复安全与隐私边界', () => {
       (db.bookmarks as unknown as { put: unknown }).put = originalPut;
     }
 
-    const copy = await service.readSafetyCopy();
-    expect(copy).not.toBeNull();
-    expect(copy?.text).toContain('安全样本');
-    await service.clearSafetyCopy(copy!.id);
+    // 事务整体回滚：主库没被清空，也就不需要一份「救回来」的副本。
+    expect((await repos.bookmarks.listActive())[0]?.title).toBe('安全样本');
     expect(await service.readSafetyCopy()).toBeNull();
+
+    // 成功的替换仍然在提交前把副本落库，内容就是替换前那一刻的库。
+    const ok = await service.restoreBackup(JSON.stringify(incoming), 'replace');
+    expect(ok.safetyCopy?.text).toContain('安全样本');
+    expect((await service.readSafetyCopy())?.text).toContain('安全样本');
+    await service.clearSafetyCopy(ok.safetyCopy!.id);
+    expect(await service.readSafetyCopy()).toBeNull();
+  });
+
+  it('替换与快照同一事务：另一连接在替换期间写入的收藏不会被抹掉', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/before', title: '快照前已有收藏' });
+    const incoming = JSON.parse((await service.exportBackup(true)).text) as { bookmarks: unknown[] };
+    incoming.bookmarks = [];
+
+    const otherDb = new ShiyeDB(db.name);
+    const other = createRepositories(otherDb);
+    let pending: Promise<{ id: string }> | null = null;
+    // 快照读取与清库必须落在同一个事务对象上：分成两次事务，中间那段空档就是
+    // 「另一页面刚保存成功的收藏被抹掉、安全副本里也没有」的窗口。
+    const seen: (unknown | null)[] = [];
+    const originalToArray = db.bookmarks.toArray.bind(db.bookmarks);
+    (db.bookmarks as unknown as { toArray: unknown }).toArray = async () => {
+      seen.push(Dexie.currentTransaction);
+      return originalToArray();
+    };
+    const originalClear = db.bookmarks.clear.bind(db.bookmarks);
+    (db.bookmarks as unknown as { clear: unknown }).clear = async () => {
+      seen.push(Dexie.currentTransaction);
+      // 清库这一刻，另一个标签页正在提交一条新收藏。它只能排在替换事务之后——
+      // 快照单独开事务的旧写法会在这里把它抹掉，而快照里也没有它。
+      pending = Dexie.ignoreTransaction(() =>
+        other.bookmarks.create({
+          originalUrl: 'https://example.com/concurrent-save',
+          title: '另一页面刚保存的收藏',
+        })
+      ) as unknown as Promise<{ id: string }>;
+      return originalClear();
+    };
+    try {
+      await service.restoreBackup(JSON.stringify(incoming), 'replace');
+    } finally {
+      (db.bookmarks as unknown as { toArray: unknown }).toArray = originalToArray;
+      (db.bookmarks as unknown as { clear: unknown }).clear = originalClear;
+    }
+    try {
+      expect(seen).toHaveLength(2);
+      expect(seen[0]).not.toBeNull();
+      expect(seen[0]).toBe(seen[1]);
+      // 三种可接受结果之一：写进安全副本、替换后仍保留、或明确失败。这里是最常见的
+      // 「排队到替换之后」，绝不允许先返回成功再在主库和副本里都找不到。
+      const saved = await pending!;
+      expect((await repos.bookmarks.get(saved.id))?.title).toBe('另一页面刚保存的收藏');
+    } finally {
+      otherDb.close();
+    }
   });
 
   it('本地专用收藏关联的待看不进默认备份，但会说明排除了几条', async () => {
@@ -1414,5 +1467,79 @@ describe('恢复安全与隐私边界', () => {
     expect((await repos.bookmarks.get(bookmark.id))?.deletedAt).toBeNull();
     expect(await db.tombstones.get(['bookmark', bookmark.id])).toBeUndefined();
     expect(restored.result.tombstonesAdded).toBe(0);
+  });
+
+  it('合并旧备份不会把本地专用的删除记录降级成可导出', async () => {
+    const bookmark = await service.createBookmark({
+      originalUrl: 'https://example.com/private-deleted',
+      title: '后设为私密的项目',
+    });
+    // 第一份备份里它还是普通收藏，删除标记的隐私范围是 main。
+    await repos.bookmarks.softDelete(bookmark.id);
+    const old = await service.exportBackup(true);
+
+    // 本机恢复这条收藏，改成「本地专用」，再删除：本机的删除标记是 local。
+    const restored = await repos.bookmarks.restore(bookmark.id);
+    await service.updateBookmark(
+      bookmark.id,
+      restored.localRevision,
+      { privacy: { localOnly: true, aiBlocked: false } },
+      'human'
+    );
+    await repos.bookmarks.softDelete(bookmark.id);
+    expect((await db.tombstones.get(['bookmark', bookmark.id]))?.privacyScope).toBe('local');
+    const before = await service.exportBackup(false);
+    expect(before.text).not.toContain(bookmark.originalUrl);
+    expect(before.text).not.toContain(bookmark.title);
+
+    // 合并那份旧备份：实体按本机保留为本地专用，删除标记不能被顶回 main。
+    await service.restoreBackup(old.text, 'merge');
+    expect((await repos.bookmarks.get(bookmark.id))?.privacy.localOnly).toBe(true);
+    expect((await db.tombstones.get(['bookmark', bookmark.id]))?.privacyScope).toBe('local');
+
+    const after = await service.exportBackup(false);
+    expect(after.document.bookmarks).toHaveLength(0);
+    expect(after.text).not.toContain(bookmark.originalUrl);
+    expect(after.text).not.toContain(bookmark.title);
+  });
+
+  it('同网址、不同编号的旧墓碑也按本机的本地专用范围保存', async () => {
+    const bookmark = await service.createBookmark({
+      originalUrl: 'https://example.com/same-url-private',
+      title: '同网址私密',
+      privacy: { localOnly: true },
+    });
+    await repos.bookmarks.softDelete(bookmark.id);
+
+    const legacy = {
+      schemaVersion: 2,
+      libraryId: 'other-device',
+      exportedAt: nowIso(),
+      scope: 'device',
+      includesLocalOnly: false,
+      categories: [],
+      tags: [],
+      policy: null,
+      settings: null,
+      bookmarks: [],
+      readingItems: [],
+      tombstones: [
+        {
+          entityType: 'bookmark',
+          id: 'other-device-id',
+          revision: 3,
+          deletedAt: nowIso(),
+          privacyScope: 'main',
+          canonicalUrl: bookmark.canonicalUrl,
+          title: '同网址私密',
+        },
+      ],
+    };
+    await service.restoreBackup(JSON.stringify(legacy), 'merge');
+
+    expect((await db.tombstones.get(['bookmark', 'other-device-id']))?.privacyScope).toBe('local');
+    const backup = await service.exportBackup(false);
+    expect(backup.text).not.toContain(bookmark.originalUrl);
+    expect(backup.text).not.toContain('同网址私密');
   });
 });

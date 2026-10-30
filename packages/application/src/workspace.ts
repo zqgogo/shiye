@@ -401,21 +401,29 @@ export class WorkspaceService {
     if (document.schemaVersion > SCHEMA_VERSION) {
       throw new AppError('UNSUPPORTED_VERSION', '备份来自更新版本，请先升级扩展。');
     }
-    // 校验必须排在保存安全副本之前：一份注定无法恢复的文件，不该先把上一份
-    // 还没确认保存的安全副本顶掉。
-    await this.repos.backup.validateRestore(document, mode);
-    // 顺序很关键：先把当前主库整份落到 meta（替换不会清 meta），再提交替换。
-    // 反过来一旦下载被拦或页面被关，替换已经不可撤销，而唯一副本只在内存里。
-    let safety: BackupBundle | null = null;
-    let safetyCopy: SafetyCopy | null = null;
-    if (mode === 'replace') {
-      safety = await this.exportBackup(true);
-      // 已有一份未确认的副本时这里会抛 SAFETY_COPY_PENDING：宁可挡住这次替换，
-      // 也不能把上一份（往往是原始数据）覆盖掉。
-      safetyCopy = await this.repos.backup.saveSafetyCopy(safety.text);
+    if (mode !== 'replace') {
+      return {
+        result: await this.repos.backup.restore(document, mode),
+        safety: null,
+        safetyCopy: null,
+      };
     }
-    const result = await this.repos.backup.restore(document, mode);
-    return { result, safety, safetyCopy };
+    // 替换：拍快照、存安全副本、清库、写入必须是同一个事务。
+    // 拆开做会留一个窗口——快照拍完、替换还没提交时，别的标签页保存成功的收藏会被清库
+    // 抹掉，而快照生成得更早也不含它：主库和安全副本同时找不到那条内容。
+    // 已有一份未确认副本时这里会抛 SAFETY_COPY_PENDING，事务整体回滚，主库不动。
+    const { result, safety } = await this.repos.backup.restoreWithSafety(document, mode);
+    if (!safety) return { result, safety: null, safetyCopy: null };
+    return {
+      result,
+      // 下载仍按原样发起；下不下来都不影响取回，副本已经在 meta 里了。
+      safety: {
+        fileName: backupFileName(safety.document.exportedAt),
+        text: safety.text,
+        document: safety.document,
+      },
+      safetyCopy: safety.copy,
+    };
   }
 
   /** 上一次替换前自动保存的安全备份；确认保存到磁盘后由界面按编号清理。 */

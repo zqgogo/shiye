@@ -20,7 +20,7 @@ import type {
   Tag,
   Tombstone,
 } from '@shiye/core';
-import type { BackupRepository, RestoreResult, SafetyCopy } from '@shiye/application';
+import type { BackupRepository, RestoreResult, SafetyCopy, SafetySnapshot } from '@shiye/application';
 import { ShiyeDB, DEFAULT_POLICY, deriveIndexFields } from './db.js';
 
 type Raw = Record<string, unknown>;
@@ -252,7 +252,25 @@ function safetyCopyOf(row: { value: unknown } | undefined): SafetyCopy | null {
   };
 }
 
-/** 一份备份清洗后的结果：写入与「只校验」两条路径共用同一套判定。 */interface PreparedRestore {
+/**
+ * 写入安全副本。**必须在事务内调用**：替换时它要和快照、清库、写入在同一个事务里，
+ * 不能再开子事务，但「不许覆盖未确认副本」这条判定必须与单独调用时完全一致。
+ */
+async function writeSafetyCopy(db: ShiyeDB, text: string): Promise<SafetyCopy> {
+  const existing = safetyCopyOf(await db.meta.get(SAFETY_COPY_KEY));
+  if (existing) {
+    throw new AppError(
+      'SAFETY_COPY_PENDING',
+      `本机还留着一份 ${existing.savedAt} 的替换前安全备份，尚未确认保存。请先把它保存到磁盘并清理本机副本，再做下一次替换。`
+    );
+  }
+  const copy: SafetyCopy = { id: newId(), text, savedAt: nowIso() };
+  await db.meta.put({ key: SAFETY_COPY_KEY, value: copy });
+  return copy;
+}
+
+/** 一份备份清洗后的结果：写入与「只校验」两条路径共用同一套判定。 */
+interface PreparedRestore {
   categories: Category[];
   tags: Tag[];
   bookmarks: Bookmark[];
@@ -364,82 +382,446 @@ function prepareRestore(document: BackupDocument): PreparedRestore {
   };
 }
 
+/** 备份要读的表：导出、替换前安全副本、以及「同一事务里先快照再替换」共用这一份。 */
+function exportTables(db: ShiyeDB) {
+  return [
+    db.bookmarks,
+    db.readingItems,
+    db.categories,
+    db.tags,
+    db.tombstones,
+    db.settings,
+    db.policies,
+  ];
+}
+
+/**
+ * 构造一份备份文档。
+ *
+ * 刻意不自己开事务：调用方决定它在只读事务里跑，还是跟着替换的写事务一起跑。
+ * 后者是「快照与替换同一事务」的前提——快照单独开只读事务，两份之间就有窗口，
+ * 期间别的标签页写进来的收藏会被替换清掉，而快照里也没有它。
+ */
+async function buildDocument(db: ShiyeDB, includeLocalOnly: boolean): Promise<BackupDocument> {
+  const exportedAt = nowIso();
+  const settingsRow = await db.settings.get('app');
+  const [categories, tags, policy, bookmarks, readingItems, tombstones] = await Promise.all([
+    db.categories.toArray(),
+    db.tags.toArray(),
+    db.policies.get('default'),
+    db.bookmarks.toArray(),
+    db.readingItems.toArray(),
+    db.tombstones.toArray(),
+  ]);
+  const settings = settingsRow?.value as BackupDocument['settings'];
+  const localOnlyBookmarkIds = new Set(
+    bookmarks.filter((bookmark) => bookmark.privacy.localOnly).map((bookmark) => bookmark.id)
+  );
+  // 待看没有自己的隐私字段，但它可能是「加入待看」从某条收藏复制出来的（带
+  // relatedBookmarkId，标题与网址都一样）。收藏被排除而待看照样导出，
+  // 本地专用就会从这条缝里漏出去。
+  //
+  // 关联编号并不可靠：重新激活一条已完成待看、跨设备恢复、或先独立加入待看再把
+  // 同网址收藏设成本地专用，都会留下 relatedBookmarkId 为空或指向别处的记录。
+  // 所以再按网址核对一次；回收站里的本地专用收藏同样计入（宁可少导出，不漏）。
+  const localOnlyCanonical = new Set(
+    bookmarks.filter((bookmark) => bookmark.privacy.localOnly).map((bookmark) => bookmark.canonicalUrl)
+  );
+  const exportedReading = includeLocalOnly
+    ? readingItems
+    : readingItems.filter((item) => {
+        if (item.relatedBookmarkId && localOnlyBookmarkIds.has(item.relatedBookmarkId)) {
+          return false;
+        }
+        return !localOnlyCanonical.has(item.canonicalUrl);
+      });
+  const excludedReading = readingItems.length - exportedReading.length;
+  // 墓碑不只带编号，还带标题与网址：只信它自己的 privacyScope 等于把「这条是不是
+  // 私密」交给一个可能已经过期的字段。再与本机实体核对两遍（编号、网址），
+  // 任何一处指向本地专用就整条不导出。
+  const exportedTombstones = includeLocalOnly
+    ? tombstones
+    : tombstones.filter((tombstone) => {
+        if (tombstone.privacyScope === 'local') return false;
+        if (localOnlyBookmarkIds.has(tombstone.id)) return false;
+        if (tombstone.canonicalUrl && localOnlyCanonical.has(tombstone.canonicalUrl)) return false;
+        return true;
+      });
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    libraryId: settings?.libraryId ?? 'local-library',
+    exportedAt,
+    dataCutoffAt: exportedAt,
+    scope: 'device',
+    includesLocalOnly: includeLocalOnly,
+    categories,
+    tags,
+    // 从没打开过策略页时库里没有 default 行，导出的是「此刻生效的默认策略」，
+    // 否则备份会写着 policy: null，恢复后说不清当时用的是哪一版。
+    policy: policy ?? DEFAULT_POLICY(),
+    settings: settings ?? null,
+    bookmarks: includeLocalOnly ? bookmarks : bookmarks.filter((bookmark) => !bookmark.privacy.localOnly),
+    readingItems: exportedReading,
+    tombstones: exportedTombstones,
+    ...(excludedReading > 0 ? { exclusions: { readingForLocalOnly: excludedReading } } : {}),
+  };
+}
+
+/** 从收藏实体派生墓碑：隐私范围跟着实体走，不跟着任何外部快照走。 */
+function tombstoneOf(bookmark: Bookmark): Tombstone {
+  return {
+    entityType: 'bookmark',
+    id: bookmark.id,
+    revision: bookmark.revision,
+    changeVersion: null,
+    deletedAt: bookmark.deletedAt ?? nowIso(),
+    privacyScope: bookmark.privacy.localOnly ? 'local' : 'main',
+    canonicalUrl: bookmark.canonicalUrl,
+    title: bookmark.title,
+  };
+}
+
+/**
+ * 本机是否已经把这条网址当作「本地专用」（收藏实体或墓碑任一命中）。
+ *
+ * 墓碑带标题与网址，只要它的 privacyScope 被降级到 main，默认导出就会把私密内容
+ * 重新带出去；同网址换个编号同样能绕过，所以按网址再核一次。
+ */
+async function hasLocalOnlyUrl(db: ShiyeDB, canonicalUrl: string | undefined): Promise<boolean> {
+  if (!canonicalUrl) return false;
+  const bookmarks = await db.bookmarks.where('canonicalUrl').equals(canonicalUrl).toArray();
+  if (bookmarks.some((bookmark) => bookmark.privacy.localOnly)) return true;
+  const tombstones = await db.tombstones.where('canonicalUrl').equals(canonicalUrl).toArray();
+  return tombstones.some((tombstone) => tombstone.privacyScope === 'local');
+}
+
+/** 恢复会涉及的每一张表：替换基本都要清空，meta 存安全副本与版本号。 */
+function restoreTables(db: ShiyeDB) {
+  return [
+    db.bookmarks,
+    db.readingItems,
+    db.categories,
+    db.tags,
+    db.tombstones,
+    db.settings,
+    db.policies,
+    db.importBatches,
+    db.importItems,
+    db.handoffBatches,
+    db.handoffItems,
+    db.appliedChanges,
+    db.aiTasks,
+    db.meta,
+  ];
+}
+
+/**
+ * 恢复的写入体：调用方负责事务边界。
+ *
+ * 单独拎出来是因为「合并」只需要一次写事务，而「替换」必须在同一事务里先给当前主库拍
+ * 快照、再清库。两套写入逻辑各写一遍，迟早有一边漏掉墓碑或隐私裁决。
+ */
+async function performRestore(
+  db: ShiyeDB,
+  document: BackupDocument,
+  mode: 'merge' | 'replace',
+  prepared: PreparedRestore
+): Promise<RestoreResult> {
+  const { categories, tags, bookmarks, readingItems, tombstones } = prepared;
+  const issues = prepared.issues;
+  const warnings = new Set<string>(prepared.warnings);
+  const danglingReferences = prepared.danglingReferences;
+
+  if (issues.length > 0) {
+    const preview = issues.slice(0, 3).join('；');
+    const rest = issues.length > 3 ? ` 等 ${issues.length} 条` : '';
+    if (mode === 'replace') {
+      // 替换会先清空主库：带着无法恢复的记录提交，结果就是「显示成功、数据没了」。
+      throw invalidBackupError(issues);
+    }
+    warnings.add(`备份里有条目无法恢复，已跳过：${preview}${rest}`);
+  }
+
+  const result: RestoreResult = {
+    mode,
+    bookmarksAdded: 0,
+    bookmarksSkipped: 0,
+    readingAdded: 0,
+    readingSkipped: 0,
+    categoriesAdded: 0,
+    tagsAdded: 0,
+    tombstonesAdded: 0,
+    danglingReferences,
+    handoffInvalidated: 0,
+    librarySwitch: null,
+    keptLocalDeletes: 0,
+    adoptedSettings: false,
+    excludedReading: document.exclusions?.readingForLocalOnly ?? 0,
+    warnings: [...warnings],
+  };
+
+  const beforeSettings = await db.settings.get('app');
+  const beforeLibraryId = str((beforeSettings?.value as Raw)?.['libraryId'], '');
+  if (mode === 'replace') {
+    // 替换前先记下会被作废的在途批次：旧主库的编号映射对新主库没有意义，
+    // 留着会让「继续这一批」把建议应用到同 ID 的另一条记录上。
+    result.handoffInvalidated = await db.handoffBatches.count();
+    await Promise.all([
+      db.bookmarks.clear(),
+      db.readingItems.clear(),
+      db.categories.clear(),
+      db.tags.clear(),
+      db.tombstones.clear(),
+      db.importBatches.clear(),
+      db.importItems.clear(),
+      db.handoffBatches.clear(),
+      db.handoffItems.clear(),
+      db.appliedChanges.clear(),
+      db.aiTasks.clear(),
+    ]);
+  }
+
+  // 「当前主库为空吗」必须在写入任何一条之前问：写完分类再问，答案永远是否。
+  const freshLibrary =
+    (await db.bookmarks.count()) === 0 &&
+    (await db.readingItems.count()) === 0 &&
+    (await db.categories.count()) === 0 &&
+    (await db.tags.count()) === 0;
+  const adoptSettings = mode === 'replace' || freshLibrary;
+
+  for (const category of categories) {
+    const existing = await db.categories.get(category.id);
+    if (!existing || mode === 'replace') {
+      await db.categories.put(category);
+      result.categoriesAdded += 1;
+    }
+  }
+  for (const tag of tags) {
+    const existing = await db.tags.get(tag.id);
+    if (!existing || mode === 'replace') {
+      await db.tags.put(tag);
+      result.tagsAdded += 1;
+    }
+  }
+
+  for (const bookmark of bookmarks) {
+    const existing = await db.bookmarks.get(bookmark.id);
+    if (mode === 'merge') {
+      // 合并只新增：文档承诺「同 ID 保留本机现有版本」。localRevision 是各自的
+      // 写入次数，跨设备比较没有意义，用它决定胜负会覆盖本机的人工修改。
+      if (existing) {
+        result.bookmarksSkipped += 1;
+        if (existing.deletedAt && !bookmark.deletedAt) result.keptLocalDeletes += 1;
+        continue;
+      }
+      // 同一条网址在本机可能挂着另一个编号的记录（两台设备各自收藏过同一个页面）。
+      // 普通创建路径遇到同网址会要求明确恢复，合并不能因为「编号不同」就绕过去。
+      const sameUrlRows = await db.bookmarks
+        .where('canonicalUrl')
+        .equals(bookmark.canonicalUrl)
+        .toArray();
+      if (sameUrlRows.some((row) => !row.deletedAt)) {
+        result.bookmarksSkipped += 1;
+        warnings.add('有收藏与现有记录网址相同，合并时跳过；需要合并内容请在本机单独处理。');
+        continue;
+      }
+      // 本机删过、实体已被清掉只剩墓碑，或只剩删除留下的墓碑：都不能被备份复活。
+      const localTombstone =
+        (await db.tombstones.get(['bookmark', bookmark.id])) ??
+        (await db.tombstones.where('canonicalUrl').equals(bookmark.canonicalUrl).first());
+      if (!bookmark.deletedAt && (sameUrlRows.length > 0 || localTombstone)) {
+        result.bookmarksSkipped += 1;
+        result.keptLocalDeletes += 1;
+        continue;
+      }
+    }
+    Object.assign(bookmark, deriveIndexFields(bookmark));
+    await db.bookmarks.put(bookmark);
+    result.bookmarksAdded += 1;
+    if (bookmark.deletedAt) {
+      // 删除态必须同时留墓碑：否则同一条网址之后能被静默重新创建，
+      // 回收站里也找不到这次删除。
+      await db.tombstones.put(tombstoneOf(bookmark));
+    } else {
+      // 活跃条目与同 ID 墓碑不能并存，否则「已删除」与「在库里」同时成立。
+      await db.tombstones.delete(['bookmark', bookmark.id]);
+    }
+  }
+  if (result.keptLocalDeletes > 0) {
+    warnings.add(
+      `有 ${result.keptLocalDeletes} 条收藏在备份里仍是活跃状态，但本机已删除，已保留本机的删除；需要找回请到回收站单独恢复。`
+    );
+  }
+
+  /** 同一条网址只留一条待看：普通新增路径本来就拒绝重复，恢复不能破例。 */
+  const pendingUrls = new Set<string>();
+  if (mode === 'merge') {
+    for (const row of await db.readingItems.toArray()) {
+      if (!row.completedAt) pendingUrls.add(row.canonicalUrl);
+    }
+  }
+  for (const item of readingItems) {
+    if (pendingUrls.has(item.canonicalUrl)) {
+      result.readingSkipped += 1;
+      continue;
+    }
+    const existing = await db.readingItems.get(item.id);
+    if (mode === 'merge' && existing) {
+      // 本机同 ID 已有这条：已完成的不会被降级回待看，已存在的也不覆盖。
+      result.readingSkipped += 1;
+      continue;
+    }
+    await db.readingItems.put(item);
+    result.readingAdded += 1;
+    if (!item.completedAt) pendingUrls.add(item.canonicalUrl);
+  }
+  if (result.readingSkipped > 0) {
+    warnings.add(
+      `有 ${result.readingSkipped} 条待看因为同一条网址已经存在（或本机已有同编号记录）而跳过。`
+    );
+  }
+
+  // 墓碑与「在库里」不能并存。判据必须是事务里最终的活跃实体，而不是备份数组：
+  // 备份里可能只有墓碑、没有对应收藏，那条收藏在本机仍然活跃。
+  //
+  // 合并时还有一条更隐蔽的：墓碑带着标题与网址，`privacyScope` 只是导出那一刻的快照。
+  // 本机把一条收藏改成「本地专用」再删除之后，合并一份它还是普通删除的旧备份，会把
+  // 这条墓碑的 scope 从 local 顶回 main——默认导出于是重新带上私密标题与网址。
+  // 所以合并阶段的墓碑也只认本机已有的裁决，不拿备份的旧状态覆盖。
+  let conflictingTombstones = 0;
+  let keptLocalTombstones = 0;
+  let scopeDowngradesBlocked = 0;
+  for (const tombstone of tombstones) {
+    if (mode === 'merge' && tombstone.entityType === 'bookmark') {
+      const live = await db.bookmarks.get(tombstone.id);
+      if (live) {
+        if (!live.deletedAt) {
+          conflictingTombstones += 1;
+          continue;
+        }
+        // 本机实体已删除：墓碑按本机实体重建，隐私范围跟着实体走。
+        if (tombstone.privacyScope !== (live.privacy.localOnly ? 'local' : 'main')) {
+          scopeDowngradesBlocked += 1;
+        }
+        await db.tombstones.put(tombstoneOf(live));
+        keptLocalTombstones += 1;
+        continue;
+      }
+      const localTombstone = await db.tombstones.get(['bookmark', tombstone.id]);
+      if (localTombstone) {
+        // 本机已有删除记录：标题与网址保留本机的，隐私范围取更严格的一档。
+        const scope =
+          localTombstone.privacyScope === 'local' || tombstone.privacyScope === 'local'
+            ? 'local'
+            : 'main';
+        if (scope !== tombstone.privacyScope) scopeDowngradesBlocked += 1;
+        if (scope !== localTombstone.privacyScope) {
+          await db.tombstones.put({ ...localTombstone, privacyScope: scope });
+        }
+        keptLocalTombstones += 1;
+        continue;
+      }
+      // 同一条网址在本机已经按本地专用处理过：这条旧墓碑不能把范围降回 main。
+      if (tombstone.privacyScope !== 'local' && (await hasLocalOnlyUrl(db, tombstone.canonicalUrl))) {
+        await db.tombstones.put({ ...tombstone, privacyScope: 'local' });
+        scopeDowngradesBlocked += 1;
+        result.tombstonesAdded += 1;
+        continue;
+      }
+    } else if (tombstone.entityType === 'bookmark') {
+      const live = await db.bookmarks.get(tombstone.id);
+      if (live && !live.deletedAt) {
+        conflictingTombstones += 1;
+        continue;
+      }
+    }
+    await db.tombstones.put(tombstone);
+    result.tombstonesAdded += 1;
+  }
+  if (conflictingTombstones > 0) {
+    warnings.add(
+      `备份里有 ${conflictingTombstones} 条墓碑对应本次恢复为活跃的收藏，已忽略这些墓碑。`
+    );
+  }
+  if (keptLocalTombstones > 0) {
+    warnings.add(
+      `有 ${keptLocalTombstones} 条删除记录在本机已有更新的状态，合并时保留了本机版本。`
+    );
+  }
+  if (scopeDowngradesBlocked > 0) {
+    warnings.add(
+      `有 ${scopeDowngradesBlocked} 条删除记录的隐私范围按本机的「本地专用」保留，没有接受备份里的旧范围。`
+    );
+  }
+
+  // 空库合并（换新设备的默认选择）应当等于一次完整导入：库里没有可被覆盖的东西，
+  // 设置与整理策略都该跟着备份走，否则用户会以为「恢复完成」却还在用默认策略。
+  const incomingSettings =
+    document.settings && typeof document.settings === 'object'
+      ? (document.settings as unknown as Raw)
+      : null;
+  const currentRow = await db.settings.get('app');
+  const currentSettings = (currentRow?.value as Raw) ?? null;
+  if (adoptSettings) {
+    const base = incomingSettings ?? currentSettings ?? {};
+    if (!incomingSettings && mode === 'replace') {
+      warnings.add('备份不含设置，已保留当前设备的显示设置，并采用备份中的主库身份。');
+    }
+    // 身份以信封顶层的 libraryId 为准：settings 里的那份可能被手改或来自旧格式，
+    // 而顶层字段是导出时写死的主库标识，恢复后要靠它判断「是不是同一份库」。
+    const identity = str(document.libraryId, '') || str(base['libraryId'], '') || newId();
+    await db.settings.put({
+      key: 'app',
+      value: {
+        ...base,
+        libraryId: identity,
+        pinnedCategoryIds: arr(base['pinnedCategoryIds']).filter(
+          (value): value is string => typeof value === 'string'
+        ),
+      },
+    });
+  }
+  const policy = document.policy as unknown as Policy | null | undefined;
+  if (policy && adoptSettings) {
+    // 空库合并也写：换新设备默认选「合并」，不跟着备份走就会一直用默认策略整理。
+    await db.policies.put({
+      ...policy,
+      id: 'default',
+      examples: Array.isArray(policy.examples) ? policy.examples : [],
+    });
+    if (mode === 'merge') {
+      warnings.add('当前主库为空，已按首次迁移恢复整理策略与显示设置。');
+    }
+  } else if (mode === 'replace') {
+    // 替换是「让主库变回备份那一刻」：备份没有策略就该回到默认策略，
+    // 否则本机旧策略会悄悄影响接下来的整理版本号。
+    await db.policies.put(DEFAULT_POLICY());
+    warnings.add('备份不含整理策略，已重置为默认策略。');
+  }
+  result.adoptedSettings = adoptSettings;
+
+  const afterSettings = await db.settings.get('app');
+  const afterLibraryId = str((afterSettings?.value as Raw)?.['libraryId'], '');
+  if (adoptSettings && beforeLibraryId && afterLibraryId && beforeLibraryId !== afterLibraryId) {
+    result.librarySwitch = { from: beforeLibraryId, to: afterLibraryId };
+  }
+  if (result.handoffInvalidated > 0) {
+    warnings.add(
+      `替换已作废 ${result.handoffInvalidated} 个在途 AI 交接批次；旧主库的编号映射不再可用，请勿回到旧库继续整理。`
+    );
+  }
+
+  await db.meta.put({ key: 'schemaVersion', value: SCHEMA_VERSION });
+  await db.meta.put({ key: 'lastRestoreAt', value: nowIso() });
+
+  result.warnings = [...warnings];
+  return result;
+}
+
 export function createBackupRepository(db: ShiyeDB): BackupRepository {
   return {
     async exportDocument({ includeLocalOnly }): Promise<BackupDocument> {
-      return db.transaction(
-        'r',
-        [
-          db.bookmarks,
-          db.readingItems,
-          db.categories,
-          db.tags,
-          db.tombstones,
-          db.settings,
-          db.policies,
-        ],
-        async () => {
-          const exportedAt = nowIso();
-          const settingsRow = await db.settings.get('app');
-          const [categories, tags, policy, bookmarks, readingItems, tombstones] = await Promise.all([
-            db.categories.toArray(),
-            db.tags.toArray(),
-            db.policies.get('default'),
-            db.bookmarks.toArray(),
-            db.readingItems.toArray(),
-            db.tombstones.toArray(),
-          ]);
-          const settings = settingsRow?.value as BackupDocument['settings'];
-          const localOnlyBookmarkIds = new Set(
-            bookmarks.filter((bookmark) => bookmark.privacy.localOnly).map((bookmark) => bookmark.id)
-          );
-          // 待看没有自己的隐私字段，但它可能是「加入待看」从某条收藏复制出来的（带
-          // relatedBookmarkId，标题与网址都一样）。收藏被排除而待看照样导出，
-          // 本地专用就会从这条缝里漏出去。
-          //
-          // 关联编号并不可靠：重新激活一条已完成待看、跨设备恢复、或先独立加入待看再把
-          // 同网址收藏设成本地专用，都会留下 relatedBookmarkId 为空或指向别处的记录。
-          // 所以再按网址核对一次；回收站里的本地专用收藏同样计入（宁可少导出，不漏）。
-          const localOnlyCanonical = new Set(
-            bookmarks
-              .filter((bookmark) => bookmark.privacy.localOnly)
-              .map((bookmark) => bookmark.canonicalUrl)
-          );
-          const exportedReading = includeLocalOnly
-            ? readingItems
-            : readingItems.filter((item) => {
-                if (item.relatedBookmarkId && localOnlyBookmarkIds.has(item.relatedBookmarkId)) {
-                  return false;
-                }
-                return !localOnlyCanonical.has(item.canonicalUrl);
-              });
-          const excludedReading = readingItems.length - exportedReading.length;
-          return {
-            schemaVersion: SCHEMA_VERSION,
-            libraryId: settings?.libraryId ?? 'local-library',
-            exportedAt,
-            dataCutoffAt: exportedAt,
-            scope: 'device',
-            includesLocalOnly: includeLocalOnly,
-            categories,
-            tags,
-            // 从没打开过策略页时库里没有 default 行，导出的是「此刻生效的默认策略」，
-            // 否则备份会写着 policy: null，恢复后说不清当时用的是哪一版。
-            policy: policy ?? DEFAULT_POLICY(),
-            settings: settings ?? null,
-            bookmarks: includeLocalOnly
-              ? bookmarks
-              : bookmarks.filter((bookmark) => !bookmark.privacy.localOnly),
-            readingItems: exportedReading,
-            tombstones: includeLocalOnly
-              ? tombstones
-              : tombstones.filter((tombstone) => tombstone.privacyScope !== 'local'),
-            ...(excludedReading > 0
-              ? { exclusions: { readingForLocalOnly: excludedReading } }
-              : {}),
-          };
-        }
-      );
+      return db.transaction('r', exportTables(db), () => buildDocument(db, includeLocalOnly));
     },
 
     async listTombstones(): Promise<Tombstone[]> {
@@ -454,18 +836,7 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
      * 否则连着做两次替换，第一份（往往才是原始数据）就被第二份顶掉了。
      */
     async saveSafetyCopy(text: string): Promise<SafetyCopy> {
-      return db.transaction('rw', db.meta, async () => {
-        const existing = safetyCopyOf(await db.meta.get(SAFETY_COPY_KEY));
-        if (existing) {
-          throw new AppError(
-            'SAFETY_COPY_PENDING',
-            `本机还留着一份 ${existing.savedAt} 的替换前安全备份，尚未确认保存。请先把它保存到磁盘并清理本机副本，再做下一次替换。`
-          );
-        }
-        const copy: SafetyCopy = { id: newId(), text, savedAt: nowIso() };
-        await db.meta.put({ key: SAFETY_COPY_KEY, value: copy });
-        return copy;
-      });
+      return db.transaction('rw', db.meta, () => writeSafetyCopy(db, text));
     },
 
     async readSafetyCopy(): Promise<SafetyCopy | null> {
@@ -490,272 +861,40 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
 
     async restore(document: BackupDocument, mode: 'merge' | 'replace'): Promise<RestoreResult> {
       const prepared = prepareRestore(document);
-      const { categories, tags, bookmarks, readingItems, tombstones } = prepared;
-      const issues = prepared.issues;
-      const warnings = new Set<string>(prepared.warnings);
-      const danglingReferences = prepared.danglingReferences;
-
-      if (issues.length > 0) {
-        const preview = issues.slice(0, 3).join('；');
-        const rest = issues.length > 3 ? ` 等 ${issues.length} 条` : '';
-        if (mode === 'replace') {
-          // 替换会先清空主库：带着无法恢复的记录提交，结果就是「显示成功、数据没了」。
-          throw invalidBackupError(issues);
-        }
-        warnings.add(`备份里有条目无法恢复，已跳过：${preview}${rest}`);
-      }
-
-      const result: RestoreResult = {
-        mode,
-        bookmarksAdded: 0,
-        bookmarksSkipped: 0,
-        readingAdded: 0,
-        readingSkipped: 0,
-        categoriesAdded: 0,
-        tagsAdded: 0,
-        tombstonesAdded: 0,
-        danglingReferences,
-        handoffInvalidated: 0,
-        librarySwitch: null,
-        keptLocalDeletes: 0,
-        adoptedSettings: false,
-        excludedReading: document.exclusions?.readingForLocalOnly ?? 0,
-        warnings: [...warnings],
-      };
-
-      await db.transaction(
-        'rw',
-        [
-          db.bookmarks,
-          db.readingItems,
-          db.categories,
-          db.tags,
-          db.tombstones,
-          db.settings,
-          db.policies,
-          db.importBatches,
-          db.importItems,
-          db.handoffBatches,
-          db.handoffItems,
-          db.appliedChanges,
-          db.aiTasks,
-          db.meta,
-        ],
-        async () => {
-          const beforeSettings = await db.settings.get('app');
-          const beforeLibraryId = str((beforeSettings?.value as Raw)?.['libraryId'], '');
-          if (mode === 'replace') {
-            // 替换前先记下会被作废的在途批次：旧主库的编号映射对新主库没有意义，
-            // 留着会让「继续这一批」把建议应用到同 ID 的另一条记录上。
-            result.handoffInvalidated = await db.handoffBatches.count();
-            await Promise.all([
-              db.bookmarks.clear(),
-              db.readingItems.clear(),
-              db.categories.clear(),
-              db.tags.clear(),
-              db.tombstones.clear(),
-              db.importBatches.clear(),
-              db.importItems.clear(),
-              db.handoffBatches.clear(),
-              db.handoffItems.clear(),
-              db.appliedChanges.clear(),
-              db.aiTasks.clear(),
-            ]);
-          }
-
-          // 「当前主库为空吗」必须在写入任何一条之前问：写完分类再问，答案永远是否。
-          const freshLibrary =
-            (await db.bookmarks.count()) === 0 &&
-            (await db.readingItems.count()) === 0 &&
-            (await db.categories.count()) === 0 &&
-            (await db.tags.count()) === 0;
-          const adoptSettings = mode === 'replace' || freshLibrary;
-
-          for (const category of categories) {
-            const existing = await db.categories.get(category.id);
-            if (!existing || mode === 'replace') {
-              await db.categories.put(category);
-              result.categoriesAdded += 1;
-            }
-          }
-          for (const tag of tags) {
-            const existing = await db.tags.get(tag.id);
-            if (!existing || mode === 'replace') {
-              await db.tags.put(tag);
-              result.tagsAdded += 1;
-            }
-          }
-
-          for (const bookmark of bookmarks) {
-            const existing = await db.bookmarks.get(bookmark.id);
-            if (mode === 'merge') {
-              // 合并只新增：文档承诺「同 ID 保留本机现有版本」。localRevision 是各自的
-              // 写入次数，跨设备比较没有意义，用它决定胜负会覆盖本机的人工修改。
-              if (existing) {
-                result.bookmarksSkipped += 1;
-                if (existing.deletedAt && !bookmark.deletedAt) result.keptLocalDeletes += 1;
-                continue;
-              }
-              // 同一条网址在本机可能挂着另一个编号的记录（两台设备各自收藏过同一个页面）。
-              // 普通创建路径遇到同网址会要求明确恢复，合并不能因为「编号不同」就绕过去。
-              const sameUrlRows = await db.bookmarks
-                .where('canonicalUrl')
-                .equals(bookmark.canonicalUrl)
-                .toArray();
-              if (sameUrlRows.some((row) => !row.deletedAt)) {
-                result.bookmarksSkipped += 1;
-                warnings.add('有收藏与现有记录网址相同，合并时跳过；需要合并内容请在本机单独处理。');
-                continue;
-              }
-              // 本机删过、实体已被清掉只剩墓碑，或只剩删除留下的墓碑：都不能被备份复活。
-              const localTombstone =
-                (await db.tombstones.get(['bookmark', bookmark.id])) ??
-                (await db.tombstones.where('canonicalUrl').equals(bookmark.canonicalUrl).first());
-              if (!bookmark.deletedAt && (sameUrlRows.length > 0 || localTombstone)) {
-                result.bookmarksSkipped += 1;
-                result.keptLocalDeletes += 1;
-                continue;
-              }
-            }
-            Object.assign(bookmark, deriveIndexFields(bookmark));
-            await db.bookmarks.put(bookmark);
-            result.bookmarksAdded += 1;
-            if (bookmark.deletedAt) {
-              // 删除态必须同时留墓碑：否则同一条网址之后能被静默重新创建，
-              // 回收站里也找不到这次删除。
-              await db.tombstones.put({
-                entityType: 'bookmark',
-                id: bookmark.id,
-                revision: bookmark.revision,
-                changeVersion: null,
-                deletedAt: bookmark.deletedAt,
-                privacyScope: bookmark.privacy.localOnly ? 'local' : 'main',
-                canonicalUrl: bookmark.canonicalUrl,
-                title: bookmark.title,
-              });
-            } else {
-              // 活跃条目与同 ID 墓碑不能并存，否则「已删除」与「在库里」同时成立。
-              await db.tombstones.delete(['bookmark', bookmark.id]);
-            }
-          }
-          if (result.keptLocalDeletes > 0) {
-            warnings.add(
-              `有 ${result.keptLocalDeletes} 条收藏在备份里仍是活跃状态，但本机已删除，已保留本机的删除；需要找回请到回收站单独恢复。`
-            );
-          }
-
-          /** 同一条网址只留一条待看：普通新增路径本来就拒绝重复，恢复不能破例。 */
-          const pendingUrls = new Set<string>();
-          if (mode === 'merge') {
-            for (const row of await db.readingItems.toArray()) {
-              if (!row.completedAt) pendingUrls.add(row.canonicalUrl);
-            }
-          }
-          for (const item of readingItems) {
-            if (pendingUrls.has(item.canonicalUrl)) {
-              result.readingSkipped += 1;
-              continue;
-            }
-            const existing = await db.readingItems.get(item.id);
-            if (mode === 'merge' && existing) {
-              // 本机同 ID 已有这条：已完成的不会被降级回待看，已存在的也不覆盖。
-              result.readingSkipped += 1;
-              continue;
-            }
-            await db.readingItems.put(item);
-            result.readingAdded += 1;
-            if (!item.completedAt) pendingUrls.add(item.canonicalUrl);
-          }
-          if (result.readingSkipped > 0) {
-            warnings.add(
-              `有 ${result.readingSkipped} 条待看因为同一条网址已经存在（或本机已有同编号记录）而跳过。`
-            );
-          }
-
-          // 墓碑与「在库里」不能并存。判据必须是事务里最终的活跃实体，而不是备份数组：
-          // 备份里可能只有墓碑、没有对应收藏，那条收藏在本机仍然活跃。
-          let conflictingTombstones = 0;
-          for (const tombstone of tombstones) {
-            if (tombstone.entityType === 'bookmark') {
-              const live = await db.bookmarks.get(tombstone.id);
-              if (live && !live.deletedAt) {
-                conflictingTombstones += 1;
-                continue;
-              }
-            }
-            await db.tombstones.put(tombstone);
-            result.tombstonesAdded += 1;
-          }
-          if (conflictingTombstones > 0) {
-            warnings.add(
-              `备份里有 ${conflictingTombstones} 条墓碑对应本次恢复为活跃的收藏，已忽略这些墓碑。`
-            );
-          }
-
-          // 空库合并（换新设备的默认选择）应当等于一次完整导入：库里没有可被覆盖的东西，
-          // 设置与整理策略都该跟着备份走，否则用户会以为「恢复完成」却还在用默认策略。
-          const incomingSettings =
-            document.settings && typeof document.settings === 'object'
-              ? (document.settings as unknown as Raw)
-              : null;
-          const currentRow = await db.settings.get('app');
-          const currentSettings = (currentRow?.value as Raw) ?? null;
-          if (adoptSettings) {
-            const base = incomingSettings ?? currentSettings ?? {};
-            if (!incomingSettings && mode === 'replace') {
-              warnings.add('备份不含设置，已保留当前设备的显示设置，并采用备份中的主库身份。');
-            }
-            // 身份以信封顶层的 libraryId 为准：settings 里的那份可能被手改或来自旧格式，
-            // 而顶层字段是导出时写死的主库标识，恢复后要靠它判断「是不是同一份库」。
-            const identity = str(document.libraryId, '') || str(base['libraryId'], '') || newId();
-            await db.settings.put({
-              key: 'app',
-              value: {
-                ...base,
-                libraryId: identity,
-                pinnedCategoryIds: arr(base['pinnedCategoryIds']).filter(
-                  (value): value is string => typeof value === 'string'
-                ),
-              },
-            });
-          }
-          const policy = document.policy as unknown as Policy | null | undefined;
-          if (policy && adoptSettings) {
-            // 空库合并也写：换新设备默认选「合并」，不跟着备份走就会一直用默认策略整理。
-            await db.policies.put({
-              ...policy,
-              id: 'default',
-              examples: Array.isArray(policy.examples) ? policy.examples : [],
-            });
-            if (mode === 'merge') {
-              warnings.add('当前主库为空，已按首次迁移恢复整理策略与显示设置。');
-            }
-          } else if (mode === 'replace') {
-            // 替换是「让主库变回备份那一刻」：备份没有策略就该回到默认策略，
-            // 否则本机旧策略会悄悄影响接下来的整理版本号。
-            await db.policies.put(DEFAULT_POLICY());
-            warnings.add('备份不含整理策略，已重置为默认策略。');
-          }
-          result.adoptedSettings = adoptSettings;
-
-          const afterSettings = await db.settings.get('app');
-          const afterLibraryId = str((afterSettings?.value as Raw)?.['libraryId'], '');
-          if (adoptSettings && beforeLibraryId && afterLibraryId && beforeLibraryId !== afterLibraryId) {
-            result.librarySwitch = { from: beforeLibraryId, to: afterLibraryId };
-          }
-          if (result.handoffInvalidated > 0) {
-            warnings.add(
-              `替换已作废 ${result.handoffInvalidated} 个在途 AI 交接批次；旧主库的编号映射不再可用，请勿回到旧库继续整理。`
-            );
-          }
-
-          await db.meta.put({ key: 'schemaVersion', value: SCHEMA_VERSION });
-          await db.meta.put({ key: 'lastRestoreAt', value: nowIso() });
-        }
+      return db.transaction('rw', restoreTables(db), () =>
+        performRestore(db, document, mode, prepared)
       );
+    },
 
-      result.warnings = [...warnings];
-      return result;
+    /**
+     * 替换专用入口：把「给当前主库拍快照 → 保存安全副本 → 清库 → 写入」压进同一个事务。
+     *
+     * 这三步分开做会留一个窗口：快照拍完、替换还没提交时，别的标签页或扩展弹窗写进来的
+     * 收藏会被随后的 clear() 抹掉，而快照生成得更早，也不含这些记录——刚显示「已保存」
+     * 的内容在主库和安全副本里同时消失。事务内回滚保护不了事务开始前的这段窗口，
+     * 唯一可靠的做法是不给它留窗口。
+     */
+    async restoreWithSafety(
+      document: BackupDocument,
+      mode: 'merge' | 'replace'
+    ): Promise<{ result: RestoreResult; safety: SafetySnapshot | null }> {
+      // 整份文件的校验排在事务之前：注定失败的替换连安全副本都不该动，
+      // 也不该让「有未确认副本」这种提示盖住「文件本身坏了」这个更要紧的原因。
+      const prepared = prepareRestore(document);
+      if (mode === 'replace' && prepared.issues.length > 0) {
+        throw invalidBackupError(prepared.issues);
+      }
+      return db.transaction('rw', restoreTables(db), async () => {
+        let safety: SafetySnapshot | null = null;
+        if (mode === 'replace') {
+          const snapshot = await buildDocument(db, true);
+          const text = JSON.stringify(snapshot, null, 2);
+          const copy = await writeSafetyCopy(db, text);
+          safety = { document: snapshot, text, copy };
+        }
+        const result = await performRestore(db, document, mode, prepared);
+        return { result, safety };
+      });
     },
   };
 }
