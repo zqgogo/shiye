@@ -40,7 +40,12 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
   const [mode, setMode] = useState<'paste' | 'file'>(initialMode);
   const [text, setText] = useState(() => takePendingPaste());
   const [fileName, setFileName] = useState('');
-  const [destination, setDestination] = useState<ImportDestination>('reading');
+  // 默认目标跟着入口走：浏览器书签本质是「收藏」，导入收藏夹就该进收藏库。
+  // 之前统一默认成待看，用户不手动改下拉，整批书签会静默进待看——
+  // 而待看没有分类字段，目录映射区也不渲染，看起来就像「分类丢了」。
+  const [destination, setDestination] = useState<ImportDestination>(
+    initialMode === 'file' ? 'library' : 'reading'
+  );
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [view, setView] = useState<'all' | 'new' | 'duplicate' | 'invalid'>('all');
   const [mapping, setMapping] = useState<Record<string, string>>({});
@@ -232,6 +237,7 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
           className={`chip ${mode === 'paste' ? 'active' : ''}`}
           onClick={() => {
             setMode('paste');
+            setDestination('reading');
             setPreview(null);
             setResult(null);
           }}
@@ -242,6 +248,7 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
           className={`chip ${mode === 'file' ? 'active' : ''}`}
           onClick={() => {
             setMode('file');
+            setDestination('library');
             setPreview(null);
             setResult(null);
           }}

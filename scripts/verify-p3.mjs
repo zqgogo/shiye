@@ -555,6 +555,25 @@ async function main() {
     await goto(page, 'capture:file', '选择浏览器导出的书签 HTML');
     await uploadFixture(page, FIXTURES.chrome);
     await waitPreview(page);
+    // 默认目标必须是收藏库：书签本质是收藏。默认成待看会让整批书签静默进待看，
+    // 而待看没有分类字段，目录映射区也不渲染，用户看到的表象就是「分类全丢了」。
+    const defaultDestination = await page.$eval(
+      'select[aria-label="保存目标"]',
+      (node) => node.value
+    );
+    record(
+      'P3.3 导入收藏夹默认保存到收藏库（不是待看）',
+      defaultDestination === 'library',
+      `默认目标=${defaultDestination}`
+    );
+    const folderSectionVisible = await page.evaluate(() =>
+      document.body.innerText.includes('目录与分类')
+    );
+    record(
+      'P3.3 默认目标下「目录与分类」映射区直接可见',
+      folderSectionVisible,
+      `可见=${folderSectionVisible}`
+    );
     const chromeStats = await previewStats(page);
     report.counts.chromeFixture = chromeStats;
     record(
