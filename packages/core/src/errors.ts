@@ -26,7 +26,9 @@ export type AppErrorCode =
   | 'STORAGE_FAILED'
   | 'UNSUPPORTED_VERSION'
   /** 备份结构合法但条目内容不可恢复：破坏性的替换必须在写之前停下。 */
-  | 'INVALID_BACKUP_RECORDS';
+  | 'INVALID_BACKUP_RECORDS'
+  /** 上一份替换前的安全备份还没确认保存，不能被下一份覆盖。 */
+  | 'SAFETY_COPY_PENDING';
 
 export class AppError extends Error {
   readonly code: AppErrorCode;

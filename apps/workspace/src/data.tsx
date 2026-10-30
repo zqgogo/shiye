@@ -51,7 +51,9 @@ export function DataPage() {
     | null
   >(null);
   /** 上一次替换前落库的安全备份：下载被拦或页面被关之后，还在这里。 */
-  const [safetyCopy, setSafetyCopy] = useState<{ text: string; savedAt: string } | null>(null);
+  const [safetyCopy, setSafetyCopy] = useState<{ id: string; text: string; savedAt: string } | null>(
+    null
+  );
 
   useEffect(() => {
     let alive = true;
@@ -110,6 +112,12 @@ export function DataPage() {
       setError('替换整个主库前，请确认已了解影响并勾选确认。');
       return;
     }
+    if (mode === 'replace' && safetyCopy) {
+      // 服务层也会拒绝（SAFETY_COPY_PENDING）；先在界面上说清楚该做什么，
+      // 免得用户点了确认才看到一句「还留着一份备份」。
+      setError('上一份替换前的安全备份还没确认保存，请先保存到磁盘并清理本机副本，再做下一次替换。');
+      return;
+    }
     setBusy(true);
     setError('');
     try {
@@ -142,7 +150,7 @@ export function DataPage() {
       if (safety) {
         // 备份在替换之前就已经落库，这里只是再发起一次下载；下不下来都不影响取回。
         const savedAt = safetyDoc?.exportedAt ?? new Date().toISOString();
-        setSafetyCopy({ text: safety.text, savedAt });
+        if (outcome.safetyCopy) setSafetyCopy(outcome.safetyCopy);
         saveSafety(safety.text, savedAt);
       }
       await run(async () => undefined);
@@ -235,7 +243,7 @@ export function DataPage() {
             <strong>有一份替换前的安全备份还没确认保存</strong>
             <span>
               保存于 {formatDateTime(safetyCopy.savedAt)}，存在本机库里，不随替换清空。
-              替换一旦提交不可撤销，请先把它保存到磁盘再继续。
+              在它被保存并确认之前，替换会被挡下——下一份副本不会覆盖它。
             </span>
             <div className="actions" style={{ justifyContent: 'flex-start' }}>
               <button className="btn small" onClick={() => saveSafety(safetyCopy.text, safetyCopy.savedAt)}>
@@ -245,7 +253,7 @@ export function DataPage() {
                 className="btn small"
                 onClick={() => {
                   void (async () => {
-                    await service.clearSafetyCopy();
+                    await service.clearSafetyCopy(safetyCopy.id);
                     setSafetyCopy(null);
                     toast('已清理本机临时副本（磁盘上的文件不受影响）。');
                   })();

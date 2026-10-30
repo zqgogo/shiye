@@ -206,8 +206,48 @@ function seedSamples(page, rows) {
   );
 }
 
-/** 直接改一条收藏（模拟「应用之后又被人改过」或隐私开关变化）。 */
-function patchBookmark(page, id, patch, bumpRevision = false) {
+/**
+ * 模拟另一个标签页提交了新的策略版本（策略页做的是同一件事：版本号 +1）。
+ * 预览页已经开着，用户点「应用」时才会撞上这次变更。
+ */
+function bumpPolicyVersion(page) {
+  return page.evaluate(
+    () =>
+      new Promise((resolve, reject) => {
+        const request = indexedDB.open('shiye');
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {
+          const db = request.result;
+          const tx = db.transaction('policies', 'readwrite');
+          const store = tx.objectStore('policies');
+          const read = store.get('default');
+          read.onsuccess = () => {
+            const current = read.result;
+            if (!current) {
+              reject(new Error('库里没有整理策略'));
+              return;
+            }
+            store.put({
+              ...current,
+              policyVersion: current.policyVersion + 1,
+              revision: current.revision + 1,
+              updatedAt: new Date().toISOString(),
+            });
+          };
+          tx.oncomplete = () => {
+            db.close();
+            resolve(true);
+          };
+          tx.onerror = () => {
+            db.close();
+            reject(tx.error);
+          };
+        };
+      })
+  );
+}
+
+/** 直接改一条收藏（模拟「应用之后又被人改过」或隐私开关变化）。 */function patchBookmark(page, id, patch, bumpRevision = false) {
   return page.evaluate(
     (bookmarkId, changes, bump) =>
       new Promise((resolve, reject) => {
@@ -760,6 +800,46 @@ async function main() {
     );
     // 复原，避免影响后面的提问包断言。
     await patchBookmark(page, ctx.ids[T_LIBRARY], { privacy: { localOnly: false, aiBlocked: false } });
+  });
+
+  // ---- P5.6 预览之后策略才被改：应用阶段必须给出原因并解锁按钮 ----
+  phase('P5.6 应用阶段拒绝过期建议并解锁按钮', async () => {
+    const { material, batchId } = await generatePack(page, base);
+    const n = material.items.find((item) => item.title === T_LIBRARY)?.n ?? 0;
+    const preview = await submitReply(
+      page,
+      replyFor(batchId, [
+        suggestion(n, { titleEcho: T_LIBRARY, patch: { aiPurpose: '预览之后过期' } }),
+      ])
+    );
+    await waitForSelectorReady(page, '.diff', 15_000).catch(() => {});
+
+    // 用户读结果的这几分钟里，另一个标签页提交了新的策略版本。
+    await bumpPolicyVersion(page);
+    await clickIn(page, '.panel', '应用勾选项');
+    await sleep(1500);
+
+    const state = await page.evaluate(() => {
+      const button = [...document.querySelectorAll('button')].find((node) =>
+        /应用勾选项|应用中/.test(node.textContent ?? '')
+      );
+      return {
+        label: (button?.textContent ?? '').trim(),
+        clickable: button ? button.disabled === false : false,
+        alert: document.querySelector('.panel .alert')?.innerText?.trim() ?? '',
+      };
+    });
+    const stores = await readStores(page, ['bookmarks']);
+    const target = stores.bookmarks.find((row) => row.id === ctx.ids[T_LIBRARY]);
+    record(
+      'P5.6 应用阶段拒绝过期建议并解锁按钮',
+      preview.onPreview === true &&
+        state.label.includes('应用勾选项') &&
+        state.clickable === true &&
+        /整理策略.*(变|更新)/.test(state.alert) &&
+        target?.aiPurpose !== '预览之后过期',
+      `按钮=「${state.label}」｜可点=${state.clickable}｜提示=「${state.alert.slice(0, 60)}」｜用途=「${target?.aiPurpose ?? ''}」`
+    );
   });
 
   // ---- P5.5 提问包 ----

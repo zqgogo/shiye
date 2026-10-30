@@ -236,6 +236,134 @@ function sanitizeTombstone(raw: Raw, reject: Reject): Tombstone | null {
   };
 }
 
+const SAFETY_COPY_KEY = 'safetyBackup';
+
+/** meta 里的安全副本既可能是新格式（带编号），也可能是旧格式（只有文本），统一读出来。 */
+function safetyCopyOf(row: { value: unknown } | undefined): SafetyCopy | null {
+  const value = row?.value as Raw | undefined;
+  const text = str(value?.['text'], '');
+  if (!text) return null;
+  const id = str(value?.['id'], '');
+  return {
+    // 旧格式没有编号：给一个稳定的占位符，按编号清理时仍然能对上它自己。
+    id: id || 'legacy-safety-copy',
+    text,
+    savedAt: str(value?.['savedAt'], ''),
+  };
+}
+
+/** 一份备份清洗后的结果：写入与「只校验」两条路径共用同一套判定。 */interface PreparedRestore {
+  categories: Category[];
+  tags: Tag[];
+  bookmarks: Bookmark[];
+  readingItems: ReadingItem[];
+  tombstones: Tombstone[];
+  /** 逐条被拒的原因；replace 模式下任意一条都会让整次替换停下。 */
+  issues: string[];
+  warnings: string[];
+  danglingReferences: number;
+}
+
+function invalidBackupError(issues: string[]): AppError {
+  const preview = issues.slice(0, 3).join('；');
+  const rest = issues.length > 3 ? ` 等 ${issues.length} 条` : '';
+  return new AppError(
+    'INVALID_BACKUP_RECORDS',
+    `备份里有条目无法恢复（${preview}${rest}）。替换会清空当前主库，已停止，数据未改动。请回原环境重新导出，或改用「合并」逐条跳过。`
+  );
+}
+
+/**
+ * 清洗并裁决整份备份，不写任何一张表。
+ *
+ * restore 与 validateRestore 都走这里：界面要在覆盖安全副本之前拿到同一个结论，
+ * 两套判定各写一遍迟早会分叉。
+ */
+function prepareRestore(document: BackupDocument): PreparedRestore {
+  if (document.schemaVersion > SCHEMA_VERSION) {
+    throw new AppError('UNSUPPORTED_VERSION', '备份来自更新版本，请先升级扩展。');
+  }
+  const warnings = new Set<string>();
+  const issues: string[] = [];
+
+  /** 逐条清洗并收集被拒原因：静默 filter 会让「恢复成功」变成假象。 */
+  const collect = <T>(
+    rows: unknown[],
+    label: string,
+    sanitize: (raw: Raw, reject: Reject) => T | null
+  ): T[] => {
+    const out: T[] = [];
+    rows.forEach((raw, index) => {
+      const value = sanitize(
+        (raw ?? {}) as Raw,
+        (reason) => issues.push(`${label}第 ${index + 1} 条${reason}`)
+      );
+      if (value !== null) out.push(value);
+    });
+    return out;
+  };
+
+  const categories = collect(document.categories, '分类', (raw, reject) =>
+    sanitizeCategory(raw, reject)
+  );
+  const tags = collect(document.tags, '标签', (raw, reject) => sanitizeTag(raw, reject));
+  const bookmarks = collect(document.bookmarks, '收藏', (raw, reject) =>
+    sanitizeBookmark(raw, reject, warnings)
+  );
+  const readingItems = collect(document.readingItems, '待看', (raw, reject) =>
+    sanitizeReading(raw, reject)
+  );
+  const tombstones = collect(document.tombstones ?? [], '墓碑', (raw, reject) =>
+    sanitizeTombstone(raw, reject)
+  );
+
+  // 备份可能来自另一台设备或只恢复了部分数据：引用到不存在的分类/标签时清空，
+  // 否则恢复后会出现指向空气的条目，「未分类」计数与分类页都会对不上。
+  const knownCategories = new Set(categories.map((row) => row.id));
+  const knownTags = new Set(tags.map((row) => row.id));
+  let danglingReferences = 0;
+  for (const bookmark of bookmarks) {
+    if (bookmark.categoryId && !knownCategories.has(bookmark.categoryId)) {
+      bookmark.categoryId = null;
+      danglingReferences += 1;
+    }
+    const keptTags = bookmark.tagIds.filter((id) => knownTags.has(id));
+    if (keptTags.length !== bookmark.tagIds.length) {
+      danglingReferences += bookmark.tagIds.length - keptTags.length;
+      bookmark.tagIds = keptTags;
+    }
+    Object.assign(bookmark, deriveIndexFields(bookmark));
+  }
+  if (danglingReferences > 0) {
+    warnings.add(`有 ${danglingReferences} 处引用指向本次未恢复的分类或标签，已清空这些引用。`);
+  }
+  if (document.schemaVersion < SCHEMA_VERSION) {
+    warnings.add(`备份为旧版格式（v${document.schemaVersion}），已显式迁移到 v${SCHEMA_VERSION}。`);
+  }
+  if (!document.tombstones) {
+    warnings.add('备份不包含墓碑，删除记录可能被旧数据重新带回；已按现有删除状态处理。');
+  }
+  if (!document.includesLocalOnly) {
+    warnings.add('备份未包含本地专用条目，这部分内容不会恢复。');
+  }
+  if (document.exclusions?.readingForLocalOnly) {
+    warnings.add(
+      `导出时排除了 ${document.exclusions.readingForLocalOnly} 条关联本地专用收藏的待看，恢复后不会有这些。`
+    );
+  }
+
+  return {
+    categories,
+    tags,
+    bookmarks,
+    readingItems,
+    tombstones,
+    issues,
+    warnings: [...warnings],
+    danglingReferences,
+  };
+}
+
 export function createBackupRepository(db: ShiyeDB): BackupRepository {
   return {
     async exportDocument({ includeLocalOnly }): Promise<BackupDocument> {
@@ -268,11 +396,23 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
           // 待看没有自己的隐私字段，但它可能是「加入待看」从某条收藏复制出来的（带
           // relatedBookmarkId，标题与网址都一样）。收藏被排除而待看照样导出，
           // 本地专用就会从这条缝里漏出去。
+          //
+          // 关联编号并不可靠：重新激活一条已完成待看、跨设备恢复、或先独立加入待看再把
+          // 同网址收藏设成本地专用，都会留下 relatedBookmarkId 为空或指向别处的记录。
+          // 所以再按网址核对一次；回收站里的本地专用收藏同样计入（宁可少导出，不漏）。
+          const localOnlyCanonical = new Set(
+            bookmarks
+              .filter((bookmark) => bookmark.privacy.localOnly)
+              .map((bookmark) => bookmark.canonicalUrl)
+          );
           const exportedReading = includeLocalOnly
             ? readingItems
-            : readingItems.filter(
-                (item) => !item.relatedBookmarkId || !localOnlyBookmarkIds.has(item.relatedBookmarkId)
-              );
+            : readingItems.filter((item) => {
+                if (item.relatedBookmarkId && localOnlyBookmarkIds.has(item.relatedBookmarkId)) {
+                  return false;
+                }
+                return !localOnlyCanonical.has(item.canonicalUrl);
+              });
           const excludedReading = readingItems.length - exportedReading.length;
           return {
             schemaVersion: SCHEMA_VERSION,
@@ -309,109 +449,60 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
     /**
      * 替换前的安全备份不能只活在内存里：替换一旦提交就不可撤销，
      * 而下载可能被拦、被取消，或者页面直接被关掉。
+     *
+     * 但「存下来」不等于「已交付」：上一份还没确认保存时，这一份不许覆盖它。
+     * 否则连着做两次替换，第一份（往往才是原始数据）就被第二份顶掉了。
      */
-    async saveSafetyCopy(text: string): Promise<void> {
-      await db.meta.put({ key: 'safetyBackup', value: { text, savedAt: nowIso() } });
+    async saveSafetyCopy(text: string): Promise<SafetyCopy> {
+      return db.transaction('rw', db.meta, async () => {
+        const existing = safetyCopyOf(await db.meta.get(SAFETY_COPY_KEY));
+        if (existing) {
+          throw new AppError(
+            'SAFETY_COPY_PENDING',
+            `本机还留着一份 ${existing.savedAt} 的替换前安全备份，尚未确认保存。请先把它保存到磁盘并清理本机副本，再做下一次替换。`
+          );
+        }
+        const copy: SafetyCopy = { id: newId(), text, savedAt: nowIso() };
+        await db.meta.put({ key: SAFETY_COPY_KEY, value: copy });
+        return copy;
+      });
     },
 
     async readSafetyCopy(): Promise<SafetyCopy | null> {
-      const row = await db.meta.get('safetyBackup');
-      const value = row?.value as Raw | undefined;
-      const text = str(value?.['text'], '');
-      const savedAt = str(value?.['savedAt'], '');
-      if (!text) return null;
-      return { text, savedAt };
+      return safetyCopyOf(await db.meta.get(SAFETY_COPY_KEY));
     },
 
-    async clearSafetyCopy(): Promise<void> {
-      await db.meta.delete('safetyBackup');
+    async clearSafetyCopy(id: string): Promise<void> {
+      await db.transaction('rw', db.meta, async () => {
+        const existing = safetyCopyOf(await db.meta.get(SAFETY_COPY_KEY));
+        // 编号对不上说明这份已经被替换或清理过：旧标签页的按钮不该动新副本。
+        if (!existing || existing.id !== id) return;
+        await db.meta.delete(SAFETY_COPY_KEY);
+      });
+    },
+
+    async validateRestore(document: BackupDocument, mode: 'merge' | 'replace'): Promise<void> {
+      const prepared = prepareRestore(document);
+      if (mode === 'replace' && prepared.issues.length > 0) {
+        throw invalidBackupError(prepared.issues);
+      }
     },
 
     async restore(document: BackupDocument, mode: 'merge' | 'replace'): Promise<RestoreResult> {
-      if (document.schemaVersion > SCHEMA_VERSION) {
-        throw new AppError('UNSUPPORTED_VERSION', '备份来自更新版本，请先升级扩展。');
-      }
-      const warnings = new Set<string>();
-      const issues: string[] = [];
-
-      /** 逐条清洗并收集被拒原因：静默 filter 会让「恢复成功」变成假象。 */
-      const collect = <T>(
-        rows: unknown[],
-        label: string,
-        sanitize: (raw: Raw, reject: Reject) => T | null
-      ): T[] => {
-        const out: T[] = [];
-        rows.forEach((raw, index) => {
-          const value = sanitize(
-            (raw ?? {}) as Raw,
-            (reason) => issues.push(`${label}第 ${index + 1} 条${reason}`)
-          );
-          if (value !== null) out.push(value);
-        });
-        return out;
-      };
-
-      const categories = collect(document.categories, '分类', (raw, reject) =>
-        sanitizeCategory(raw, reject)
-      );
-      const tags = collect(document.tags, '标签', (raw, reject) => sanitizeTag(raw, reject));
-      const bookmarks = collect(document.bookmarks, '收藏', (raw, reject) =>
-        sanitizeBookmark(raw, reject, warnings)
-      );
-      const readingItems = collect(document.readingItems, '待看', (raw, reject) =>
-        sanitizeReading(raw, reject)
-      );
-      const tombstones = collect(document.tombstones ?? [], '墓碑', (raw, reject) =>
-        sanitizeTombstone(raw, reject)
-      );
+      const prepared = prepareRestore(document);
+      const { categories, tags, bookmarks, readingItems, tombstones } = prepared;
+      const issues = prepared.issues;
+      const warnings = new Set<string>(prepared.warnings);
+      const danglingReferences = prepared.danglingReferences;
 
       if (issues.length > 0) {
         const preview = issues.slice(0, 3).join('；');
         const rest = issues.length > 3 ? ` 等 ${issues.length} 条` : '';
         if (mode === 'replace') {
           // 替换会先清空主库：带着无法恢复的记录提交，结果就是「显示成功、数据没了」。
-          throw new AppError(
-            'INVALID_BACKUP_RECORDS',
-            `备份里有条目无法恢复（${preview}${rest}）。替换会清空当前主库，已停止，数据未改动。请回原环境重新导出，或改用「合并」逐条跳过。`
-          );
+          throw invalidBackupError(issues);
         }
         warnings.add(`备份里有条目无法恢复，已跳过：${preview}${rest}`);
-      }
-
-      // 备份可能来自另一台设备或只恢复了部分数据：引用到不存在的分类/标签时清空，
-      // 否则恢复后会出现指向空气的条目，「未分类」计数与分类页都会对不上。
-      const knownCategories = new Set(categories.map((row) => row.id));
-      const knownTags = new Set(tags.map((row) => row.id));
-      let danglingReferences = 0;
-      for (const bookmark of bookmarks) {
-        if (bookmark.categoryId && !knownCategories.has(bookmark.categoryId)) {
-          bookmark.categoryId = null;
-          danglingReferences += 1;
-        }
-        const keptTags = bookmark.tagIds.filter((id) => knownTags.has(id));
-        if (keptTags.length !== bookmark.tagIds.length) {
-          danglingReferences += bookmark.tagIds.length - keptTags.length;
-          bookmark.tagIds = keptTags;
-        }
-        Object.assign(bookmark, deriveIndexFields(bookmark));
-      }
-      if (danglingReferences > 0) {
-        warnings.add(`有 ${danglingReferences} 处引用指向本次未恢复的分类或标签，已清空这些引用。`);
-      }
-
-      if (document.schemaVersion < SCHEMA_VERSION) {
-        warnings.add(`备份为旧版格式（v${document.schemaVersion}），已显式迁移到 v${SCHEMA_VERSION}。`);
-      }
-      if (!document.tombstones) {
-        warnings.add('备份不包含墓碑，删除记录可能被旧数据重新带回；已按现有删除状态处理。');
-      }
-      if (!document.includesLocalOnly) {
-        warnings.add('备份未包含本地专用条目，这部分内容不会恢复。');
-      }
-      if (document.exclusions?.readingForLocalOnly) {
-        warnings.add(
-          `导出时排除了 ${document.exclusions.readingForLocalOnly} 条关联本地专用收藏的待看，恢复后不会有这些。`
-        );
       }
 
       const result: RestoreResult = {
@@ -505,23 +596,26 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
                 if (existing.deletedAt && !bookmark.deletedAt) result.keptLocalDeletes += 1;
                 continue;
               }
-              // 本机删过、实体已被清掉只剩墓碑：不能因为备份里修订号更大就复活它。
-              const localTombstone = await db.tombstones.get(['bookmark', bookmark.id]);
-              if (localTombstone && !bookmark.deletedAt) {
+              // 同一条网址在本机可能挂着另一个编号的记录（两台设备各自收藏过同一个页面）。
+              // 普通创建路径遇到同网址会要求明确恢复，合并不能因为「编号不同」就绕过去。
+              const sameUrlRows = await db.bookmarks
+                .where('canonicalUrl')
+                .equals(bookmark.canonicalUrl)
+                .toArray();
+              if (sameUrlRows.some((row) => !row.deletedAt)) {
+                result.bookmarksSkipped += 1;
+                warnings.add('有收藏与现有记录网址相同，合并时跳过；需要合并内容请在本机单独处理。');
+                continue;
+              }
+              // 本机删过、实体已被清掉只剩墓碑，或只剩删除留下的墓碑：都不能被备份复活。
+              const localTombstone =
+                (await db.tombstones.get(['bookmark', bookmark.id])) ??
+                (await db.tombstones.where('canonicalUrl').equals(bookmark.canonicalUrl).first());
+              if (!bookmark.deletedAt && (sameUrlRows.length > 0 || localTombstone)) {
                 result.bookmarksSkipped += 1;
                 result.keptLocalDeletes += 1;
                 continue;
               }
-            }
-            const sameUrl = await db.bookmarks
-              .where('canonicalUrl')
-              .equals(bookmark.canonicalUrl)
-              .filter((row) => row.id !== bookmark.id && !row.deletedAt)
-              .first();
-            if (sameUrl && mode === 'merge') {
-              result.bookmarksSkipped += 1;
-              warnings.add('有收藏与现有记录网址相同，合并时跳过。');
-              continue;
             }
             Object.assign(bookmark, deriveIndexFields(bookmark));
             await db.bookmarks.put(bookmark);
@@ -578,16 +672,16 @@ export function createBackupRepository(db: ShiyeDB): BackupRepository {
             );
           }
 
-          // 恢复写入的活跃收藏与备份里的同 ID 墓碑冲突时，以活跃为准并丢弃那条墓碑：
-          // 两个都留下会让「已删除」与「在库里」同时成立。
-          const restoredActiveIds = new Set(
-            bookmarks.filter((bookmark) => !bookmark.deletedAt).map((bookmark) => bookmark.id)
-          );
+          // 墓碑与「在库里」不能并存。判据必须是事务里最终的活跃实体，而不是备份数组：
+          // 备份里可能只有墓碑、没有对应收藏，那条收藏在本机仍然活跃。
           let conflictingTombstones = 0;
           for (const tombstone of tombstones) {
-            if (tombstone.entityType === 'bookmark' && restoredActiveIds.has(tombstone.id)) {
-              conflictingTombstones += 1;
-              continue;
+            if (tombstone.entityType === 'bookmark') {
+              const live = await db.bookmarks.get(tombstone.id);
+              if (live && !live.deletedAt) {
+                conflictingTombstones += 1;
+                continue;
+              }
             }
             await db.tombstones.put(tombstone);
             result.tombstonesAdded += 1;

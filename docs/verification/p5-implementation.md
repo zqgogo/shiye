@@ -128,3 +128,14 @@ npm run verify:all                 # P0 + P0.4 + P1 + P2 + P3 + P4 + P5 全量
 浏览器由 `puppeteer-core` 拉起子进程，`userDataDir` 指向 `.verify/p0-profile-chrome-p5`，与日常 Chrome 隔离，每轮从空库开始。原始 JSON 写到 `.verify/reports/p5-browser-verification.json`（不入库）。
 
 > 执行状态：2026-10-28 共跑两轮。首轮 35 项里 27 过、8 败（两个阶段因前序中断未记录），失败归到六个原因、其中两处是真实缺陷（见第 5 节）；修复后复跑 36 项全通过（见第 6 节），P5.1–P5.6 已勾选。原始报告：`.verify/reports/p5-browser-verification.json`。
+
+## 8. 第二轮复核后的加固（2026-10-30）
+
+第二轮复核（[报告](independent-recheck-2026-10-30.md)）用真实浏览器复现了一个界面错误分支：预览后另一标签页改了策略，点「应用勾选项」时后端正确抛 `STALE_SUGGESTION`、收藏没被改，但按钮一直停在「应用中…」且没有任何可见原因（`ai-stale-ui.json`：`button=应用中…`、`disabled=true`、`visibleError=false`，页面同时留下未处理的 `AppError`）。复核还指出事务外检查与写入之间仍有窗口。
+
+| 缺陷 | 修法 | 断言 |
+| --- | --- | --- |
+| 应用失败后 `busy` 不会复位，界面无原因 | `apply` 补 `try/catch/finally`：捕获后 `setError(toUserMessage)` + 错误 toast，`finally` 解锁；一条都没写进去时把第一条跳过原因写到页面上 | `verify:p5`「应用阶段拒绝过期建议并解锁按钮」：按钮回到「应用勾选项」且可点、页面出现「整理策略在校验之后又变了…」、目标条目未被写入 |
+| 策略检查在写事务之外，中间改策略仍能写入旧建议 | `applySuggestion` 的事务范围扩到 `handoffBatches` / `settings` / `policies`，写之前在同一事务里复核批次状态、主库身份与策略版本（`ApplySuggestionContext` 带 `libraryId` / `policyVersion`）；服务层事务外检查保留，只用于更早给出可读原因 | 单测「检查通过后、写事务开始前策略被更新，旧建议仍然写不进去」（在检查与事务之间精确注入策略更新，`appliedChanges` 保持 0） |
+
+复跑：`verify:p5` **37 项全通过**（36 + 1 条新增）。复核脚本 `.verify/review-2026-10-30/ai-stale-ui.mjs` 复跑结果：`button=应用勾选项`、`disabled=false`、`visibleError=true`、`pageErrors=[]`。

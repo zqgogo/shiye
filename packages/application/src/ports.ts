@@ -21,6 +21,21 @@ import type {
 
 export type FieldSource = 'human' | 'ai';
 
+/**
+ * 应用一条 AI 建议时随写事务一起核对的身份信息。
+ *
+ * 批次编号、主库身份与策略版本必须和写入在同一个事务里读：先在事务外查一遍、
+ * 再开事务写，中间那段时间正是另一个标签页能改策略的窗口。
+ */
+export interface ApplySuggestionContext {
+  taskId: string;
+  batchId: string;
+  /** 生成材料包时的主库编号；应用时当前主库必须仍是它。 */
+  libraryId: string;
+  /** 生成材料包时的策略版本；应用时当前策略必须仍是它。 */
+  policyVersion: number;
+}
+
 export interface CreateBookmarkParams {
   id?: string;
   originalUrl: string;
@@ -76,12 +91,12 @@ export interface BookmarkRepository {
   markUnread(ids: string[]): Promise<number>;
   setPinned(id: string, pinned: boolean): Promise<Bookmark>;
   touchOpened(id: string): Promise<void>;
-  /** AI 建议应用：事务内复核版本、隐私、锁定与分类引用，并写入应用日志。 */
+/** AI 建议应用：事务内复核版本、隐私、锁定与分类引用，并写入应用日志。 */
   applySuggestion(
     id: string,
     expectedLocalRevision: number,
     patch: AISuggestionPatch,
-    context: { taskId: string; batchId: string }
+    context: ApplySuggestionContext
   ): Promise<{ status: 'applied' | 'unchanged'; bookmark: Bookmark }>;
   /**
    * 撤销一条应用记录：把 before 值写回去。
@@ -215,8 +230,14 @@ export interface RestoreResult {
   warnings: string[];
 }
 
-/** 安全备份的持久化副本：替换前先落库，下载失败或页面崩溃后仍能取回。 */
+/**
+ * 安全备份的持久化副本：替换前先落库，下载失败或页面崩溃后仍能取回。
+ *
+ * 每份副本带独立编号：下一次替换不得覆盖还没确认保存的副本，清理也要按编号核对，
+ * 否则一个停在旧状态的标签页会把别人刚存的新副本删掉。
+ */
 export interface SafetyCopy {
+  id: string;
   text: string;
   savedAt: string;
 }
@@ -228,10 +249,19 @@ export interface BackupRepository {
     mode: 'merge' | 'replace'
   ): Promise<RestoreResult>;
   listTombstones(): Promise<Tombstone[]>;
-  /** 替换前把当前主库的完整备份写进 meta：它不参与替换清空，下载失败也能重取。 */
-  saveSafetyCopy(text: string): Promise<void>;
+  /**
+   * 只校验不写入：替换前先确认整份文件可恢复。
+   * 一份注定失败的替换不该先把上一份尚未确认的安全副本覆盖掉。
+   */
+  validateRestore(document: BackupDocument, mode: 'merge' | 'replace'): Promise<void>;
+  /**
+   * 替换前把当前主库的完整备份写进 meta：它不参与替换清空，下载失败也能重取。
+   * 已有一份未确认的副本时拒绝覆盖（抛 SAFETY_COPY_PENDING）。
+   */
+  saveSafetyCopy(text: string): Promise<SafetyCopy>;
   readSafetyCopy(): Promise<SafetyCopy | null>;
-  clearSafetyCopy(): Promise<void>;
+  /** 只清掉编号一致的那份：旧标签页按旧编号清理不会误删新副本。 */
+  clearSafetyCopy(id: string): Promise<void>;
 }
 
 export interface Repositories {

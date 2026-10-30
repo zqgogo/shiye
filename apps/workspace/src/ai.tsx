@@ -244,17 +244,33 @@ export function OrganizePage() {
       return;
     }
     setBusy(true);
-    const outcome = await service.applySuggestions(
-      pack.batchId,
-      selected.map((item) => ({ n: item.n, bookmark: item.bookmark, patch: item.patch }))
-    );
-    setBusy(false);
-    setAppliedCount(outcome.applied.length);
-    setRevertResult(null);
+    setError('');
+    try {
+      const outcome = await service.applySuggestions(
+        pack.batchId,
+        selected.map((item) => ({ n: item.n, bookmark: item.bookmark, patch: item.patch }))
+      );
+      setAppliedCount(outcome.applied.length);
+      setRevertResult(null);
+      // 一条都没写进去时要解释原因：策略过期、主库被换、版本冲突都会走到这里，
+      // 只弹「已应用 0 条」等于没说。
+      if (outcome.applied.length === 0 && outcome.skipped.length > 0) {
+        setError(`没有应用任何建议：${outcome.skipped[0]?.reason ?? '未知原因'}`);
+        toast(`未应用任何建议，跳过 ${outcome.skipped.length} 条。`, 'error');
+      } else {
+        toast(
+          `已应用 ${outcome.applied.length} 条，跳过 ${outcome.skipped.length} 条。应用日志可用于核对。`
+        );
+      }
+    } catch (cause) {
+      // 批次失效、主库被替换、存储失败都会抛错；不接住的话按钮会一直停在「应用中…」。
+      setError(toUserMessage(cause));
+      toast(toUserMessage(cause), 'error');
+    } finally {
+      setBusy(false);
+    }
+    // 刷新放在 finally 之外：失败也要让界面回到与主库一致的状态。
     await run(async () => undefined);
-    toast(
-      `已应用 ${outcome.applied.length} 条，跳过 ${outcome.skipped.length} 条。应用日志可用于核对。`
-    );
   };
 
   const revert = async () => {

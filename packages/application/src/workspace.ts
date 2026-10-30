@@ -390,7 +390,7 @@ export class WorkspaceService {
   async restoreBackup(
     text: string,
     mode: 'merge' | 'replace'
-  ): Promise<{ result: RestoreResult; safety: BackupBundle | null }> {
+  ): Promise<{ result: RestoreResult; safety: BackupBundle | null; safetyCopy: SafetyCopy | null }> {
     let raw: unknown;
     try {
       raw = JSON.parse(text);
@@ -401,24 +401,30 @@ export class WorkspaceService {
     if (document.schemaVersion > SCHEMA_VERSION) {
       throw new AppError('UNSUPPORTED_VERSION', '备份来自更新版本，请先升级扩展。');
     }
+    // 校验必须排在保存安全副本之前：一份注定无法恢复的文件，不该先把上一份
+    // 还没确认保存的安全副本顶掉。
+    await this.repos.backup.validateRestore(document, mode);
     // 顺序很关键：先把当前主库整份落到 meta（替换不会清 meta），再提交替换。
     // 反过来一旦下载被拦或页面被关，替换已经不可撤销，而唯一副本只在内存里。
     let safety: BackupBundle | null = null;
+    let safetyCopy: SafetyCopy | null = null;
     if (mode === 'replace') {
       safety = await this.exportBackup(true);
-      await this.repos.backup.saveSafetyCopy(safety.text);
+      // 已有一份未确认的副本时这里会抛 SAFETY_COPY_PENDING：宁可挡住这次替换，
+      // 也不能把上一份（往往是原始数据）覆盖掉。
+      safetyCopy = await this.repos.backup.saveSafetyCopy(safety.text);
     }
     const result = await this.repos.backup.restore(document, mode);
-    return { result, safety };
+    return { result, safety, safetyCopy };
   }
 
-  /** 上一次替换前自动保存的安全备份；确认保存到磁盘后由界面清除。 */
+  /** 上一次替换前自动保存的安全备份；确认保存到磁盘后由界面按编号清理。 */
   async readSafetyCopy(): Promise<SafetyCopy | null> {
     return this.repos.backup.readSafetyCopy();
   }
 
-  async clearSafetyCopy(): Promise<void> {
-    return this.repos.backup.clearSafetyCopy();
+  async clearSafetyCopy(id: string): Promise<void> {
+    return this.repos.backup.clearSafetyCopy(id);
   }
 
   async exportSnapshot(options: {
@@ -494,6 +500,14 @@ export class WorkspaceService {
     const applied: { n: number; bookmark: Bookmark }[] = [];
     const skipped: { n: number; reason: string }[] = [];
     const taskId = newId();
+    // 批次身份随每条写入一起带进事务：仓储会在同一个事务里复核，
+    // 事务外的 staleReason() 只是给用户一个更早、更省事的原因，不是权威判定。
+    const context = {
+      taskId,
+      batchId,
+      libraryId: batch.libraryId,
+      policyVersion: batch.policyVersion,
+    };
     const itemResults: { n: number; status: 'applied' | 'skipped'; patch: null; reason: string }[] = [];
     for (const item of items) {
       const stop = await staleReason();
@@ -516,7 +530,7 @@ export class WorkspaceService {
           item.bookmark.id,
           item.bookmark.localRevision,
           cleaned,
-          { taskId, batchId }
+          context
         );
         if (result.status === 'applied') {
           applied.push({ n: item.n, bookmark: result.bookmark });

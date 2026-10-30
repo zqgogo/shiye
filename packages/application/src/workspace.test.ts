@@ -1107,7 +1107,7 @@ describe('恢复安全与隐私边界', () => {
     const copy = await service.readSafetyCopy();
     expect(copy).not.toBeNull();
     expect(copy?.text).toContain('安全样本');
-    await service.clearSafetyCopy();
+    await service.clearSafetyCopy(copy!.id);
     expect(await service.readSafetyCopy()).toBeNull();
   });
 
@@ -1230,5 +1230,189 @@ describe('恢复安全与隐私边界', () => {
       code: 'STALE_SUGGESTION',
     });
     expect((await repos.bookmarks.listActive())[0]?.aiPurpose).toBe('');
+  });
+
+  it('检查通过后、写事务开始前策略被更新，旧建议仍然写不进去', async () => {
+    await service.createBookmark({ originalUrl: 'https://example.com/race', title: '资料' });
+    const pack = await service.buildOrganizePack({ scope: 'all', selectedIds: [] });
+    const checked = await service.validateAiReply({
+      text: JSON.stringify({
+        protocolVersion: 2,
+        batchId: pack.batchId,
+        part: 1,
+        results: [
+          {
+            n: 1,
+            domain: 'example.com',
+            titleEcho: '资料',
+            patch: { aiPurpose: '旧策略输出' },
+            reason: '',
+            status: 'ok',
+          },
+        ],
+      }),
+      batchId: pack.batchId,
+      items: pack.items,
+      policyVersion: pack.policyVersion,
+    });
+    expect(checked.applied).toHaveLength(1);
+
+    // 精确插在「事务外检查已通过」与「写事务开始」之间：事务内的复核必须自己发现。
+    const original = repos.bookmarks.applySuggestion.bind(repos.bookmarks);
+    repos.bookmarks.applySuggestion = async (...args) => {
+      await repos.settings.updatePolicy('在应用事务之前提交的新策略');
+      return original(...args);
+    };
+    try {
+      const outcome = await service.applySuggestions(pack.batchId, checked.applied);
+      expect(outcome.applied).toHaveLength(0);
+      expect(outcome.skipped[0]?.reason).toContain('整理策略已更新');
+    } finally {
+      repos.bookmarks.applySuggestion = original;
+    }
+    expect((await repos.bookmarks.listActive())[0]?.aiPurpose).toBe('');
+    expect(await db.appliedChanges.count()).toBe(0);
+  });
+
+  it('第二次替换失败不会覆盖尚未确认的安全备份', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/a', title: 'A 原始数据' });
+    const second = JSON.parse((await service.exportBackup(true)).text);
+    second.bookmarks = [
+      {
+        ...second.bookmarks[0],
+        id: 'library-b',
+        title: 'B 替换后的数据',
+        originalUrl: 'https://example.com/b',
+        canonicalUrl: 'https://example.com/b',
+      },
+    ];
+    const first = await service.restoreBackup(JSON.stringify(second), 'replace');
+    expect(first.safetyCopy?.text).toContain('A 原始数据');
+
+    // 信封合法但条目缺编号：校验阶段就该停下，不去动上一份安全副本。
+    const broken = { ...second, bookmarks: [{ title: '损坏的记录' }] };
+    await expect(service.restoreBackup(JSON.stringify(broken), 'replace')).rejects.toMatchObject({
+      code: 'INVALID_BACKUP_RECORDS',
+    });
+    const kept = await service.readSafetyCopy();
+    expect(kept?.id).toBe(first.safetyCopy?.id);
+    expect(kept?.text).toContain('A 原始数据');
+    expect(kept?.text).not.toContain('B 替换后的数据');
+  });
+
+  it('未确认的安全备份存在时下一次替换被挡下，清理按编号核对', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/a', title: 'A 原始数据' });
+    const second = JSON.parse((await service.exportBackup(true)).text);
+    second.bookmarks = [
+      {
+        ...second.bookmarks[0],
+        id: 'library-b',
+        title: 'B 替换后的数据',
+        originalUrl: 'https://example.com/b',
+        canonicalUrl: 'https://example.com/b',
+      },
+    ];
+    const first = await service.restoreBackup(JSON.stringify(second), 'replace');
+
+    const third = JSON.parse(JSON.stringify(second));
+    third.bookmarks[0].id = 'library-c';
+    third.bookmarks[0].title = 'C 再替换';
+    third.bookmarks[0].originalUrl = 'https://example.com/c';
+    third.bookmarks[0].canonicalUrl = 'https://example.com/c';
+    await expect(service.restoreBackup(JSON.stringify(third), 'replace')).rejects.toMatchObject({
+      code: 'SAFETY_COPY_PENDING',
+    });
+    // 被挡下的替换不该动主库。
+    expect((await repos.bookmarks.listActive())[0]?.title).toBe('B 替换后的数据');
+
+    // 旧标签页拿着过期编号来清理：不能删掉现在这一份。
+    await service.clearSafetyCopy('some-older-copy-id');
+    expect((await service.readSafetyCopy())?.id).toBe(first.safetyCopy?.id);
+
+    await service.clearSafetyCopy(first.safetyCopy!.id);
+    expect(await service.readSafetyCopy()).toBeNull();
+    await service.restoreBackup(JSON.stringify(third), 'replace');
+    expect((await repos.bookmarks.listActive())[0]?.title).toBe('C 再替换');
+  });
+
+  it('重新激活已完成待看时补上关联编号，默认备份不再带走私密内容', async () => {
+    const url = 'https://example.com/private-reactivate';
+    const first = await service.addReading({ originalUrl: url, title: '私密资料' });
+    await repos.reading.complete(first.id);
+    const priv = await service.createBookmark({
+      originalUrl: url,
+      title: '私密资料',
+      privacy: { localOnly: true },
+    });
+
+    const again = await service.addReading({
+      originalUrl: url,
+      title: priv.title,
+      relatedBookmarkId: priv.id,
+    });
+    expect((await repos.reading.get(again.id))?.relatedBookmarkId).toBe(priv.id);
+
+    const backup = await service.exportBackup(false);
+    expect(backup.document.bookmarks).toHaveLength(0);
+    expect(backup.document.readingItems).toHaveLength(0);
+    expect(backup.text).not.toContain(url);
+    expect(backup.text).not.toContain('私密资料');
+    expect(backup.document.exclusions?.readingForLocalOnly).toBe(1);
+  });
+
+  it('先加入待看、之后才把同网址收藏设为本地专用，默认备份也不带走这条待看', async () => {
+    const url = 'https://example.com/private-later';
+    await service.addReading({ originalUrl: url, title: '稍后私密' });
+    const bookmark = await service.createBookmark({ originalUrl: url, title: '稍后私密' });
+    await service.updateBookmark(
+      bookmark.id,
+      bookmark.localRevision,
+      { privacy: { localOnly: true, aiBlocked: false } },
+      'human'
+    );
+
+    const backup = await service.exportBackup(false);
+    expect(backup.document.readingItems).toHaveLength(0);
+    expect(backup.text).not.toContain(url);
+    expect(backup.document.exclusions?.readingForLocalOnly).toBe(1);
+  });
+
+  it('合并时同网址、不同编号的备份收藏不能绕过本机删除', async () => {
+    const bookmark = await service.createBookmark({
+      originalUrl: 'https://example.com/deleted-url',
+      title: '本机删除',
+    });
+    const backup = JSON.parse((await service.exportBackup(true)).text);
+    backup.bookmarks[0].id = 'other-device-new-id';
+    await repos.bookmarks.softDelete(bookmark.id);
+
+    const restored = await service.restoreBackup(JSON.stringify(backup), 'merge');
+    expect(await repos.bookmarks.listActive()).toHaveLength(0);
+    expect(restored.result.keptLocalDeletes).toBe(1);
+    expect(await db.tombstones.get(['bookmark', bookmark.id])).toBeDefined();
+  });
+
+  it('合并只含墓碑的备份不会给本机活跃收藏写墓碑', async () => {
+    const bookmark = await service.createBookmark({
+      originalUrl: 'https://example.com/live',
+      title: '本机活跃',
+    });
+    const backup = JSON.parse((await service.exportBackup(true)).text);
+    backup.bookmarks = [];
+    backup.tombstones = [
+      {
+        entityType: 'bookmark',
+        id: bookmark.id,
+        revision: 5,
+        deletedAt: new Date().toISOString(),
+        privacyScope: 'main',
+        canonicalUrl: 'https://example.com/live',
+      },
+    ];
+
+    const restored = await service.restoreBackup(JSON.stringify(backup), 'merge');
+    expect((await repos.bookmarks.get(bookmark.id))?.deletedAt).toBeNull();
+    expect(await db.tombstones.get(['bookmark', bookmark.id])).toBeUndefined();
+    expect(restored.result.tombstonesAdded).toBe(0);
   });
 });

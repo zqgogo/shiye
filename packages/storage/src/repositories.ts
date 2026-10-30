@@ -28,6 +28,7 @@ import type {
   Tombstone,
 } from '@shiye/core';
 import type {
+  ApplySuggestionContext,
   BackupRepository,
   BookmarkRepository,
   CategoryRepository,
@@ -347,93 +348,138 @@ export class DexieBookmarkRepository implements BookmarkRepository {
     id: string,
     expectedLocalRevision: number,
     patch: AISuggestionPatch,
-    context: { taskId: string; batchId: string }
+    context: ApplySuggestionContext
   ): Promise<{ status: 'applied' | 'unchanged'; bookmark: Bookmark }> {
-    return this.db.transaction('rw', this.db.bookmarks, this.db.appliedChanges, this.db.categories, this.db.tags, async () => {
-      const current = await this.db.bookmarks.get(id);
-      if (!current) throw new AppError('NOT_FOUND', '没有找到这条收藏。');
-      assertNotDeleted(current);
-      if (current.privacy.localOnly || current.privacy.aiBlocked) {
-        throw new AppError('PRIVACY_BLOCKED', '这条收藏已禁止发送 AI，不能应用建议。');
-      }
-      assertRevision(current, expectedLocalRevision);
-
-      const changedFields: AIField[] = [];
-      const before: Partial<Record<AIField, unknown>> = {};
-      const after: Partial<Record<AIField, unknown>> = {};
-      const next: Bookmark = { ...current };
-
-      if (patch.categoryId !== undefined && patch.categoryId !== current.categoryId) {
-        if (current.lockedFields.includes('categoryId')) {
-          throw new AppError('LOCKED_FIELD', '分类已被人工锁定，不能应用建议。');
+    return this.db.transaction(
+      'rw',
+      [
+        this.db.bookmarks,
+        this.db.appliedChanges,
+        this.db.categories,
+        this.db.tags,
+        // 批次、主库身份与策略必须和写入在同一个事务里读。事务外查一遍、再开事务写，
+        // 中间那段时间正好够另一个标签页改策略，旧建议就会带着「已检查」的标记写进库。
+        this.db.handoffBatches,
+        this.db.settings,
+        this.db.policies,
+      ],
+      async () => {
+        await this.assertHandoffStillValid(context);
+        const current = await this.db.bookmarks.get(id);
+        if (!current) throw new AppError('NOT_FOUND', '没有找到这条收藏。');
+        assertNotDeleted(current);
+        if (current.privacy.localOnly || current.privacy.aiBlocked) {
+          throw new AppError('PRIVACY_BLOCKED', '这条收藏已禁止发送 AI，不能应用建议。');
         }
-        if (patch.categoryId) {
-          const category = await this.db.categories.get(patch.categoryId);
-          if (!category) throw new AppError('INVALID_INPUT', '建议的分类已不存在。');
+        assertRevision(current, expectedLocalRevision);
+
+        const changedFields: AIField[] = [];
+        const before: Partial<Record<AIField, unknown>> = {};
+        const after: Partial<Record<AIField, unknown>> = {};
+        const next: Bookmark = { ...current };
+
+        if (patch.categoryId !== undefined && patch.categoryId !== current.categoryId) {
+          if (current.lockedFields.includes('categoryId')) {
+            throw new AppError('LOCKED_FIELD', '分类已被人工锁定，不能应用建议。');
+          }
+          if (patch.categoryId) {
+            const category = await this.db.categories.get(patch.categoryId);
+            if (!category) throw new AppError('INVALID_INPUT', '建议的分类已不存在。');
+          }
+          before.categoryId = current.categoryId;
+          after.categoryId = patch.categoryId;
+          next.categoryId = patch.categoryId;
+          changedFields.push('categoryId');
         }
-        before.categoryId = current.categoryId;
-        after.categoryId = patch.categoryId;
-        next.categoryId = patch.categoryId;
-        changedFields.push('categoryId');
-      }
-      if (patch.tagIds !== undefined) {
-        const nextTags = [...new Set(patch.tagIds)];
-        const same =
-          nextTags.length === current.tagIds.length &&
-          nextTags.every((tag) => current.tagIds.includes(tag));
-        if (!same) {
-          if (current.lockedFields.includes('tagIds')) {
-            throw new AppError('LOCKED_FIELD', '标签已被人工锁定，不能应用建议。');
-          }
-          if (nextTags.length > LIMITS.tagsPerBookmark) {
-            throw new AppError('INVALID_INPUT', `一条收藏最多 ${LIMITS.tagsPerBookmark} 个标签。`);
-          }
-          if (nextTags.length) {
-            const found = await this.db.tags.bulkGet(nextTags);
-            if (found.some((tag) => !tag)) {
-              throw new AppError('INVALID_INPUT', '建议包含不存在的标签。');
+        if (patch.tagIds !== undefined) {
+          const nextTags = [...new Set(patch.tagIds)];
+          const same =
+            nextTags.length === current.tagIds.length &&
+            nextTags.every((tag) => current.tagIds.includes(tag));
+          if (!same) {
+            if (current.lockedFields.includes('tagIds')) {
+              throw new AppError('LOCKED_FIELD', '标签已被人工锁定，不能应用建议。');
             }
+            if (nextTags.length > LIMITS.tagsPerBookmark) {
+              throw new AppError('INVALID_INPUT', `一条收藏最多 ${LIMITS.tagsPerBookmark} 个标签。`);
+            }
+            if (nextTags.length) {
+              const found = await this.db.tags.bulkGet(nextTags);
+              if (found.some((tag) => !tag)) {
+                throw new AppError('INVALID_INPUT', '建议包含不存在的标签。');
+              }
+            }
+            before.tagIds = [...current.tagIds];
+            after.tagIds = nextTags;
+            next.tagIds = nextTags;
+            changedFields.push('tagIds');
           }
-          before.tagIds = [...current.tagIds];
-          after.tagIds = nextTags;
-          next.tagIds = nextTags;
-          changedFields.push('tagIds');
         }
-      }
-      if (patch.aiPurpose !== undefined && patch.aiPurpose !== current.aiPurpose) {
-        if (current.lockedFields.includes('aiPurpose')) {
-          throw new AppError('LOCKED_FIELD', 'AI 用途已被人工锁定，不能应用建议。');
+        if (patch.aiPurpose !== undefined && patch.aiPurpose !== current.aiPurpose) {
+          if (current.lockedFields.includes('aiPurpose')) {
+            throw new AppError('LOCKED_FIELD', 'AI 用途已被人工锁定，不能应用建议。');
+          }
+          optionalText(patch.aiPurpose, 'AI 用途', LIMITS.aiPurpose);
+          before.aiPurpose = current.aiPurpose;
+          after.aiPurpose = patch.aiPurpose;
+          next.aiPurpose = patch.aiPurpose;
+          changedFields.push('aiPurpose');
         }
-        optionalText(patch.aiPurpose, 'AI 用途', LIMITS.aiPurpose);
-        before.aiPurpose = current.aiPurpose;
-        after.aiPurpose = patch.aiPurpose;
-        next.aiPurpose = patch.aiPurpose;
-        changedFields.push('aiPurpose');
-      }
 
-      if (changedFields.length === 0) {
-        return { status: 'unchanged', bookmark: current };
-      }
+        if (changedFields.length === 0) {
+          return { status: 'unchanged', bookmark: current };
+        }
 
-      next.revision = current.revision + 1;
-      next.localRevision = current.localRevision + 1;
-      next.updatedAt = nowIso();
-      Object.assign(next, deriveIndexFields(next));
-      await this.db.bookmarks.put(next);
-      await this.db.appliedChanges.add({
-        id: newId(),
-        taskId: context.taskId,
-        batchId: context.batchId,
-        bookmarkId: id,
-        appliedAt: next.updatedAt,
-        changedFields,
-        before,
-        after,
-        appliedLocalRevision: next.localRevision,
-        undoneAt: null,
-      });
-      return { status: 'applied', bookmark: next };
-    });
+        next.revision = current.revision + 1;
+        next.localRevision = current.localRevision + 1;
+        next.updatedAt = nowIso();
+        Object.assign(next, deriveIndexFields(next));
+        await this.db.bookmarks.put(next);
+        await this.db.appliedChanges.add({
+          id: newId(),
+          taskId: context.taskId,
+          batchId: context.batchId,
+          bookmarkId: id,
+          appliedAt: next.updatedAt,
+          changedFields,
+          before,
+          after,
+          appliedLocalRevision: next.localRevision,
+          undoneAt: null,
+        });
+        return { status: 'applied', bookmark: next };
+      }
+    );
+  }
+
+  /**
+   * 事务内的交接有效性复核。
+   *
+   * 读的是这一笔事务里的批次、设置与策略：调用方在事务外查过也不算数，
+   * 那之后到事务开始之间仍可能有人改了策略或换了主库。
+   */
+  private async assertHandoffStillValid(context: ApplySuggestionContext): Promise<void> {
+    const batch = await this.db.handoffBatches.get(context.batchId);
+    if (!batch) throw new AppError('STALE_SUGGESTION', '这批交接已被删除，停止应用。');
+    if (batch.status === 'invalidated' || batch.status === 'applied') {
+      throw new AppError('STALE_SUGGESTION', '这批交接已经应用或已失效，停止应用。');
+    }
+    const settingsRow = await this.db.settings.get('app');
+    const libraryId = (settingsRow?.value as { libraryId?: unknown } | undefined)?.libraryId;
+    if (typeof libraryId !== 'string' || !libraryId || batch.libraryId !== libraryId) {
+      throw new AppError('STALE_SUGGESTION', '主库身份已变化，停止应用。');
+    }
+    const policy = await this.db.policies.get('default');
+    const policyVersion = policy ? policy.policyVersion : DEFAULT_POLICY().policyVersion;
+    if (
+      policyVersion !== batch.policyVersion ||
+      policyVersion !== context.policyVersion
+    ) {
+      throw new AppError(
+        'STALE_SUGGESTION',
+        '整理策略已更新，这批建议按旧规则生成，未继续应用。请重新生成材料包。'
+      );
+    }
   }
 
   /**
@@ -550,11 +596,16 @@ export class DexieReadingRepository implements ReadingRepository {
         throw new AppError('DUPLICATE', '已经在待看列表里。', { readingId: existing.id });
       }
       if (existing) {
+        // 重新激活一条已完成待看时，关联信息也要跟着这次调用更新：
+        // 只改状态和时间，会让「从本地专用收藏加入待看」留下一个没有关联的待看，
+        // 导出时就绕过了按关联编号做的隐私过滤。
+        const related = params.relatedBookmarkId ?? existing.relatedBookmarkId ?? null;
         const next: ReadingItem = {
           ...existing,
           status: 'pending',
           completedAt: null,
           addedAt: nowIso(),
+          relatedBookmarkId: related,
           revision: existing.revision + 1,
           localRevision: existing.localRevision + 1,
         };
