@@ -27,6 +27,8 @@ npm install
 要求：Node 20+（开发时用 22.22.2）、npm 10+。若 `registry.npmjs.org` 不可达，改用镜像：
 `npm install --registry=https://registry.npmmirror.com --strict-ssl=false`。
 
+接手前按顺序读三份：`docs/ROADMAP.md` 的「当前进度」看做到哪、`docs/next-step-cloudflare-ai-implementation.md` 看下一阶段（自有 Cloudflare 后端、自配 AI、Safari 支持）的要求、`docs/purge-by-criteria-design.md` 看清理功能的待评估设计。进度只在 ROADMAP 维护。
+
 常用命令：
 
 | 命令 | 作用 |
@@ -45,7 +47,7 @@ npm install
 | `npm run verify:p5` | 真实浏览器验证手动 AI 交接、校验、应用与撤销（P5） |
 | `npm run verify:p6` | 真实浏览器验证备份、恢复与手机快照（P6，断言真实落盘的文件） |
 | `npm run verify:a11y` | 真实浏览器验证键盘焦点、Tab、Escape、长链接与小屏（整体交付） |
-| `npm run verify:all` | 以上全部，共 262 项 |
+| `npm run verify:all` | 以上全部（各项断言数以各次运行报告为准） |
 
 手动加载扩展：`chrome://extensions` → 打开「开发者模式」→「加载已解压的扩展程序」→ 选 `apps/extension/dist`。Edge 同理（`edge://extensions`）。
 
