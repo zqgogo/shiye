@@ -1,0 +1,23 @@
+<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<!--
+  用于验证「不执行脚本、不加载外部资源」的脱敏样本。
+  下面的 script / style / img / link / iframe 都指向本机一个不存在的端口，
+  只要解析过程真的创建了 DOM 或加载了资源，验证脚本就能观察到对应请求。
+-->
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
+<LINK REL="stylesheet" HREF="http://127.0.0.1:9/hostile.css">
+<TITLE>Bookmarks</TITLE>
+<H1>Bookmarks</H1>
+<DL><p>
+    <DT><H3 ADD_DATE="1720000000">恶意样本</H3>
+    <DL><p>
+        <SCRIPT SRC="http://127.0.0.1:9/hostile.js"></SCRIPT>
+        <SCRIPT>window.__p3_hostile_ran = true;</SCRIPT>
+        <STYLE>body { background: url("http://127.0.0.1:9/bg.png"); }</STYLE>
+        <DT><A HREF="javascript:window.__p3_hostile_ran=true" ADD_DATE="1720000001">伪协议链接</A>
+        <DT><A HREF="data:text/html,<b>inline</b>" ADD_DATE="1720000002">data 链接</A>
+        <DT><A HREF="https://example.com/p3/hostile-safe" ADD_DATE="1720000003">安全条目 · 应被识别为可新增</A>
+    </DL><p>
+    <DT><IMG SRC="http://127.0.0.1:9/pixel.png" WIDTH="1" HEIGHT="1">
+    <DT><IFRAME SRC="http://127.0.0.1:9/frame.html"></IFRAME>
+</DL><p>
