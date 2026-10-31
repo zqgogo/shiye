@@ -36,7 +36,8 @@ npm install
 | `npm run dev` | 以开发模式打开工作台页面 |
 | `npm run build` | 产出 `apps/extension/dist`（页面 + 自包含 service worker） |
 | `npm run typecheck` | TypeScript 全量检查 |
-| `npm test` | Vitest 单元 / 集成测试 |
+| `npm test` | Vitest 单元 / 集成测试（已限制 V8 堆上限，抗内存紧张） |
+| `npm run test:lowmem` | 同上，进一步降到 384 MB 堆，给浏览器别的活腾地方 |
 | `npm run verify` | typecheck + test + build |
 | `npm run verify:browser` | 真实浏览器验证共享主库与重启持久化（P0.2 / P0.3） |
 | `npm run verify:import` | 真实浏览器验证书签导入与手机快照（P0.4） |
@@ -88,5 +89,6 @@ docs/                    进度规划、安装说明、技术决定、未解决�
 - 右键菜单真实点击、正常页面划词读取、读屏播报尚未实测。
 - 没有自动备份；数据只在一个浏览器 profile 内共享，两个 profile 之间不同步。
 - 验证记录里的未验证项一律标注「未验证」，不当作通过。
+- **内存紧张的机器上跑验证**：`npm test` 已把 V8 老生代限制在 768 MB（`--max-old-space-size=768`），进一步吃紧时用 `npm run test:lowmem`（384 MB 堆 + 小 semi-space）。浏览器回归一次只跑一套，不要把 `build` 与验证串成一条命令；本机曾因 Windows 提交量打满（19.3 / 19.7 GB）导致进程被系统终止，表现为「闪退」而非用例失败。详见 [docs/ROADMAP.md](docs/ROADMAP.md) 的 2026-10-31 记录。
 
 未解决的问题、数据风险与下一步见 [docs/open-issues.md](docs/open-issues.md)，验收清单的逐项对照见 [docs/verification/delivery-acceptance.md](docs/verification/delivery-acceptance.md)。
