@@ -126,3 +126,18 @@ npm run verify:all             # P0 + P0.4 + P1 + P2 + P3 全量回归
 | Edge 阶段「继续导入」找不到 | 新增的再导阶段结束时已「取消预览」，结果面板被消费掉了，而 Edge 阶段假设它还在 | Edge 阶段改为「存在才点」，与「恶意内容」阶段的一致性写法对齐 |
 
 一条既有断言随覆盖范围变化更新：批次记录由「两批」改为「每批各自留痕」，断言 3 条 `applied`（Chrome 8、Chrome 再导 1、Firefox 4），并核对 Chrome 两条的 `inserted` 排序后为 `1,8`。
+
+### 第 5 轮：清空确认框的条数与实删数量对齐（P9.0，2026-10-31）
+
+[open-issues](../open-issues.md) ⑩ 记的是一处真实缺陷：确认框按当前活跃列表计数（`items.length`），而 `purgeCategory()` / `purgeAll()` 连回收站里的记录一起删，确认数可能小于实删数。修法与断言：
+
+| 改动 | 落点 | 断言 |
+| --- | --- | --- |
+| 新增作用域计数 `PurgeCounts { active, trashed, tombstones }` | `packages/core/src/types.ts` | 类型与端口契约 |
+| `countPurgeAll()` / `countPurgeCategory()` | `packages/storage/src/repositories.ts` | 单测「整库清空的计数包含回收站，且与实删数量一致」「分类清空把回收站里的记录算进来，计数与实删数量一致」 |
+| `purgeCounts(scope)` 用例 | `packages/application/src/workspace.ts` | 同上（单测直接走仓储） |
+| 确认框改为「将删除 N 条记录（在库 A · 回收站 B），并清掉 K 条删除标记」，确认后核对返回的实删数量 | `apps/workspace/src/pages.tsx` | `verify:p3`「清空确认框拆出在库 / 回收站 / 删除标记，且与实删数量一致」 |
+
+实测（`verify:p3`，Chrome 156.0.8078.74 无头）：先删 1 条进回收站，确认框显示 `total=12 active=11 trashed=1 tombstones=1`，与主库 12 条（含回收站 1）一致；`verify:p3` 55 → **56 项全通过**，单测 96 → 98 项。
+
+仍存的边界：分类页与未分类页走同一条 `countPurgeCategory`，浏览器级只覆盖了「全部收藏」页，两页的数字由单测保证，未单独在页面上取数。
