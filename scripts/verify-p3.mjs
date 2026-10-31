@@ -42,6 +42,7 @@ const FIXTURES = {
   firefox: path.join(ROOT, 'fixtures', 'bookmarks-firefox.html'),
   hostile: path.join(ROOT, 'fixtures', 'bookmarks-hostile.html'),
   malformed: path.join(ROOT, 'fixtures', 'bookmarks-malformed.html'),
+  deep: path.join(ROOT, 'fixtures', 'bookmarks-deep.html'),
 };
 
 const CATEGORY_NAME = 'P3 验证分类';
@@ -203,6 +204,11 @@ function toggleRowByUrl(page, urlFragment) {
 async function uploadFixture(page, filePath) {
   await waitForSelectorReady(page, 'input[type="file"]', 15_000);
   const input = await page.$('input[type="file"]');
+  // 同一个文件再导一次时，input 的值没变化就不会触发 change，预览也不会重建。
+  // 先清空 value 再上传，保证每次选择都被当成新的选择。
+  await input.evaluate((node) => {
+    node.value = '';
+  });
   await input.uploadFile(filePath);
 }
 
@@ -647,8 +653,77 @@ async function main() {
     );
   });
 
-  phase('P3.3 Edge 书签格式', async () => {
+  phase('P3.3 同一文件再导', async () => {
+    // 上一次只写了 8 条，没勾选的 same-title 仍是「可新增」；其余 8 条应全部转为重复。
     await clickIn(page, '.panel', '继续导入');
+    await sleep(500);
+    await uploadFixture(page, FIXTURES.chrome);
+    await waitPreview(page);
+    const secondStats = await previewStats(page);
+    const secondRows = await previewRows(page);
+    report.counts.chromeSecondImport = secondStats;
+    const stillNew = secondRows.filter((row) => row.status === '新增');
+    record(
+      'P3.3 同一文件再导：已写入的 8 条全部转为重复',
+      secondStats?.['总条数'] === 12 &&
+        secondStats?.['可新增'] === 1 &&
+        secondStats?.['重复'] === 9 &&
+        secondStats?.['无效'] === 2,
+      JSON.stringify(secondStats)
+    );
+    record(
+      'P3.3 再导时只剩上次没勾选的那条仍可新增',
+      stillNew.length === 1 && /same-title/.test(stillNew[0]?.titleAndUrl ?? ''),
+      stillNew.map((row) => row.titleAndUrl.replace(/\s+/g, ' ').slice(0, 80)).join(' | ') || '未找到'
+    );
+
+    const beforeSecond = await page.evaluate(readMainLibrary);
+    await clickIn(page, '.batchbar', '确认写入');
+    await waitForText(page, '导入完成', 30_000);
+    await sleep(600);
+    const secondResult = await resultStats(page);
+    const afterSecond = await page.evaluate(readMainLibrary);
+    report.counts.chromeSecondResult = secondResult;
+    record(
+      'P3.3 再导只写入剩下的 1 条，不重复写已入库的',
+      secondResult?.['条新增'] === 1 && afterSecond.bookmarks.length === beforeSecond.bookmarks.length + 1,
+      `结果面板=${JSON.stringify(secondResult)}｜收藏 ${beforeSecond.bookmarks.length}→${afterSecond.bookmarks.length}`
+    );
+
+    // 第三次：同一文件全部条目都已入库，界面上应没有任何可写入内容。
+    await clickIn(page, '.panel', '继续导入');
+    await sleep(500);
+    await uploadFixture(page, FIXTURES.chrome);
+    await waitPreview(page);
+    const thirdStats = await previewStats(page);
+    const thirdSelected = await selectedCount(page);
+    const commitDisabled = await page.evaluate(() => {
+      const hit = [...document.querySelectorAll('.batchbar button')].find((node) =>
+        (node.textContent ?? '').includes('确认写入')
+      );
+      return hit ? hit.disabled : null;
+    });
+    report.counts.chromeThirdImport = thirdStats;
+    record(
+      'P3.3 同一文件第三次导入：可新增为 0，写入按钮不可用',
+      thirdStats?.['可新增'] === 0 &&
+        thirdStats?.['重复'] === 10 &&
+        thirdSelected === 0 &&
+        commitDisabled === true,
+      `统计=${JSON.stringify(thirdStats)}｜已选=${thirdSelected}｜按钮禁用=${commitDisabled}`
+    );
+    await clickIn(page, '.batchbar', '取消预览');
+    await waitForSelectorGone(page, '.capturetable', 10_000);
+  });
+
+  phase('P3.3 Edge 书签格式', async () => {
+    // 上一阶段结束时可能已经取消预览，结果面板不在了：「继续导入」只在它存在时才需要点。
+    await page.evaluate(() => {
+      const hit = [...document.querySelectorAll('.panel button')].find(
+        (node) => (node.textContent ?? '').trim() === '继续导入'
+      );
+      if (hit instanceof HTMLElement) hit.click();
+    });
     await sleep(500);
     await uploadFixture(page, FIXTURES.edge);
     await waitPreview(page);
@@ -710,8 +785,15 @@ async function main() {
     );
     const batches2 = await page.evaluate(readImportBatches);
     record(
-      'P3.4 两批导入各自留下批次记录',
-      batches2.length === 2 && batches2.every((row) => row.status === 'applied'),
+      'P3.4 每批导入各自留下批次记录',
+      batches2.length === 3 &&
+        batches2.every((row) => row.status === 'applied') &&
+        batches2
+          .filter((row) => row.fileName === 'bookmarks-chrome.html')
+          .map((row) => row.inserted)
+          .sort((left, right) => left - right)
+          .join(',') === '1,8' &&
+        batches2.filter((row) => row.fileName === 'bookmarks-firefox.html').length === 1,
       JSON.stringify(batches2.map((row) => [row.fileName, row.inserted]))
     );
   });
@@ -806,6 +888,42 @@ async function main() {
       'P3.3 损坏文件给出结构警告且不写入',
       brokenWarning && Boolean(brokenStats) && bookmarksAfterBroken === bookmarksBeforeBroken,
       `警告=${brokenWarning}｜统计=${JSON.stringify(brokenStats)}｜收藏数 ${bookmarksBeforeBroken}→${bookmarksAfterBroken}`
+    );
+  });
+
+  phase('P3.3 深层目录上限', async () => {
+    // 40 层嵌套、最底层挂 1 条收藏：应给出层级告警，且条目保留、来源目录截断到 32 层。
+    const bookmarksBeforeDeep = (await page.evaluate(readMainLibrary)).bookmarks.length;
+    await uploadFixture(page, FIXTURES.deep);
+    await waitPreview(page);
+    const deepText = await page.evaluate(() => document.body.innerText);
+    const deepStats = await previewStats(page);
+    const deepRows = await previewRows(page);
+    report.counts.deepFixture = deepStats;
+    record(
+      'P3.3 超过 32 层的目录给出层级告警',
+      /目录层级超过 32 层/.test(deepText),
+      deepText.includes('目录层级超过 32 层')
+        ? '界面提示「目录层级超过 32 层，更深的目录会合并到上限层级。」'
+        : '未找到层级告警文案'
+    );
+    const deepCell = deepRows[0]?.titleAndUrl ?? '';
+    record(
+      'P3.3 超限深度的条目不被丢弃，来源目录截断到第 32 层',
+      deepStats?.['总条数'] === 1 &&
+        deepStats?.['可新增'] === 1 &&
+        /第 32 层/.test(deepCell) &&
+        !/第 33 层/.test(deepCell) &&
+        /最底层的那条收藏/.test(deepCell),
+      `统计=${JSON.stringify(deepStats)}｜目录末段=${/原目录：.*$/.exec(deepCell)?.[0]?.slice(-24) ?? '未找到'}`
+    );
+    await clickIn(page, '.batchbar', '取消预览');
+    await sleep(500);
+    const bookmarksAfterDeep = (await page.evaluate(readMainLibrary)).bookmarks.length;
+    record(
+      'P3.3 深层目录预览不写入主库',
+      bookmarksAfterDeep === bookmarksBeforeDeep,
+      `收藏数 ${bookmarksBeforeDeep}→${bookmarksAfterDeep}`
     );
   });
 

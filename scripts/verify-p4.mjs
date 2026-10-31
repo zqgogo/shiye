@@ -1053,6 +1053,28 @@ async function main() {
       askState.chosen === 2 && askState.hasPack === false && externalAfterPick === 0,
       `已选=${askState.chosen}｜提问包=${askState.hasPack}｜外部请求=${externalAfterPick}`
     );
+
+    // 「清空已选」清的是跨筛选的全部已选，不是只清当前筛选（那由「取消匹配集选择」负责）。
+    await openPicker(page);
+    await page.select('select[aria-label="分类筛选"]', '');
+    await sleep(300);
+    await setReactInput(page, 'input[aria-label="搜索资料"]', '');
+    await sleep(600);
+    const beforeClear = await pickerState(page);
+    await clickIn(page, '.modal.wide', '清空已选');
+    await sleep(500);
+    const afterClear = await pickerState(page);
+    record(
+      'P4.3 清空已选：跨筛选的已选全部归零，匹配集不变',
+      beforeClear?.chosen === 2 &&
+        afterClear?.chosen === 0 &&
+        afterClear?.checked === 0 &&
+        afterClear?.matched === beforeClear?.matched &&
+        afterClear?.visible === beforeClear?.visible,
+      `清空前 已选=${beforeClear?.chosen}/匹配=${beforeClear?.matched}；清空后 已选=${afterClear?.chosen}/勾选=${afterClear?.checked}/匹配=${afterClear?.matched}`
+    );
+    await clickIn(page, '.modal.wide', '完成');
+    await sleep(300);
   });
 
   phase('P4.4 容量与上限提示', async () => {
