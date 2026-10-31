@@ -156,3 +156,19 @@ P9.4 第一段落地时留了两条边界只有单测保证，本轮补成浏览
 同时修掉一处与被测功能无关的脚手架竞态：数据页的「最近导入」是异步加载的，原来在标题一出现就点「撤销这次导入」，批次还没渲染出来就扑空（`未找到可点击元素`）。改为先等按钮文案出现再点。
 
 单测同轮 108 → **110 项**：新增「替换恢复不会清掉清理快照」与「替换恢复后仍能找回清理前的条目」。前者防的是「换机器恢复一次，本机安全网被连带清空」——`restore(..., 'replace')` 的清表清单里没有 `purgeSnapshots`，但这一点此前没有任何断言守护。
+
+### 第 7 轮：撤回改成「先预演、后留档」（P9.1，2026-10-31）
+
+原先点「撤销这次导入」是一步直删，只在几秒后消失的提示里报一句「移除 N 条」。P9.1 把它拆成两段，并补上事后可回查的留档。
+
+| 改动 | 落点 | 断言 |
+| --- | --- | --- |
+| 只读预演 `previewUndoBatch()`，与执行共用 `judgeBatchItems()` | `packages/storage/src/repositories.ts` | 单测「预览的三类计数与执行结果完全一致」并在预览后核对主库条数不变 |
+| 五类保留原因 `modified / trashed / completed / converted / missing` | `packages/core/src/types.ts` | 单测「保留原因区分改过 / 回收站 / 待看已完成 / 已转收藏 / 已不存在」 |
+| 批次持久化 `revertedAt / undoCounts / undoKept`（schema v3 → v4） | `packages/storage/src/db.ts`、`packages/core/src/types.ts` | 单测「撤回结果写进批次，刷新后仍能回看条数与原因」+「版本 3 主库升级时给老批次补上撤回字段」 |
+| 结果页与数据页都改成「预演 → 确认 → 常驻结果面板」 | `apps/workspace/src/capture.tsx`、`apps/workspace/src/data.tsx`、`components.tsx` | `verify:p3` 四条：预演条数、常驻面板、刷新后仍可查、批次搜索 |
+| 批次历史分页搜索 `listBatches({ search, status, limit, offset })` | `packages/application/src/ports.ts` | 单测「批次列表可按文件名搜索并分页，不再固定只给最近 20 批」 |
+
+实测（`verify:p3`，Chrome 156 无头）：结果页预演文案为「将移除 4 条，保留 0 条」，撤回后批次上 `undoCounts={removed:4,kept:0,missing:0}` 且 `revertedAt` 有值；数据页撤回同样先给「将移除 2 条」；刷新后批次行仍显示「已撤回 时间（移除 2 · 保留 0）」；搜索 `bookmarks-firefox` 只命中该批。`verify:p3` 62 → **68 项全通过**，单测 110 → 116 项。
+
+仍存的边界：撤回本身不可撤销（靠 P9.4 清理快照找回）；被移走的条目没有留存清单，只有三数，P9.2 的「查看本批记录」才会补上。

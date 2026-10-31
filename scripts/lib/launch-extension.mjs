@@ -339,6 +339,9 @@ export function readImportBatches() {
             inserted: row.inserted,
             skipped: row.skipped,
             invalid: row.invalid,
+            revertedAt: row.revertedAt ?? null,
+            undoCounts: row.undoCounts ?? null,
+            undoKept: row.undoKept ?? [],
           }))
         );
         db.close();

@@ -815,14 +815,31 @@ async function main() {
     const before = await page.evaluate(readMainLibrary);
     const clicked = await page.evaluate(() => {
       const hit = [...document.querySelectorAll('button')].find((node) =>
-        (node.textContent ?? '').includes('撤销这次导入')
+        (node.textContent ?? '').includes('撤回这次导入')
       );
       if (!hit) return false;
       hit.click();
       return true;
     });
-    if (!clicked) throw new Error('结果面板里没有「撤销这次导入」按钮');
-    await waitForText(page, '已撤销这次导入', 20_000);
+    if (!clicked) throw new Error('结果面板里没有「撤回这次导入」按钮');
+
+    // 撤回改成两步：先预演，把「会移除几条、保留几条」摆在确认按钮旁边。
+    await waitForText(page, '将移除', 20_000);
+    const previewText = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('将移除')
+      );
+      return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    });
+    report.counts.resultUndoPreview = previewText.slice(0, 160);
+    record(
+      'P3.4 撤回前先预演移除 / 保留条数',
+      /将移除 4 条，保留 0 条/.test(previewText),
+      previewText.slice(0, 120)
+    );
+
+    await clickIn(page, '', '确认撤回');
+    await waitForText(page, '已撤回这次导入', 20_000);
     await sleep(800);
 
     const after = await page.evaluate(readMainLibrary);
@@ -832,10 +849,20 @@ async function main() {
       `收藏 ${before.bookmarks.length}→${after.bookmarks.length}`
     );
     const batches = await page.evaluate(readImportBatches);
+    const revertedBatch = batches.find((row) => row.fileName === 'bookmarks-firefox.html');
     record(
       'P3.4 撤销后批次状态记为 reverted',
-      batches.find((row) => row.fileName === 'bookmarks-firefox.html')?.status === 'reverted',
+      revertedBatch?.status === 'reverted',
       JSON.stringify(batches.map((row) => [row.fileName, row.status]))
+    );
+    // 撤回会清掉 importItems，之后只能靠批次上留的三个字段回看，必须确实写进去了。
+    record(
+      'P3.4 撤回时间与三类计数写进批次',
+      Boolean(revertedBatch?.revertedAt) &&
+        revertedBatch?.undoCounts?.removed === 4 &&
+        revertedBatch?.undoCounts?.kept === 0 &&
+        revertedBatch?.undoCounts?.missing === 0,
+      `revertedAt=${revertedBatch?.revertedAt ?? '无'}｜undoCounts=${JSON.stringify(revertedBatch?.undoCounts)}`
     );
 
     // 重新解析同一份文件：还能算成「可新增」才说明撤销没有留下挡住重导的墓碑。
@@ -1091,20 +1118,81 @@ async function main() {
 
     await goto(page, 'data', '数据在手里');
     // 「最近导入」是异步加载的，页面标题一出现就点按钮会扑空。
-    await waitForText(page, '撤销这次导入', 15_000);
+    await waitForText(page, '撤回这次导入', 15_000);
     const panelShown = await page.evaluate(() =>
       document.body.innerText.includes('最近导入')
     );
-    await clickIn(page, '', '撤销这次导入');
-    await sleep(400);
-    await clickIn(page, '', '确认撤销');
+    await clickIn(page, '', '撤回这次导入');
+    // 数据页同样先预演：同一个入口不能有的先问、有的直删。
+    await waitForText(page, '将移除', 15_000);
+    const dataPreview = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('将移除')
+      );
+      return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    });
+    report.counts.dataUndoPreview = dataPreview.slice(0, 160);
+    record(
+      'P3.4 数据页撤回前同样先预演',
+      /将移除 2 条，保留 0 条/.test(dataPreview),
+      dataPreview.slice(0, 120)
+    );
+
+    await clickIn(page, '', '确认撤回');
     await sleep(1200);
     const after = await page.evaluate(readMainLibrary);
+    const resultPanel = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('已撤回')
+      );
+      return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    });
     record(
       'P3.4 数据页列出导入批次并可从那里整批撤销',
       listedOk && panelShown && after.bookmarks.length === imported.bookmarks.length - 2,
       `导入后面板=${panelShown}｜收藏 ${imported.bookmarks.length}→${after.bookmarks.length}`
     );
+    record(
+      'P3.4 撤回后结果常驻在页面上（不是几秒就消失的提示）',
+      /已撤回/.test(resultPanel) && /移除 2 条/.test(resultPanel),
+      resultPanel.slice(0, 120)
+    );
+
+    // 刷新页面：结果面板会消失（那是本次会话的），但批次行上的时间与三类计数必须还在。
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await waitForSelectorReady(page, '.brand-mark', 25_000);
+    await waitForText(page, '已撤回', 15_000);
+    const persisted = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('article.bookmark')];
+      const hit = rows.find((row) => (row.innerText ?? '').includes('已撤回'));
+      return (hit?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    });
+    report.counts.revertedBatchRow = persisted.slice(0, 160);
+    record(
+      'P3.4 刷新后仍能查到这次撤回的时间与条数',
+      /已撤回/.test(persisted) && /移除 2/.test(persisted) && /保留 0/.test(persisted),
+      persisted.slice(0, 120)
+    );
+
+    // 批次多了以后不能只给最近几批：搜索必须能按文件名把那一份找出来。
+    await setReactInput(page, 'input[aria-label="搜索导入批次"]', 'bookmarks-firefox');
+    await sleep(600);
+    // 只看「最近导入」面板里的行：页面上「最近清理」也是 article.bookmark，不能被算进来。
+    const filtered = await page.evaluate(() => {
+      const panel = [...document.querySelectorAll('.panel')].find((node) =>
+        (node.innerText ?? '').includes('最近导入')
+      );
+      return [...(panel?.querySelectorAll('article.bookmark') ?? [])].map((row) =>
+        (row.innerText ?? '').replace(/\s+/g, ' ').trim()
+      );
+    });
+    record(
+      'P3.4 批次列表可按文件名搜索',
+      filtered.length >= 1 && filtered.every((text) => text.includes('bookmarks-firefox')),
+      `命中 ${filtered.length} 条｜${filtered[0]?.slice(0, 60) ?? '无'}`
+    );
+    await setReactInput(page, 'input[aria-label="搜索导入批次"]', '');
+    await sleep(500);
   });
 
   phase('P9.4 清理快照与单次恢复', async () => {
