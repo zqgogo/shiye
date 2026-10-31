@@ -11,6 +11,8 @@ import type {
   HandoffBatchStatus,
   ImportBatch,
   PurgeCounts,
+  PurgeRestorePreview,
+  PurgeSnapshot,
   ImportDestination,
   ImportRow,
   ImportSource,
@@ -315,6 +317,19 @@ export interface BackupRepository {
   clearSafetyCopy(id: string): Promise<void>;
 }
 
+/**
+ * 清理快照：硬删除前的本机副本，以及「只找回这一次删掉的数据」的恢复入口。
+ *
+ * 恢复只加回该快照的条目，不清表、不覆盖、不触碰快照之外的记录。
+ */
+export interface PurgeSnapshotRepository {
+  list(): Promise<PurgeSnapshot[]>;
+  /** 只读预览：算出可恢复 / 跳过 / 冲突的条数与逐条原因。 */
+  preview(snapshotId: string): Promise<PurgeRestorePreview>;
+  restore(snapshotId: string): Promise<{ preview: PurgeRestorePreview; restored: number }>;
+  remove(snapshotId: string): Promise<void>;
+}
+
 export interface Repositories {
   bookmarks: BookmarkRepository;
   reading: ReadingRepository;
@@ -324,4 +339,5 @@ export interface Repositories {
   imports: ImportRepository;
   handoff: HandoffRepository;
   backup: BackupRepository;
+  purge: PurgeSnapshotRepository;
 }

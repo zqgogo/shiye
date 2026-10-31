@@ -23,6 +23,13 @@ export const LIMITS = {
   aiReplyChars: 300_000,
   aiItemsPerPart: 20,
   questionChars: 4000,
+  /** 清理快照：保留最近几份（按时间淘汰最旧）。 */
+  purgeSnapshotsKept: 5,
+  /** 单份快照上限：条数或字节数先到者为准，超限拒绝清理。 */
+  purgeSnapshotMaxItems: 5000,
+  purgeSnapshotMaxBytes: 5 * 1024 * 1024,
+  /** 全部快照合计上限，超限提示先清理旧快照。 */
+  purgeSnapshotsTotalBytes: 50 * 1024 * 1024,
   aiPurposeSuggestion: 2000,
 } as const;
 
@@ -31,5 +38,5 @@ export const TRASH_RETENTION_DAYS = 30;
 
 export const DELETED_CATEGORY_KEY = 'uncategorized';
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 export const AI_PROTOCOL_VERSION = 2;

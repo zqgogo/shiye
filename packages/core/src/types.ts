@@ -187,6 +187,70 @@ export interface PurgeCounts {
   tombstones: number;
 }
 
+/** 触发清理快照的硬删除入口。软删除与移除单条待看不在此列。 */
+export type PurgeEntry =
+  | 'all'
+  | 'category'
+  | 'uncategorized'
+  | 'readingPending'
+  | 'readingCompleted'
+  | 'importBatch';
+
+export interface PurgeSnapshotCounts {
+  bookmarks: number;
+  readingItems: number;
+  tombstones: number;
+}
+
+export interface PurgeRestoreCounts {
+  restored: number;
+  skipped: number;
+  conflicted: number;
+}
+
+/**
+ * 一次硬删除前的本机快照。
+ *
+ * 只存本机、不上传、不随备份导出；恢复只认这里的条目，绝不覆盖当前数据。
+ */
+export interface PurgeSnapshot {
+  id: string;
+  createdAt: string;
+  entry: PurgeEntry;
+  scopeLabel: string;
+  dbFingerprint: string;
+  bookmarks: Bookmark[];
+  readingItems: ReadingItem[];
+  tombstones: Tombstone[];
+  counts: PurgeSnapshotCounts;
+  /** 快照 JSON 字节数，用于总量上限与列表展示。 */
+  bytes: number;
+  restoredAt: string | null;
+  restoredCounts: PurgeRestoreCounts | null;
+}
+
+/** 单条恢复判定：`restore` 才写库，`skip` 与 `conflict` 都保持现状。 */
+export type PurgeRestoreAction = 'restore' | 'skip' | 'conflict';
+
+export interface PurgeRestoreDecision {
+  id: string;
+  title: string;
+  action: PurgeRestoreAction;
+  reason: string;
+}
+
+export interface PurgeRestorePreview {
+  snapshotId: string;
+  entry: PurgeEntry;
+  scopeLabel: string;
+  createdAt: string;
+  candidates: number;
+  restorable: number;
+  skipped: number;
+  conflicted: number;
+  decisions: PurgeRestoreDecision[];
+}
+
 export interface ImportParseWarning {
   code:
     | 'DEPTH_LIMIT'

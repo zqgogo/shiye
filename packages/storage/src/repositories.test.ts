@@ -1,6 +1,6 @@
 import Dexie from 'dexie';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AppError, nowIso } from '@shiye/core';
+import { AppError, SCHEMA_VERSION, nowIso } from '@shiye/core';
 import type { Repositories } from '@shiye/application';
 import { ShiyeDB } from './db.js';
 import { createRepositories } from './repositories.js';
@@ -289,7 +289,7 @@ describe('备份与恢复', () => {
     expect(document.readingItems).toHaveLength(1);
     expect(document.tombstones).toHaveLength(1);
     expect(text).not.toMatch(/apiKey|password|bearer/i);
-    expect(document.schemaVersion).toBe(2);
+    expect(document.schemaVersion).toBe(SCHEMA_VERSION);
 
     const freshDb = new ShiyeDB(`shiye-restore-${Date.now()}`);
     try {
@@ -438,5 +438,167 @@ describe('清空作用域计数', () => {
     expect(await db.bookmarks.count()).toBe(0);
     expect(await repos.bookmarks.countPurgeAll()).toEqual({ active: 0, trashed: 0, tombstones: 0 });
     expect(await db.bookmarks.get(alive.id)).toBeUndefined();
+  });
+});
+
+describe('清理快照与单次恢复', () => {
+  const withHooks = (hooks: Parameters<typeof createRepositories>[2]) =>
+    createRepositories(db, createBackupRepository(db), hooks);
+
+  it('每次硬删除都留下快照，六个入口都能找回', async () => {
+    const a = await repos.bookmarks.create({ originalUrl: 'https://example.com/p1', title: 'A' });
+    const b = await repos.bookmarks.create({ originalUrl: 'https://example.com/p2', title: 'B' });
+    await repos.reading.add({ originalUrl: 'https://example.com/r1', title: 'R1' });
+    await repos.reading.add({ originalUrl: 'https://example.com/r2', title: 'R2' });
+
+    await repos.bookmarks.softDelete(b.id);
+    await repos.bookmarks.purgeAll();
+    await repos.reading.purgePending();
+
+    const snapshots = await repos.purge.list();
+    expect(snapshots.map((row) => row.entry)).toEqual(['readingPending', 'all']);
+    const all = snapshots.find((row) => row.entry === 'all');
+    expect(all?.counts.bookmarks).toBe(2);
+    expect(all?.counts.tombstones).toBe(1);
+    const pending = snapshots.find((row) => row.entry === 'readingPending');
+    expect(pending?.counts.readingItems).toBe(2);
+    expect(a.id).toBeTruthy();
+  });
+
+  it('快照写不进去时一条都不删', async () => {
+    const broken = withHooks({
+      beforeSnapshotWrite: () => {
+        throw new AppError('QUOTA_EXCEEDED', '空间不足');
+      },
+    });
+    await broken.bookmarks.create({ originalUrl: 'https://example.com/keep1', title: '保留 1' });
+    await broken.bookmarks.create({ originalUrl: 'https://example.com/keep2', title: '保留 2' });
+
+    await expect(broken.bookmarks.purgeAll()).rejects.toBeInstanceOf(AppError);
+    expect(await db.bookmarks.count()).toBe(2);
+    expect(await broken.purge.list()).toHaveLength(0);
+  });
+
+  it('删除中途失败时整体回滚，快照也不残留', async () => {
+    const broken = withHooks({
+      beforeDelete: () => {
+        throw new AppError('STORAGE_FAILED', '写到一半失败');
+      },
+    });
+    await broken.bookmarks.create({ originalUrl: 'https://example.com/mid1', title: '中途 1' });
+    await broken.reading.add({ originalUrl: 'https://example.com/mid2', title: '中途 2' });
+
+    await expect(broken.reading.purgePending()).rejects.toBeInstanceOf(AppError);
+    expect(await db.readingItems.count()).toBe(1);
+    expect(await broken.purge.list()).toHaveLength(0);
+  });
+
+  it('超过单份上限时拒绝清理，主库不动', async () => {
+    const seed = await repos.bookmarks.create({ originalUrl: 'https://example.com/seed', title: 'seed' });
+    const rows = Array.from({ length: 5001 }, (_, index) => ({
+      ...seed,
+      id: `bulk-${index}`,
+      originalUrl: `https://example.com/bulk-${index}`,
+      canonicalUrl: `https://example.com/bulk-${index}`,
+      title: `bulk ${index}`,
+    }));
+    await db.bookmarks.bulkPut(rows);
+
+    await expect(repos.bookmarks.purgeAll()).rejects.toMatchObject({ code: 'SNAPSHOT_TOO_LARGE' });
+    expect(await db.bookmarks.count()).toBe(5002);
+    expect(await repos.purge.list()).toHaveLength(0);
+  });
+
+  it('只保留最近 5 份快照，最旧的被淘汰', async () => {
+    for (let index = 0; index < 6; index += 1) {
+      await repos.bookmarks.create({
+        originalUrl: `https://example.com/round-${index}`,
+        title: `第 ${index} 轮`,
+      });
+      await repos.bookmarks.purgeAll();
+    }
+    const snapshots = await repos.purge.list();
+    expect(snapshots).toHaveLength(5);
+    const labels = snapshots.map((row) => row.bookmarks[0]?.title);
+    expect(labels).not.toContain('第 0 轮');
+    expect(labels).toContain('第 5 轮');
+  });
+
+  it('恢复只加回这一次删掉的条目，其它记录不变', async () => {
+    const keep = await repos.bookmarks.create({ originalUrl: 'https://example.com/keep', title: '不该被动' });
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/gone-1', title: '被清 1' });
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/gone-2', title: '被清 2' });
+    await repos.bookmarks.purgeAll();
+    const [snapshot] = await repos.purge.list();
+    if (!snapshot) throw new Error('应当留下清理快照');
+
+    const preview = await repos.purge.preview(snapshot.id);
+    expect(preview.candidates).toBe(3);
+    expect(preview.restorable).toBe(3);
+
+    const outcome = await repos.purge.restore(snapshot.id);
+    expect(outcome.restored).toBe(3);
+    expect(await db.bookmarks.count()).toBe(3);
+    const titles = (await db.bookmarks.toArray()).map((row) => row.title).sort();
+    expect(titles).toEqual(['不该被动', '被清 1', '被清 2']);
+    expect(await db.bookmarks.get(keep.id)).toBeTruthy();
+  });
+
+  it('同网址已重新导入时跳过不覆盖，且在事务内重新判定', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/reimport', title: '清理前的旧标题' });
+    await repos.bookmarks.purgeAll();
+    const [snapshot] = await repos.purge.list();
+    if (!snapshot) throw new Error('应当留下清理快照');
+
+    // 清理后用户重新导入了同一网址，标题不同。
+    const reimported = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/reimport',
+      title: '重新导入的新标题',
+    });
+
+    const outcome = await repos.purge.restore(snapshot.id);
+    expect(outcome.restored).toBe(0);
+    expect(outcome.preview.conflicted).toBe(1);
+    const current = await db.bookmarks.toArray();
+    expect(current).toHaveLength(1);
+    expect(current[0]?.id).toBe(reimported.id);
+    expect(current[0]?.title).toBe('重新导入的新标题');
+  });
+
+  it('恢复到回收站状态而不是把已删条目复活到列表', async () => {
+    const gone = await repos.bookmarks.create({ originalUrl: 'https://example.com/trashed', title: '进过回收站' });
+    await repos.bookmarks.softDelete(gone.id);
+    await repos.bookmarks.purgeAll();
+    const [snapshot] = await repos.purge.list();
+    if (!snapshot) throw new Error('应当留下清理快照');
+
+    await repos.purge.restore(snapshot.id);
+    const restored = await db.bookmarks.get(gone.id);
+    expect(restored?.deletedAt).toBeTruthy();
+    expect(restored?.lifeState).toBe('deleted');
+  });
+
+  it('恢复后清掉同网址墓碑，同一批书签可以重新导入', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/tomb', title: '带墓碑' });
+    await repos.bookmarks.purgeAll();
+    const [snapshot] = await repos.purge.list();
+    if (!snapshot) throw new Error('应当留下清理快照');
+
+    await repos.purge.restore(snapshot.id);
+    const tombstones = await db.tombstones.toArray();
+    expect(tombstones.filter((row) => row.entityType === 'bookmark')).toHaveLength(0);
+  });
+
+  it('待看清空后可以只把这一次的队列找回来', async () => {
+    await repos.reading.add({ originalUrl: 'https://example.com/q1', title: '队列 1' });
+    await repos.reading.add({ originalUrl: 'https://example.com/q2', title: '队列 2' });
+    await repos.reading.purgePending();
+    const [snapshot] = await repos.purge.list();
+    if (!snapshot) throw new Error('应当留下清理快照');
+    expect(snapshot.entry).toBe('readingPending');
+
+    const outcome = await repos.purge.restore(snapshot.id);
+    expect(outcome.restored).toBe(2);
+    expect(await repos.reading.listPending()).toHaveLength(2);
   });
 });

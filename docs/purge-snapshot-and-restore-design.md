@@ -99,7 +99,7 @@ interface PurgeSnapshot {
 
 其它规则：
 
-- 恢复写入的记录按**新记录**处理：`revision = 1`、`localRevision = 1`、`lifeState = active`，不复活墓碑（除上表第 4 行）。
+- 恢复写入的记录按**新记录**处理：`revision = 1`、`localRevision = 1`；**保留原来的删除状态**——清理前就在回收站里的，恢复后回到回收站，不会被「复活」进收藏列表。
 - 恢复完成写 `restoredAt` 与 `restoredCounts`，同一快照可重复恢复（幂等：第二次全部命中「已存在」而跳过），不删除快照本体。
 - 恢复**不调用** `restore` / `restoreWithSafety`，不 `clear` 任何表，不触碰快照之外的记录；执行前在事务内复核候选，预览后被改动的条目按上表重新判定而**不静默纳入**。
 - 待看恢复只影响 `readingItems`；批次撤销的恢复只重建被撤销的收藏，不重开批次状态（批次保持 `reverted`，避免与「同一批只能撤销一次」冲突）。

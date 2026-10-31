@@ -1092,6 +1092,60 @@ async function main() {
     );
   });
 
+  phase('P9.4 清理快照与单次恢复', async () => {
+    await goto(page, 'data', '最近清理');
+    await waitForText(page, '看看能找回什么', 15_000);
+    const listed = await page.evaluate(() => {
+      const panels = [...document.querySelectorAll('.panel')];
+      const panel = panels.find((node) => (node.innerText ?? '').includes('最近清理'));
+      const rows = [...(panel?.querySelectorAll('article.bookmark') ?? [])].map((row) =>
+        (row.innerText ?? '').replace(/\s+/g, ' ').trim()
+      );
+      return { count: rows.length, rows: rows.slice(0, 3) };
+    });
+    report.counts.purgeSnapshots = listed;
+    record(
+      'P9.4 每次硬删除都在「最近清理」留下快照',
+      listed.count >= 1,
+      `快照=${listed.count} 条｜首条=${listed.rows[0] ?? '无'}`
+    );
+
+    // 页面里有多个 .panel，「最近清理」不是第一个，直接按全文唯一文案点。
+    await clickIn(page, '', '看看能找回什么');
+    await waitForText(page, '可找回', 15_000);
+    const previewText = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('可找回')
+      );
+      return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    });
+    const restorable = Number(/可找回 (\d+) 条/.exec(previewText)?.[1] ?? -1);
+    report.counts.purgePreview = previewText.slice(0, 160);
+    record(
+      'P9.4 恢复前先给出可找回 / 跳过 / 冲突三项',
+      restorable >= 0 && /跳过 \d+ 条/.test(previewText) && /冲突 \d+ 条/.test(previewText),
+      previewText.slice(0, 120)
+    );
+
+    const beforeRestore = await page.evaluate(readMainLibrary);
+    await clickIn(page, '', `恢复这 ${restorable} 条`);
+    await waitForText(page, '找回', 20_000);
+    await sleep(1200);
+    const afterRestore = await page.evaluate(readMainLibrary);
+    const added = afterRestore.bookmarks.length - beforeRestore.bookmarks.length;
+    report.counts.purgeRestore = { restorable, added };
+    record(
+      'P9.4 恢复只加回这一次删掉的条目，数量与预览一致',
+      restorable > 0 && added === restorable,
+      `预览可找回=${restorable}｜实际新增=${added}（收藏 ${beforeRestore.bookmarks.length}→${afterRestore.bookmarks.length}）`
+    );
+    record(
+      'P9.4 恢复不产生外部请求也不触发页面错误',
+      externalRequests.length === 0,
+      `外部请求=${JSON.stringify(externalRequests)}`
+    );
+  });
+
   try {
     for (const item of phases) {
       try {

@@ -28,7 +28,11 @@ export type AppErrorCode =
   /** 备份结构合法但条目内容不可恢复：破坏性的替换必须在写之前停下。 */
   | 'INVALID_BACKUP_RECORDS'
   /** 上一份替换前的安全备份还没确认保存，不能被下一份覆盖。 */
-  | 'SAFETY_COPY_PENDING';
+  | 'SAFETY_COPY_PENDING'
+  /** 这次要删的东西超过单份清理快照上限，必须先导出备份再分批。 */
+  | 'SNAPSHOT_TOO_LARGE'
+  /** 清理快照总量超出上限，先清理旧快照。 */
+  | 'SNAPSHOT_STORAGE_FULL';
 
 export class AppError extends Error {
   readonly code: AppErrorCode;

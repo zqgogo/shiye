@@ -6,6 +6,8 @@ import {
   toUserMessage,
   type BackupDocument,
   type ImportBatch,
+  type PurgeRestorePreview,
+  type PurgeSnapshot,
 } from '@shiye/core';
 import { Notice, PageHeader } from './components.js';
 import { useWorkspace } from './state.js';
@@ -23,7 +25,7 @@ function download(name: string, text: string, mime: string): void {
 }
 
 export function DataPage() {
-  const { data, service, run, toast } = useWorkspace();
+  const { data, service, run, reload, toast } = useWorkspace();
   const [includeLocalOnly, setIncludeLocalOnly] = useState(false);
   const [includeNote, setIncludeNote] = useState(true);
   const [includeText, setIncludeText] = useState(false);
@@ -57,6 +59,9 @@ export function DataPage() {
   );
   /** 最近导入过的批次：撤销入口要靠它找回「刚刚那一次」，刷新页面也不会丢。 */
   const [batches, setBatches] = useState<ImportBatch[] | null>(null);
+  const [snapshots, setSnapshots] = useState<PurgeSnapshot[] | null>(null);
+  const [purgePreview, setPurgePreview] = useState<PurgeRestorePreview | null>(null);
+  const [purgeBusy, setPurgeBusy] = useState('');
   const [undoing, setUndoing] = useState('');
   /** 待确认撤销的批次编号：删除是不可逆的，先问一句再动手。 */
   const [pendingUndo, setPendingUndo] = useState<string | null>(null);
@@ -66,11 +71,46 @@ export function DataPage() {
     setBatches(rows);
   };
 
+  /** 只读预览：算出这一次删掉的东西里哪些能找回、哪些会跳过或冲突。 */
+  const previewPurgeRestore = async (snapshotId: string) => {
+    setPurgeBusy(snapshotId);
+    try {
+      setPurgePreview(await service.previewPurgeRestore(snapshotId));
+    } catch (error) {
+      toast(toUserMessage(error), 'error');
+    } finally {
+      setPurgeBusy('');
+    }
+  };
+
+  /** 只加回这份快照的条目；冲突一律跳过，不覆盖当前数据。 */
+  const runPurgeRestore = async () => {
+    if (!purgePreview) return;
+    setPurgeBusy(purgePreview.snapshotId);
+    try {
+      const outcome = await service.restorePurgeSnapshot(purgePreview.snapshotId);
+      toast(
+        `找回 ${outcome.restored} 条；跳过 ${outcome.preview.skipped} 条、冲突 ${outcome.preview.conflicted} 条。`,
+        'ok'
+      );
+      setPurgePreview(null);
+      await reload();
+    } catch (error) {
+      toast(toUserMessage(error), 'error');
+    } finally {
+      setPurgeBusy('');
+    }
+  };
+
   useEffect(() => {
     void reloadBatches();
-    // 主库变化（导入、撤销、恢复）后批次列表要跟着变，否则会一直显示已撤销的那一条。
+    void service
+      .listPurgeSnapshots()
+      .then(setSnapshots)
+      .catch(() => setSnapshots([]));
+    // 主库变化（导入、撤销、清理、恢复）后批次与清理快照都要跟着变。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [service, data.bookmarks.length, data.pendingReading.length]);
+  }, [service, data.bookmarks.length, data.pendingReading.length, data.completedReading.length]);
 
   useEffect(() => {
     let alive = true;
@@ -326,6 +366,87 @@ export function DataPage() {
         <p className="micro">
           撤销会连这批条目的删除标记一起清掉，所以之后可以重新导入同一批书签；代价是撤销本身不可恢复。
         </p>
+      </div>
+
+      <div className="panel">
+        <h2>最近清理</h2>
+        <p>
+          彻底清空、清空待看、清理完成历史和撤销导入都是硬删除，动手前会自动在本机留一份快照（保留最近 5
+          份，只在本机、不随备份导出）。这里只能把<strong>这一次</strong>删掉的条目找回来：同网址已经重新导入的一律跳过，
+          不覆盖当前数据。
+        </p>
+        {snapshots === null ? (
+          <p className="micro">正在读取清理快照…</p>
+        ) : snapshots.length === 0 ? (
+          <p className="micro">还没有清理快照。清空范围或撤销导入之后会出现在这里。</p>
+        ) : (
+          <div className="listbox">
+            <div className="listhead">
+              <span>清理范围</span>
+              <span>条数 · 时间</span>
+            </div>
+            {snapshots.map((snapshot) => (
+              <article className="bookmark" key={snapshot.id}>
+                <div className="favicon" aria-hidden="true">
+                  清
+                </div>
+                <div className="rowbody" role="group">
+                  <h3>{snapshot.scopeLabel}</h3>
+                  <div className="rowmeta">
+                    <span>收藏 {snapshot.counts.bookmarks}</span>
+                    <span>·</span>
+                    <span>待看 {snapshot.counts.readingItems}</span>
+                    <span>·</span>
+                    <span>删除标记 {snapshot.counts.tombstones}</span>
+                    <span>·</span>
+                    <span>{formatDateTime(snapshot.createdAt)}</span>
+                    {snapshot.restoredAt ? (
+                      <span>
+                        · 已恢复 {snapshot.restoredCounts?.restored ?? 0} 条（{formatDateTime(snapshot.restoredAt)}）
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="rowactions">
+                  <button
+                    className="btn small"
+                    disabled={purgeBusy === snapshot.id}
+                    onClick={() => void previewPurgeRestore(snapshot.id)}
+                  >
+                    {purgeBusy === snapshot.id ? '读取中…' : '看看能找回什么'}
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+        {purgePreview ? (
+          <Notice>
+            <strong>
+              这次清理共 {purgePreview.candidates} 条：可找回 {purgePreview.restorable} 条，跳过{' '}
+              {purgePreview.skipped} 条，冲突 {purgePreview.conflicted} 条。
+            </strong>
+            <span>只加回这份快照里的条目；冲突表示同网址已经在库里，恢复不会覆盖它。</span>
+            {purgePreview.decisions
+              .filter((row) => row.action !== 'restore')
+              .slice(0, 8)
+              .map((row) => (
+                <span key={row.id} className="micro">
+                  · {row.title}：{row.reason}
+                </span>
+              ))}
+            <button
+              className="btn small primary"
+              disabled={purgeBusy !== '' || purgePreview.restorable === 0}
+              onClick={() => void runPurgeRestore()}
+            >
+              恢复这 {purgePreview.restorable} 条
+            </button>
+            <button className="btn small" onClick={() => setPurgePreview(null)}>
+              取消
+            </button>
+          </Notice>
+        ) : null}
       </div>
 
       <div className="panel">

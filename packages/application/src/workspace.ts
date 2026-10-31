@@ -37,6 +37,8 @@ import {
   type ImportSource,
   type Policy,
   type PurgeCounts,
+  type PurgeRestorePreview,
+  type PurgeSnapshot,
   type ReadingItem,
   type AppSettings,
   type Tag,
@@ -416,6 +418,25 @@ export class WorkspaceService {
     return scope.kind === 'all'
       ? this.repos.bookmarks.countPurgeAll()
       : this.repos.bookmarks.countPurgeCategory(scope.categoryId);
+  }
+
+  /** 最近几次硬删除留下的本机快照（新的在前）。 */
+  async listPurgeSnapshots(): Promise<PurgeSnapshot[]> {
+    return this.repos.purge.list();
+  }
+
+  /** 预览「只找回这一次」的结果：可恢复 / 跳过 / 冲突，只读。 */
+  async previewPurgeRestore(snapshotId: string): Promise<PurgeRestorePreview> {
+    return this.repos.purge.preview(snapshotId);
+  }
+
+  /** 执行恢复：只加回该快照的条目，不覆盖当前数据。 */
+  async restorePurgeSnapshot(snapshotId: string): Promise<{ preview: PurgeRestorePreview; restored: number }> {
+    return this.repos.purge.restore(snapshotId);
+  }
+
+  async deletePurgeSnapshot(snapshotId: string): Promise<void> {
+    return this.repos.purge.remove(snapshotId);
   }
 
   async purgePendingReading(): Promise<number> {

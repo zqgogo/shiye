@@ -11,6 +11,7 @@ import type {
   ImportBatch,
   ImportItem,
   Policy,
+  PurgeSnapshot,
   ReadingItem,
   Tag,
   Tombstone,
@@ -57,6 +58,7 @@ export class ShiyeDB extends Dexie {
   appliedChanges!: Table<AppliedChangeRecord, string>;
   importBatches!: Table<ImportBatch, string>;
   importItems!: Table<ImportItem, [string, string]>;
+  purgeSnapshots!: Table<PurgeSnapshot, string>;
   meta!: Table<MetaRow, string>;
 
   constructor(name: string = DB_NAME) {
@@ -70,7 +72,9 @@ export class ShiyeDB extends Dexie {
       settings: '&key',
     });
 
-    this.version(SCHEMA_VERSION).stores({
+    // 版本 2 的表结构写死在这里，不要用 SCHEMA_VERSION：常量会随新版本递增，
+    // 一旦共用，升级链上每个版本都会指向同一份最新 schema，迁移就断了。
+    this.version(2).stores({
       bookmarks:
         '&id, canonicalUrl, categoryKey, lifeState, [lifeState+unreadFlag], createdAt, lastOpenedAt, localRevision, *tagIds',
       readingItems: '&id, canonicalUrl, status, [status+addedAt], relatedBookmarkId, localRevision',
@@ -88,7 +92,27 @@ export class ShiyeDB extends Dexie {
       meta: '&key',
     });
 
-    this.version(SCHEMA_VERSION).upgrade((tx) => migrateV1ToV2(tx));
+    this.version(2).upgrade((tx) => migrateV1ToV2(tx));
+
+    // 版本 3 只新增清理快照表，不改动既有记录；不写 upgrade 即为「不迁移数据」。
+    this.version(SCHEMA_VERSION).stores({
+      bookmarks:
+        '&id, canonicalUrl, categoryKey, lifeState, [lifeState+unreadFlag], createdAt, lastOpenedAt, localRevision, *tagIds',
+      readingItems: '&id, canonicalUrl, status, [status+addedAt], relatedBookmarkId, localRevision',
+      categories: '&id, name',
+      tags: '&id, name',
+      settings: '&key',
+      policies: '&id',
+      tombstones: '&[entityType+id], deletedAt, canonicalUrl',
+      aiTasks: '&id, kind, state, createdAt',
+      handoffBatches: '&id, createdAt, status',
+      handoffItems: '&[batchId+n], [batchId+bookmarkId], status',
+      appliedChanges: '&id, taskId, bookmarkId, appliedAt',
+      importBatches: '&id, fileHash, status, createdAt',
+      importItems: '&[batchId+sourceKey], entityId',
+      purgeSnapshots: '&id, createdAt, entry',
+      meta: '&key',
+    });
   }
 }
 

@@ -24,6 +24,8 @@ import type {
   ImportRow,
   Policy,
   PurgeCounts,
+  PurgeRestorePreview,
+  PurgeSnapshot,
   ReadingItem,
   SourceInfo,
   Tag,
@@ -45,11 +47,21 @@ import type {
   ImportUndoResult,
   ReadingRepository,
   Repositories,
+  PurgeSnapshotRepository,
   SettingsRepository,
   TagRepository,
 } from '@shiye/application';
 import { DEFAULT_POLICY, DEFAULT_SETTINGS, ShiyeDB, deriveIndexFields, type SettingsRow } from './db.js';
 import { createBackupRepository } from './backup.js';
+import {
+  deletePurgeSnapshot,
+  listPurgeSnapshots,
+  previewPurgeRestore,
+  restorePurgeSnapshot,
+  triggerDeleteHook,
+  writePurgeSnapshot,
+  type PurgeHooks,
+} from './purge.js';
 
 function assertNotDeleted(bookmark: Bookmark): void {
   if (bookmark.deletedAt) {
@@ -116,7 +128,7 @@ function buildBookmark(params: CreateBookmarkParams): Bookmark {
 }
 
 export class DexieBookmarkRepository implements BookmarkRepository {
-  constructor(private readonly db: ShiyeDB) {}
+  constructor(private readonly db: ShiyeDB, private readonly hooks?: PurgeHooks) {}
 
   async get(id: string): Promise<Bookmark | undefined> {
     return this.db.bookmarks.get(id);
@@ -290,37 +302,63 @@ export class DexieBookmarkRepository implements BookmarkRepository {
    * 界面上必须按「彻底清空」说清楚，不能和「移到回收站」混为一谈。
    */
   async purgeAll(): Promise<number> {
-    return this.db.transaction('rw', this.db.bookmarks, this.db.tombstones, async () => {
-      const rows = await this.db.bookmarks.toArray();
-      await this.db.bookmarks.clear();
-      const tombstones = await this.db.tombstones.toArray();
-      const bookmarkTombstones = tombstones.filter(
-        (tombstone) => tombstone.entityType === 'bookmark'
-      );
-      await this.db.tombstones.bulkDelete(
-        bookmarkTombstones.map((tombstone) => [tombstone.entityType, tombstone.id] as [string, string])
-      );
-      return rows.length;
-    });
+    return this.db.transaction(
+      'rw',
+      [this.db.bookmarks, this.db.tombstones, this.db.settings, this.db.purgeSnapshots],
+      async () => {
+        const rows = await this.db.bookmarks.toArray();
+        const tombstones = (await this.db.tombstones.toArray()).filter(
+          (tombstone) => tombstone.entityType === 'bookmark'
+        );
+        // 先落快照再删：写不进去就整条事务回滚，一条都不会少。
+        await writePurgeSnapshot(
+          this.db,
+          { entry: 'all', scopeLabel: '整个收藏库', bookmarks: rows, tombstones },
+          this.hooks
+        );
+        await triggerDeleteHook(this.hooks);
+        await this.db.bookmarks.clear();
+        await this.db.tombstones.bulkDelete(
+          tombstones.map((tombstone) => [tombstone.entityType, tombstone.id] as [string, string])
+        );
+        return rows.length;
+      }
+    );
   }
 
   /** 清空一个分类（null = 未分类）：移走该分类下的收藏与墓碑，分类本身不动。 */
   async purgeCategory(categoryId: string | null): Promise<number> {
-    return this.db.transaction('rw', this.db.bookmarks, this.db.tombstones, async () => {
-      const rows = (
-        await this.db.bookmarks.toArray()
-      ).filter((bookmark) => (bookmark.categoryId ?? null) === categoryId);
-      if (rows.length === 0) return 0;
-      await this.db.bookmarks.bulkDelete(rows.map((bookmark) => bookmark.id));
-      const tombstones = await this.db.tombstones.toArray();
-      const ids = new Set(rows.map((bookmark) => bookmark.id));
-      await this.db.tombstones.bulkDelete(
-        tombstones
-          .filter((tombstone) => tombstone.entityType === 'bookmark' && ids.has(tombstone.id))
-          .map((tombstone) => [tombstone.entityType, tombstone.id] as [string, string])
-      );
-      return rows.length;
-    });
+    return this.db.transaction(
+      'rw',
+      [this.db.bookmarks, this.db.tombstones, this.db.categories, this.db.settings, this.db.purgeSnapshots],
+      async () => {
+        const rows = (
+          await this.db.bookmarks.toArray()
+        ).filter((bookmark) => (bookmark.categoryId ?? null) === categoryId);
+        if (rows.length === 0) return 0;
+        const ids = new Set(rows.map((bookmark) => bookmark.id));
+        const tombstones = (await this.db.tombstones.toArray()).filter(
+          (tombstone) => tombstone.entityType === 'bookmark' && ids.has(tombstone.id)
+        );
+        const category = categoryId ? await this.db.categories.get(categoryId) : null;
+        await writePurgeSnapshot(
+          this.db,
+          {
+            entry: categoryId ? 'category' : 'uncategorized',
+            scopeLabel: categoryId ? `分类：${category?.name ?? categoryId}` : '未分类的收藏',
+            bookmarks: rows,
+            tombstones,
+          },
+          this.hooks
+        );
+        await triggerDeleteHook(this.hooks);
+        await this.db.bookmarks.bulkDelete(rows.map((bookmark) => bookmark.id));
+        await this.db.tombstones.bulkDelete(
+          tombstones.map((tombstone) => [tombstone.entityType, tombstone.id] as [string, string])
+        );
+        return rows.length;
+      }
+    );
   }
 
   /** 清空整库的条数明细：回收站里的记录同样会被删掉，必须单独报出来。 */
@@ -637,7 +675,7 @@ export class DexieBookmarkRepository implements BookmarkRepository {
 }
 
 export class DexieReadingRepository implements ReadingRepository {
-  constructor(private readonly db: ShiyeDB) {}
+  constructor(private readonly db: ShiyeDB, private readonly hooks?: PurgeHooks) {}
 
   async get(id: string): Promise<ReadingItem | undefined> {
     return this.db.readingItems.get(id);
@@ -745,19 +783,41 @@ export class DexieReadingRepository implements ReadingRepository {
 
   /** 清空待看队列。待看没有墓碑，重新加入同一网址不会被挡住。 */
   async purgePending(): Promise<number> {
-    return this.db.transaction('rw', this.db.readingItems, async () => {
-      const pending = await this.listPending();
-      await this.db.readingItems.bulkDelete(pending.map((item) => item.id));
-      return pending.length;
-    });
+    return this.db.transaction(
+      'rw',
+      [this.db.readingItems, this.db.settings, this.db.purgeSnapshots],
+      async () => {
+        const pending = await this.listPending();
+        if (pending.length === 0) return 0;
+        await writePurgeSnapshot(
+          this.db,
+          { entry: 'readingPending', scopeLabel: '待看队列', readingItems: pending },
+          this.hooks
+        );
+        await triggerDeleteHook(this.hooks);
+        await this.db.readingItems.bulkDelete(pending.map((item) => item.id));
+        return pending.length;
+      }
+    );
   }
 
   async purgeCompleted(): Promise<number> {
-    return this.db.transaction('rw', this.db.readingItems, async () => {
-      const completed = await this.listCompleted();
-      await this.db.readingItems.bulkDelete(completed.map((item) => item.id));
-      return completed.length;
-    });
+    return this.db.transaction(
+      'rw',
+      [this.db.readingItems, this.db.settings, this.db.purgeSnapshots],
+      async () => {
+        const completed = await this.listCompleted();
+        if (completed.length === 0) return 0;
+        await writePurgeSnapshot(
+          this.db,
+          { entry: 'readingCompleted', scopeLabel: '已完成待看', readingItems: completed },
+          this.hooks
+        );
+        await triggerDeleteHook(this.hooks);
+        await this.db.readingItems.bulkDelete(completed.map((item) => item.id));
+        return completed.length;
+      }
+    );
   }
 
   async convertToBookmark(
@@ -1016,7 +1076,7 @@ export class DexieSettingsRepository implements SettingsRepository {
 }
 
 export class DexieImportRepository implements ImportRepository {
-  constructor(private readonly db: ShiyeDB) {}
+  constructor(private readonly db: ShiyeDB, private readonly hooks?: PurgeHooks) {}
 
   async getBatch(id: string): Promise<ImportBatch | undefined> {
     return this.db.importBatches.get(id);
@@ -1045,6 +1105,8 @@ export class DexieImportRepository implements ImportRepository {
         this.db.tombstones,
         this.db.importBatches,
         this.db.importItems,
+        this.db.settings,
+        this.db.purgeSnapshots,
       ],
       async () => {
         const batch = await this.db.importBatches.get(batchId);
@@ -1060,9 +1122,12 @@ export class DexieImportRepository implements ImportRepository {
           .between([batchId, Dexie.minKey], [batchId, Dexie.maxKey])
           .toArray();
 
-        let removed = 0;
+        // 先判定再删除：判定阶段只收集，删除阶段统一执行，
+        // 中间才有位置写清理快照（撤销是硬删，误撤同样需要能找回）。
         let kept = 0;
         let missing = 0;
+        const removeBookmarks: Bookmark[] = [];
+        const removeReadings: ReadingItem[] = [];
         for (const item of items) {
           if (batch.destination === 'library') {
             const row = await this.db.bookmarks.get(item.entityId);
@@ -1074,9 +1139,7 @@ export class DexieImportRepository implements ImportRepository {
               kept += 1;
               continue;
             }
-            await this.db.bookmarks.delete(row.id);
-            await this.db.tombstones.delete(['bookmark', row.id]);
-            removed += 1;
+            removeBookmarks.push(row);
           } else {
             const row = await this.db.readingItems.get(item.entityId);
             if (!row) {
@@ -1087,17 +1150,46 @@ export class DexieImportRepository implements ImportRepository {
               kept += 1;
               continue;
             }
-            await this.db.readingItems.delete(row.id);
-            removed += 1;
+            removeReadings.push(row);
           }
         }
+
+        const removedIds = new Set(removeBookmarks.map((row) => row.id));
+        const batchTombstones = (await this.db.tombstones.toArray()).filter(
+          (tombstone) => tombstone.entityType === 'bookmark' && removedIds.has(tombstone.id)
+        );
+        if (removeBookmarks.length > 0 || removeReadings.length > 0) {
+          await writePurgeSnapshot(
+            this.db,
+            {
+              entry: 'importBatch',
+              scopeLabel: `批次：${batch.fileName}`,
+              bookmarks: removeBookmarks,
+              readingItems: removeReadings,
+              tombstones: batchTombstones,
+            },
+            this.hooks
+          );
+          await triggerDeleteHook(this.hooks);
+        }
+
+        await this.db.bookmarks.bulkDelete(removeBookmarks.map((row) => row.id));
+        await this.db.tombstones.bulkDelete(
+          batchTombstones.map((tombstone) => [tombstone.entityType, tombstone.id] as [string, string])
+        );
+        await this.db.readingItems.bulkDelete(removeReadings.map((row) => row.id));
 
         await this.db.importItems.bulkDelete(
           items.map((item) => [item.batchId, item.sourceKey] as [string, string])
         );
         const reverted: ImportBatch = { ...batch, status: 'reverted' };
         await this.db.importBatches.put(reverted);
-        return { batch: reverted, removed, kept, missing };
+        return {
+          batch: reverted,
+          removed: removeBookmarks.length + removeReadings.length,
+          kept,
+          missing,
+        };
       }
     );
   }
@@ -1326,16 +1418,41 @@ export class DexieHandoffRepository implements HandoffRepository {
   }
 }
 
-export function createRepositories(db: ShiyeDB, backup?: BackupRepository): Repositories {
+export class DexiePurgeRepository implements PurgeSnapshotRepository {
+  constructor(private readonly db: ShiyeDB) {}
+
+  list(): Promise<PurgeSnapshot[]> {
+    return listPurgeSnapshots(this.db);
+  }
+
+  preview(snapshotId: string): Promise<PurgeRestorePreview> {
+    return previewPurgeRestore(this.db, snapshotId);
+  }
+
+  restore(snapshotId: string): Promise<{ preview: PurgeRestorePreview; restored: number }> {
+    return restorePurgeSnapshot(this.db, snapshotId);
+  }
+
+  remove(snapshotId: string): Promise<void> {
+    return deletePurgeSnapshot(this.db, snapshotId);
+  }
+}
+
+export function createRepositories(
+  db: ShiyeDB,
+  backup?: BackupRepository,
+  hooks?: PurgeHooks
+): Repositories {
   return {
-    bookmarks: new DexieBookmarkRepository(db),
-    reading: new DexieReadingRepository(db),
+    bookmarks: new DexieBookmarkRepository(db, hooks),
+    reading: new DexieReadingRepository(db, hooks),
     categories: new DexieCategoryRepository(db),
     tags: new DexieTagRepository(db),
     settings: new DexieSettingsRepository(db),
-    imports: new DexieImportRepository(db),
+    imports: new DexieImportRepository(db, hooks),
     handoff: new DexieHandoffRepository(db),
     backup: backup ?? createBackupRepository(db),
+    purge: new DexiePurgeRepository(db),
   };
 }
 
