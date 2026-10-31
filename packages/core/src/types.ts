@@ -174,6 +174,19 @@ export interface ImportRow {
   duplicateOf: string | null;
 }
 
+/**
+ * 彻底清空前的作用范围统计。
+ *
+ * 记录必须拆成「在库」与「回收站」两项：清空是按整张表过滤的，回收站里的记录
+ * 也在删除范围内，只报当前列表条数会让确认框的数字小于实际删除量。
+ * `tombstones` 是被连带清掉的删除标记条数（它们不是记录，但同样不可恢复）。
+ */
+export interface PurgeCounts {
+  active: number;
+  trashed: number;
+  tombstones: number;
+}
+
 export interface ImportParseWarning {
   code:
     | 'DEPTH_LIMIT'

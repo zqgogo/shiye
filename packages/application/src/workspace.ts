@@ -36,6 +36,7 @@ import {
   type ImportRow,
   type ImportSource,
   type Policy,
+  type PurgeCounts,
   type ReadingItem,
   type AppSettings,
   type Tag,
@@ -401,6 +402,20 @@ export class WorkspaceService {
 
   async purgeCategoryBookmarks(categoryId: string | null): Promise<number> {
     return this.repos.bookmarks.purgeCategory(categoryId);
+  }
+
+  /**
+   * 清空前的条数明细。
+   *
+   * 清空按整张表过滤，回收站里的记录也在删除范围内；界面上只报当前列表条数
+   * 会让确认框的数字小于实际删除量。这里把「在库 / 回收站 / 删除标记」拆开报。
+   */
+  async purgeCounts(
+    scope: { kind: 'all' } | { kind: 'category'; categoryId: string | null }
+  ): Promise<PurgeCounts> {
+    return scope.kind === 'all'
+      ? this.repos.bookmarks.countPurgeAll()
+      : this.repos.bookmarks.countPurgeCategory(scope.categoryId);
   }
 
   async purgePendingReading(): Promise<number> {

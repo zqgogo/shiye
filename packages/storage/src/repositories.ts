@@ -23,6 +23,7 @@ import type {
   ImportBatch,
   ImportRow,
   Policy,
+  PurgeCounts,
   ReadingItem,
   SourceInfo,
   Tag,
@@ -320,6 +321,34 @@ export class DexieBookmarkRepository implements BookmarkRepository {
       );
       return rows.length;
     });
+  }
+
+  /** 清空整库的条数明细：回收站里的记录同样会被删掉，必须单独报出来。 */
+  async countPurgeAll(): Promise<PurgeCounts> {
+    const [rows, tombstones] = await Promise.all([
+      this.db.bookmarks.toArray(),
+      this.db.tombstones.toArray(),
+    ]);
+    return {
+      active: rows.filter((row) => !row.deletedAt).length,
+      trashed: rows.filter((row) => Boolean(row.deletedAt)).length,
+      tombstones: tombstones.filter((tombstone) => tombstone.entityType === 'bookmark').length,
+    };
+  }
+
+  async countPurgeCategory(categoryId: string | null): Promise<PurgeCounts> {
+    const rows = (await this.db.bookmarks.toArray()).filter(
+      (bookmark) => (bookmark.categoryId ?? null) === categoryId
+    );
+    const ids = new Set(rows.map((bookmark) => bookmark.id));
+    const tombstones = (await this.db.tombstones.toArray()).filter(
+      (tombstone) => tombstone.entityType === 'bookmark' && ids.has(tombstone.id)
+    );
+    return {
+      active: rows.filter((row) => !row.deletedAt).length,
+      trashed: rows.filter((row) => Boolean(row.deletedAt)).length,
+      tombstones: tombstones.length,
+    };
   }
 
   async markRead(ids: string[]): Promise<number> {

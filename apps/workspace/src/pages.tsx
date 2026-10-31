@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { LIMITS, TRASH_RETENTION_DAYS, formatDateTime, isHttpUrl, toUserMessage, type Bookmark } from '@shiye/core';
+import { LIMITS, TRASH_RETENTION_DAYS, formatDateTime, isHttpUrl, toUserMessage, type Bookmark, type PurgeCounts } from '@shiye/core';
 import { BookmarkRow, EmptyState, ICONS, Notice, PageHeader, ReadingRow } from './components.js';
 import { useWorkspace } from './state.js';
 import { setPendingPaste } from './capture.js';
@@ -183,10 +183,11 @@ const LIST_TITLES: Record<string, [string, string]> = {
 };
 
 export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES | 'category'; categoryId?: string }) {
-  const { data, navigate, openModal, run, service } = useWorkspace();
+  const { data, navigate, openModal, run, service, toast } = useWorkspace();
   const [sort, setSort] = useState<'recent' | 'title'>('recent');
   const [trash, setTrash] = useState<Bookmark[] | null>(null);
   const [confirmPurge, setConfirmPurge] = useState(false);
+  const [purgeCounts, setPurgeCounts] = useState<PurgeCounts | null>(null);
   const category = categoryId ? data.categories.find((entry) => entry.id === categoryId) : undefined;
 
   useEffect(() => {
@@ -265,6 +266,38 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
     setConfirmPurge(false);
   }, [mode, categoryId]);
 
+  /**
+   * 确认框里的条数必须和实删数量对齐。
+   *
+   * 清空按整张表过滤，回收站里的记录也在删除范围内；只报当前列表条数会让
+   * 确认框显示 120 条、实际删掉 130 条。所以进页面先统计「在库 / 回收站 / 删除标记」。
+   */
+  useEffect(() => {
+    if (!purge) {
+      setPurgeCounts(null);
+      return;
+    }
+    let cancelled = false;
+    setPurgeCounts(null);
+    void (async () => {
+      try {
+        const counts = await service.purgeCounts(
+          mode === 'all'
+            ? { kind: 'all' }
+            : { kind: 'category', categoryId: mode === 'category' ? categoryId ?? null : null }
+        );
+        if (!cancelled) setPurgeCounts(counts);
+      } catch {
+        // 统计失败不阻塞清空：确认框退回「正在统计」，按钮仍可用，但要求用户先导出备份。
+        if (!cancelled) setPurgeCounts(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, categoryId, service, data.bookmarks.length, data.categories.length]);
+
   return (
     <>
       <PageHeader
@@ -302,19 +335,27 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
 
       {confirmPurge && purge ? (
         <Notice tone="danger">
-          <strong>
-            确认彻底清空{purge.label}（{purge.count} 条）？
-          </strong>
+          <strong>确认彻底清空{purge.label}？</strong>
           <span>
-            会同时删除这些网址的删除标记，之后可以重新导入同一批书签。
-            {purge.note ? ` ${purge.note}` : ''}
+            {purgeCounts
+              ? `将删除 ${purgeCounts.active + purgeCounts.trashed} 条记录（在库 ${purgeCounts.active} · 回收站 ${purgeCounts.trashed}），并清掉 ${purgeCounts.tombstones} 条删除标记。`
+              : '正在统计这一范围里的记录（含回收站）…'}
+          </span>
+          <span>
+            {purge.note ? `${purge.note} ` : ''}
+            删除标记会一起清掉，之后可以重新导入同一批书签。
           </span>
           <span>不可恢复。想留后路请先到「数据与备份」导出完整 JSON。</span>
           <button
             className="btn small danger"
             onClick={async () => {
+              const expected = purgeCounts ? purgeCounts.active + purgeCounts.trashed : null;
               const removed = await run(purge.action, purge.done);
-              if (removed !== null) setConfirmPurge(false);
+              if (removed === null) return;
+              setConfirmPurge(false);
+              if (expected !== null && removed !== expected) {
+                toast(`实际删除 ${removed} 条，与确认时的 ${expected} 条不一致，请核对后重试。`, 'error');
+              }
             }}
           >
             确认清空
@@ -328,7 +369,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
       <div className="toolbar">
         <span className="micro">共 {items.length} 条</span>
         <span className="spacer" />
-        {purge && purge.count > 0 ? (
+        {purge && (purgeCounts ? purgeCounts.active + purgeCounts.trashed > 0 : purge.count > 0) ? (
           <button className="btn small" onClick={() => setConfirmPurge(true)}>
             彻底清空…
           </button>

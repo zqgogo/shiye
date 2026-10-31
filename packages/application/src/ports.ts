@@ -10,6 +10,7 @@ import type {
   HandoffItem,
   HandoffBatchStatus,
   ImportBatch,
+  PurgeCounts,
   ImportDestination,
   ImportRow,
   ImportSource,
@@ -97,6 +98,9 @@ export interface BookmarkRepository {
   purgeAll(): Promise<number>;
   /** 彻底清空某个分类（传 null 表示未分类）下的收藏与对应墓碑；分类本身保留。 */
   purgeCategory(categoryId: string | null): Promise<number>;
+  /** 清空作用范围的条数明细：在库 / 回收站 / 被连带清掉的删除标记。 */
+  countPurgeAll(): Promise<PurgeCounts>;
+  countPurgeCategory(categoryId: string | null): Promise<PurgeCounts>;
   markRead(ids: string[]): Promise<number>;
   markUnread(ids: string[]): Promise<number>;
   setPinned(id: string, pinned: boolean): Promise<Bookmark>;

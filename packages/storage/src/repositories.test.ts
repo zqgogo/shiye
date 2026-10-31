@@ -392,3 +392,51 @@ describe('错误契约', () => {
     await expect(repos.bookmarks.update('missing', 1, { title: 'x' }, 'human')).rejects.toBeInstanceOf(AppError);
   });
 });
+
+describe('清空作用域计数', () => {
+  it('分类清空把回收站里的记录算进来，计数与实删数量一致', async () => {
+    const category = await repos.categories.create('计数分类');
+    const keep = await repos.bookmarks.create({ originalUrl: 'https://example.com/keep', title: '留下' });
+    const alive = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/alive',
+      title: '在库',
+      categoryId: category.id,
+    });
+    const trashed = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/trashed',
+      title: '已删除',
+      categoryId: category.id,
+    });
+    await repos.bookmarks.softDelete(trashed.id);
+
+    const counts = await repos.bookmarks.countPurgeCategory(category.id);
+    expect(counts).toEqual({ active: 1, trashed: 1, tombstones: 1 });
+
+    const removed = await repos.bookmarks.purgeCategory(category.id);
+    // 界面按「在库 + 回收站」报数，必须与实际删除量一致。
+    expect(removed).toBe(counts.active + counts.trashed);
+    expect(await db.bookmarks.get(alive.id)).toBeUndefined();
+    expect(await db.bookmarks.get(trashed.id)).toBeUndefined();
+    expect(await db.bookmarks.get(keep.id)).toBeDefined();
+    expect(await repos.bookmarks.countPurgeCategory(category.id)).toEqual({
+      active: 0,
+      trashed: 0,
+      tombstones: 0,
+    });
+  });
+
+  it('整库清空的计数包含回收站，且与实删数量一致', async () => {
+    const alive = await repos.bookmarks.create({ originalUrl: 'https://example.com/a1', title: 'A1' });
+    const trashed = await repos.bookmarks.create({ originalUrl: 'https://example.com/a2', title: 'A2' });
+    await repos.bookmarks.softDelete(trashed.id);
+
+    const counts = await repos.bookmarks.countPurgeAll();
+    expect(counts).toEqual({ active: 1, trashed: 1, tombstones: 1 });
+
+    const removed = await repos.bookmarks.purgeAll();
+    expect(removed).toBe(counts.active + counts.trashed);
+    expect(await db.bookmarks.count()).toBe(0);
+    expect(await repos.bookmarks.countPurgeAll()).toEqual({ active: 0, trashed: 0, tombstones: 0 });
+    expect(await db.bookmarks.get(alive.id)).toBeUndefined();
+  });
+});

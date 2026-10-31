@@ -977,9 +977,54 @@ async function main() {
 
   phase('P3.4 彻底清空收藏库', async () => {
     await goto(page, 'all', '全部收藏');
+    // 先删一条进回收站：清空会连它一起删，确认框必须把这个数字算进去并说明。
+    await page.evaluate(() => {
+      const button = document.querySelector('button[aria-label="删除收藏"]');
+      if (button instanceof HTMLElement) button.click();
+    });
+    await waitForText(page, '移到回收站', 10_000);
+    await sleep(300);
+    await page.evaluate(() => {
+      const button = [...document.querySelectorAll('.modal button')].find(
+        (node) => (node.textContent ?? '').trim() === '移到回收站'
+      );
+      if (button instanceof HTMLElement) button.click();
+    });
+    await sleep(900);
+
     const before = await page.evaluate(readMainLibrary);
+    // readMainLibrary 投影出来的是派生键 lifeState，没有 deletedAt 字段。
+    const trashedBefore = before.bookmarks.filter((row) => row.lifeState === 'deleted').length;
     await clickIn(page, '.toolbar', '彻底清空…');
     await waitForText(page, '确认彻底清空', 10_000);
+    await waitForText(page, '条记录（在库', 10_000);
+    const dialogText = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('确认彻底清空')
+      );
+      return (notice?.innerText ?? '').replace(/\s+/g, ' ');
+    });
+    const breakdown = /将删除 (\d+) 条记录（在库 (\d+) · 回收站 (\d+)），并清掉 (\d+) 条删除标记/.exec(
+      dialogText
+    );
+    report.counts.purgeDialog = {
+      text: dialogText,
+      total: breakdown ? Number(breakdown[1]) : null,
+      active: breakdown ? Number(breakdown[2]) : null,
+      trashed: breakdown ? Number(breakdown[3]) : null,
+      tombstones: breakdown ? Number(breakdown[4]) : null,
+    };
+    record(
+      'P3.4 清空确认框拆出在库 / 回收站 / 删除标记，且与实删数量一致',
+      Boolean(breakdown) &&
+        Number(breakdown[1]) === before.bookmarks.length &&
+        Number(breakdown[2]) + Number(breakdown[3]) === Number(breakdown[1]) &&
+        Number(breakdown[3]) === trashedBefore &&
+        trashedBefore === 1 &&
+        Number(breakdown[4]) === trashedBefore,
+      `对话框=${dialogText.slice(0, 90)}｜主库=${before.bookmarks.length}（回收站 ${trashedBefore}）`
+    );
+
     await clickIn(page, '', '确认清空');
     await sleep(1200);
 
