@@ -207,6 +207,14 @@ main { min-width: 0; display: flex; flex-direction: column; }
   display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
 }
 .notice.danger { border-color: #e8d3cd; background: #fbf1ee; color: #8a5b50; }
+.notice.ok { border-color: #cfdcc8; background: #eef3e8; color: #47603c; }
+
+/* 撤回结果里的「保留项 + 原因」清单 */
+.undolist { display: flex; flex-direction: column; gap: 6px; width: 100%; margin: 4px 0; }
+.undolist ul { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 4px; }
+.undolist li { font-size: 11px; line-height: 1.5; }
+.undolist li strong { font-weight: 500; }
+.undolist .btn { align-self: flex-start; }
 
 .panel { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 22px; margin-bottom: 16px; }
 .panel h2 { font-size: 14px; margin: 0 0 6px; }

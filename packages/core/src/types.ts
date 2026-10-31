@@ -134,6 +134,38 @@ export interface Tombstone {
 export type ImportDestination = 'reading' | 'library';
 export type ImportSource = 'paste' | 'bookmarkHtml';
 
+/**
+ * 撤回一批导入时，某个条目为什么被留下。
+ *
+ * 顺序即判定优先级：先看它还在不在，再看它变成了什么，最后才是「有没有被改过」——
+ * 否则一条已经完成又被编辑过的待看，会被笼统报成「改过」，用户看不出真实的处理结果。
+ */
+export type ImportUndoReason =
+  /** 导入后被编辑、改分类 / 标签 / 隐私、应用过 AI 建议或标记过已读，版本号已递增。 */
+  | 'modified'
+  /** 已经移入回收站。软删除本身也递增版本，撤回不替用户撤销这个决定。 */
+  | 'trashed'
+  /** 待看已完成。之后的处理不是一次错误导入能盲目回滚的内容。 */
+  | 'completed'
+  /** 待看已经转成收藏，实体仍在本批名下，但形态变了。 */
+  | 'converted'
+  /** 实体已经不在了：用户自己删了、被别的清理带走，或从未真正写入。 */
+  | 'missing';
+
+export interface ImportUndoItem {
+  entityId: Id;
+  title: string;
+  originalUrl: string;
+  reason: ImportUndoReason;
+}
+
+/** 撤回后要长期留档的三类计数，刷新或关页之后仍然可查。 */
+export interface ImportUndoCounts {
+  removed: number;
+  kept: number;
+  missing: number;
+}
+
 export interface ImportBatch {
   id: Id;
   source: ImportSource;
@@ -149,6 +181,12 @@ export interface ImportBatch {
   createdAt: ISODateTime;
   appliedAt: ISODateTime | null;
   error: string | null;
+  /** 撤回时间；未撤回为 null。 */
+  revertedAt: ISODateTime | null;
+  /** 撤回时的三类计数；未撤回为 null。之后 importItems 会被清掉，只能靠它回看。 */
+  undoCounts: ImportUndoCounts | null;
+  /** 撤回时被留下的条目及原因，供事后查看；未撤回为空数组。 */
+  undoKept: ImportUndoItem[];
 }
 
 export interface ImportItem {

@@ -38,5 +38,5 @@ export const TRASH_RETENTION_DAYS = 30;
 
 export const DELETED_CATEGORY_KEY = 'uncategorized';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 export const AI_PROTOCOL_VERSION = 2;

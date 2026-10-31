@@ -48,6 +48,9 @@ import { AIReplySchema, AISuggestionSchema } from '@shiye/core';
 import { z } from 'zod';
 import type {
   CommitImportResult,
+  ImportBatchPage,
+  ImportBatchQuery,
+  ImportUndoPreview,
   ImportUndoResult,
   Repositories,
   RestoreResult,
@@ -388,9 +391,14 @@ export class WorkspaceService {
     });
   }
 
-  /** 最近导入过的批次：撤销入口要靠它找回「刚刚那一次」。 */
-  async listImportBatches(): Promise<ImportBatch[]> {
-    return this.repos.imports.listBatches();
+  /** 导入批次历史：按文件名搜索并分页，撤销入口要靠它找回「那一份文件」。 */
+  async listImportBatches(query?: ImportBatchQuery): Promise<ImportBatchPage> {
+    return this.repos.imports.listBatches(query);
+  }
+
+  /** 撤回前的只读预演：数字必须与随后真正执行的结果一致。 */
+  async previewUndoImport(batchId: string): Promise<ImportUndoPreview> {
+    return this.repos.imports.previewUndoBatch(batchId);
   }
 
   async undoImport(batchId: string): Promise<ImportUndoResult> {

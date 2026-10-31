@@ -8,8 +8,10 @@ import {
   type ImportDestination,
   type ImportParseResult,
   type ImportRow,
+  type ImportUndoItem,
 } from '@shiye/core';
-import { PageHeader, Notice } from './components.js';
+import type { ImportUndoPreview } from '@shiye/application';
+import { KeptList, PageHeader, Notice } from './components.js';
 import { useWorkspace } from './state.js';
 
 let pendingPaste = '';
@@ -52,7 +54,9 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ inserted: number; skipped: number; skippedReasons: { line: number; reason: string }[]; destination: ImportDestination; batchId: string } | null>(null);
-  const [undone, setUndone] = useState<{ removed: number; kept: number; missing: number } | null>(null);
+  const [undone, setUndone] = useState<{ removed: number; kept: number; missing: number; items: ImportUndoItem[] } | null>(null);
+  /** 撤回前先预演：结果面板上直接写清楚会删几条、留几条。 */
+  const [pendingUndo, setPendingUndo] = useState<ImportUndoPreview | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -227,16 +231,30 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
    * 只删「导入后原样留着」的条目：改过的、应用过 AI 的、转成收藏的会保留并如实报数。
    * 撤销后同时清掉这批的删除标记，否则同一批书签重新导入会被自己留下的墓碑挡住。
    */
-  const undoImport = async () => {
+  const startUndo = async () => {
     if (!result) return;
     setBusy(true);
-    const outcome = await run(
-      () => service.undoImport(result.batchId),
-      '已撤销这次导入，条目已从库里移除。'
-    );
+    try {
+      setPendingUndo(await service.previewUndoImport(result.batchId));
+    } catch (cause) {
+      setError(toUserMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const undoImport = async (preview: ImportUndoPreview) => {
+    setBusy(true);
+    const outcome = await run(() => service.undoImport(preview.batch.id));
     setBusy(false);
+    setPendingUndo(null);
     if (!outcome) return;
-    setUndone({ removed: outcome.removed, kept: outcome.kept, missing: outcome.missing });
+    setUndone({
+      removed: outcome.removed,
+      kept: outcome.kept,
+      missing: outcome.missing,
+      items: outcome.items,
+    });
     setResult(null);
   };
 
@@ -316,23 +334,45 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
             {result.inserted > 0 ? (
               // 误选了「待看」或导错了文件时，这是最直接的一步：把刚建出来的条目整批撤掉，
               // 不必去列表里逐条删，也不会留下挡住重新导入的痕迹。
-              <button className="btn danger" onClick={() => void undoImport()} disabled={busy}>
-                {busy ? '撤销中…' : '撤销这次导入'}
+              <button className="btn danger" onClick={() => void startUndo()} disabled={busy}>
+                {busy ? '正在预演…' : '撤回这次导入'}
               </button>
             ) : null}
           </div>
         </div>
       ) : null}
 
-      {undone ? (
-        <Notice>
-          <strong>已撤销这次导入</strong>
+      {pendingUndo ? (
+        <Notice tone="danger">
+          <strong>确认撤回「{pendingUndo.batch.fileName}」？</strong>
           <span>
-            移除 {undone.removed} 条
-            {undone.kept > 0 ? `；${undone.kept} 条导入后被改过，已保留` : ''}
-            {undone.missing > 0 ? `；${undone.missing} 条已不在库里` : ''}。
+            将移除 {pendingUndo.removed} 条，保留 {pendingUndo.kept} 条
+            {pendingUndo.missing > 0 ? `，另有 ${pendingUndo.missing} 条已不在库里` : ''}。
           </span>
+          {pendingUndo.blockedReason ? <span>{pendingUndo.blockedReason}</span> : null}
+          <KeptList items={pendingUndo.items} />
+          <button
+            className="btn small danger"
+            disabled={busy}
+            onClick={() => void undoImport(pendingUndo)}
+          >
+            {busy ? '撤回中…' : `确认撤回 ${pendingUndo.removed} 条`}
+          </button>
+          <button className="btn small" onClick={() => setPendingUndo(null)}>
+            取消
+          </button>
+        </Notice>
+      ) : null}
+
+      {undone ? (
+        <Notice tone="ok">
+          <strong>
+            已撤回这次导入：移除 {undone.removed} 条，保留 {undone.kept} 条
+            {undone.missing > 0 ? `，${undone.missing} 条已不在库里` : ''}。
+          </strong>
+          <KeptList items={undone.items} />
           <span>这批的删除标记也一并清掉了，同一批书签可以重新导入。</span>
+          <span>批次记录里也留着这次撤回的时间与条数，可以在「数据与备份」页回查。</span>
         </Notice>
       ) : null}
 

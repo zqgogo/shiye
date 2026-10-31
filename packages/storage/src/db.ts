@@ -95,6 +95,26 @@ export class ShiyeDB extends Dexie {
     this.version(2).upgrade((tx) => migrateV1ToV2(tx));
 
     // 版本 3 只新增清理快照表，不改动既有记录；不写 upgrade 即为「不迁移数据」。
+    this.version(3).stores({
+      bookmarks:
+        '&id, canonicalUrl, categoryKey, lifeState, [lifeState+unreadFlag], createdAt, lastOpenedAt, localRevision, *tagIds',
+      readingItems: '&id, canonicalUrl, status, [status+addedAt], relatedBookmarkId, localRevision',
+      categories: '&id, name',
+      tags: '&id, name',
+      settings: '&key',
+      policies: '&id',
+      tombstones: '&[entityType+id], deletedAt, canonicalUrl',
+      aiTasks: '&id, kind, state, createdAt',
+      handoffBatches: '&id, createdAt, status',
+      handoffItems: '&[batchId+n], [batchId+bookmarkId], status',
+      appliedChanges: '&id, taskId, bookmarkId, appliedAt',
+      importBatches: '&id, fileHash, status, createdAt',
+      importItems: '&[batchId+sourceKey], entityId',
+      purgeSnapshots: '&id, createdAt, entry',
+      meta: '&key',
+    });
+
+    // 版本 4 只给批次补撤回相关字段，表结构不变；老批次补成「未撤回」。
     this.version(SCHEMA_VERSION).stores({
       bookmarks:
         '&id, canonicalUrl, categoryKey, lifeState, [lifeState+unreadFlag], createdAt, lastOpenedAt, localRevision, *tagIds',
@@ -113,6 +133,8 @@ export class ShiyeDB extends Dexie {
       purgeSnapshots: '&id, createdAt, entry',
       meta: '&key',
     });
+
+    this.version(SCHEMA_VERSION).upgrade((tx) => migrateV3ToV4(tx));
   }
 }
 
@@ -126,6 +148,22 @@ function asText(value: unknown, fallback = ''): string {
  * - 无 inboxUnread 的记录：未分类且未删除 → 未读，其余默认已读；
  * - valueLevel / valueReason 不映射为任何新字段，直接丢弃。
  */
+/**
+ * v3 → v4：给已存在的批次补上撤回相关字段。
+ *
+ * 只补字段、不改状态：老批次一律视为「未撤回」，不给它们编造撤回时间或计数。
+ */
+export async function migrateV3ToV4(tx: Transaction): Promise<void> {
+  await tx
+    .table('importBatches')
+    .toCollection()
+    .modify((record: Record<string, unknown>) => {
+      if (record['revertedAt'] === undefined) record['revertedAt'] = null;
+      if (record['undoCounts'] === undefined) record['undoCounts'] = null;
+      if (!Array.isArray(record['undoKept'])) record['undoKept'] = [];
+    });
+}
+
 export async function migrateV1ToV2(tx: Transaction): Promise<void> {
   const now = nowIso();
   await tx

@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
-import type { Bookmark, Category } from '@shiye/core';
+import { useEffect, useState } from 'react';
+import type { Bookmark, Category, ImportUndoItem, ImportUndoReason } from '@shiye/core';
 import { domainOf, formatDateTime, isHttpUrl } from '@shiye/core';
 import { useWorkspace } from './state.js';
 
@@ -329,8 +329,56 @@ export function BookmarkRow({
   );
 }
 
-export function Notice({ children, tone }: { children: React.ReactNode; tone?: 'danger' }) {
-  return <div className={`notice ${tone === 'danger' ? 'danger' : ''}`}>{children}</div>;
+export function Notice({ children, tone }: { children: React.ReactNode; tone?: 'danger' | 'ok' }) {
+  return <div className={`notice ${tone ?? ''}`}>{children}</div>;
+}
+
+const UNDO_REASON_LABEL: Record<ImportUndoReason, string> = {
+  modified: '导入后被改过',
+  trashed: '已移入回收站',
+  completed: '待看已完成',
+  converted: '待看已转为收藏',
+  missing: '已不在库里',
+};
+
+const UNDO_REASON_NOTE: Record<ImportUndoReason, string> = {
+  modified: '编辑、改分类 / 标签 / 隐私、应用过 AI 建议或标记过已读，撤回不做反向操作。',
+  trashed: '你把它移进了回收站，撤回不会顺手捞回来。',
+  completed: '已经读完，后续处理不该被一次撤销回滚。',
+  converted: '已经转成收藏，形态变了就不再算「这次导入的新增」。',
+  missing: '记录已经不在了：可能你自己删了，或被别的清理带走。',
+};
+
+/**
+ * 逐条展示「没有移走的记录 + 原因」。
+ *
+ * 撤回最容易被误解成「点一下全都没了」，所以留下的每一条都要能说出为什么，
+ * 而不是只给一个 kept 数字。默认展开三条，避免长列表把面板撑爆。
+ */
+export function KeptList({ items }: { items: ImportUndoItem[] }) {
+  const [open, setOpen] = useState(false);
+  if (items.length === 0) return null;
+  const shown = open ? items : items.slice(0, 3);
+  return (
+    <div className="undolist">
+      <ul>
+        {shown.map((item) => (
+          <li key={item.entityId}>
+            <strong>{item.title || '（记录已不存在）'}</strong>
+            <span className="micro">
+              {' '}
+              {UNDO_REASON_LABEL[item.reason]} · {UNDO_REASON_NOTE[item.reason]}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {items.length > 3 ? (
+        <button className="btn small" onClick={() => setOpen(!open)}>
+          {open ? '收起' : `展开全部 ${items.length} 条`}
+        </button>
+      ) : null}
+    </div>
+  );
 }
 
 export function ReadingRow({

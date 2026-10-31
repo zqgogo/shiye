@@ -638,3 +638,229 @@ describe('清理快照与本机安全网', () => {
     expect(titles).toEqual(['安全网 2']);
   });
 });
+
+describe('批次撤回：预览、保留原因与留档', () => {
+  let seq = 0;
+
+  async function commitBatch(
+    destination: 'library' | 'reading',
+    specs: { title: string; url: string }[]
+  ): Promise<{ batchId: string; createdIds: string[] }> {
+    seq += 1;
+    const batchId = `batch-${seq}-${Date.now()}`;
+    const result = await repos.imports.commit({
+      batchId,
+      source: 'bookmarkHtml',
+      fileName: `bookmarks-${seq}.html`,
+      fileHash: null,
+      destination,
+      rows: specs.map((spec, index) => ({
+        sourceKey: `row-${index + 1}`,
+        line: index + 1,
+        originalUrl: spec.url,
+        canonicalUrl: spec.url,
+        title: spec.title,
+        sourceFolder: '',
+        targetCategoryId: null,
+        status: 'new' as const,
+        reason: '可保存',
+        selected: true,
+        duplicateOf: null,
+      })),
+    });
+    return { batchId, createdIds: result.createdIds };
+  }
+
+  it('预览的三类计数与执行结果完全一致', async () => {
+    const { batchId, createdIds } = await commitBatch('library', [
+      { title: '原样未动', url: 'https://example.com/keep-clean' },
+      { title: '被改过', url: 'https://example.com/keep-modified' },
+      { title: '进了回收站', url: 'https://example.com/keep-trashed' },
+      { title: '自己删了', url: 'https://example.com/gone' },
+    ]);
+    const modified = await repos.bookmarks.findByCanonical('https://example.com/keep-modified');
+    if (!modified) throw new Error('样本缺失');
+    await repos.bookmarks.update(modified.id, modified.localRevision, { title: '改过的标题' }, 'human');
+    const trashed = await repos.bookmarks.findByCanonical('https://example.com/keep-trashed');
+    if (!trashed) throw new Error('样本缺失');
+    await repos.bookmarks.softDelete(trashed.id);
+    const goneId = createdIds[3];
+    if (!goneId) throw new Error('样本缺失');
+    await db.bookmarks.delete(goneId);
+
+    const preview = await repos.imports.previewUndoBatch(batchId);
+    expect(preview.total).toBe(4);
+    expect(preview.removed).toBe(1);
+    expect(preview.kept).toBe(2);
+    expect(preview.missing).toBe(1);
+    expect(preview.blockedReason).toBeNull();
+    // 预览只读：此时主库一条都不该少。
+    expect(await db.bookmarks.count()).toBe(3);
+
+    const outcome = await repos.imports.undoBatch(batchId);
+    expect(outcome.removed).toBe(preview.removed);
+    expect(outcome.kept).toBe(preview.kept);
+    expect(outcome.missing).toBe(preview.missing);
+    expect(await db.bookmarks.count()).toBe(2);
+  });
+
+  it('保留原因区分改过 / 回收站 / 待看已完成 / 已转收藏 / 已不存在', async () => {
+    const library = await commitBatch('library', [
+      { title: '被编辑', url: 'https://example.com/r-modified' },
+      { title: '进回收站', url: 'https://example.com/r-trashed' },
+    ]);
+    const edited = await repos.bookmarks.findByCanonical('https://example.com/r-modified');
+    if (!edited) throw new Error('样本缺失');
+    await repos.bookmarks.update(edited.id, edited.localRevision, { note: '加个备注' }, 'human');
+    const trashed = await repos.bookmarks.findByCanonical('https://example.com/r-trashed');
+    if (!trashed) throw new Error('样本缺失');
+    await repos.bookmarks.softDelete(trashed.id);
+    await repos.imports.undoBatch(library.batchId);
+
+    const libraryBatch = await repos.imports.getBatch(library.batchId);
+    const libraryReasons = (libraryBatch?.undoKept ?? []).map((item) => item.reason).sort();
+    expect(libraryReasons).toEqual(['modified', 'trashed']);
+
+    const reading = await commitBatch('reading', [
+      { title: '完成的', url: 'https://example.com/r-completed' },
+      { title: '转收藏的', url: 'https://example.com/r-converted' },
+    ]);
+    const completed = await repos.reading.findByCanonical('https://example.com/r-completed');
+    if (!completed) throw new Error('样本缺失');
+    await repos.reading.complete(completed.id);
+    const converted = await repos.reading.findByCanonical('https://example.com/r-converted');
+    if (!converted) throw new Error('样本缺失');
+    await repos.reading.convertToBookmark(converted.id, converted.localRevision, {});
+    await repos.imports.undoBatch(reading.batchId);
+
+    const readingBatch = await repos.imports.getBatch(reading.batchId);
+    const readingReasons = (readingBatch?.undoKept ?? []).map((item) => item.reason).sort();
+    expect(readingReasons).toEqual(['completed', 'converted']);
+  });
+
+  it('撤回结果写进批次，刷新后仍能回看条数与原因', async () => {
+    const { batchId } = await commitBatch('library', [
+      { title: '要删的', url: 'https://example.com/persist-1' },
+      { title: '要留的', url: 'https://example.com/persist-2' },
+    ]);
+    const kept = await repos.bookmarks.findByCanonical('https://example.com/persist-2');
+    if (!kept) throw new Error('样本缺失');
+    await repos.bookmarks.update(kept.id, kept.localRevision, { note: '改过' }, 'human');
+
+    await repos.imports.undoBatch(batchId);
+    const stored = await repos.imports.getBatch(batchId);
+    expect(stored?.status).toBe('reverted');
+    expect(stored?.revertedAt).toBeTruthy();
+    expect(stored?.undoCounts).toEqual({ removed: 1, kept: 1, missing: 0 });
+    expect(stored?.undoKept).toHaveLength(1);
+    expect(stored?.undoKept[0]?.reason).toBe('modified');
+
+    // 关掉再开（模拟刷新 / 重开页），批次上的留档还在。
+    const name = db.name;
+    db.close();
+    const reopened = new ShiyeDB(name);
+    try {
+      const reopenedBatch = await reopened.importBatches.get(batchId);
+      expect(reopenedBatch?.undoCounts).toEqual({ removed: 1, kept: 1, missing: 0 });
+      expect(reopenedBatch?.undoKept).toHaveLength(1);
+    } finally {
+      reopened.close();
+      db = new ShiyeDB(`${name}-tail`);
+      repos = createRepositories(db, createBackupRepository(db));
+    }
+  });
+
+  it('已撤回的批次不能再撤一次，预览直接给出理由', async () => {
+    const { batchId } = await commitBatch('library', [
+      { title: '一次', url: 'https://example.com/once' },
+    ]);
+    await repos.imports.undoBatch(batchId);
+
+    const preview = await repos.imports.previewUndoBatch(batchId);
+    expect(preview.blockedReason).toBe('这一批已经撤销过了。');
+    expect(preview.total).toBe(0);
+    await expect(repos.imports.undoBatch(batchId)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('批次列表可按文件名搜索并分页，不再固定只给最近 20 批', async () => {
+    for (let index = 0; index < 25; index += 1) {
+      await commitBatch('library', [
+        { title: `条目 ${index}`, url: `https://example.com/list-${index}` },
+      ]);
+    }
+    const firstPage = await repos.imports.listBatches({ limit: 20 });
+    expect(firstPage.rows).toHaveLength(20);
+    expect(firstPage.total).toBe(25);
+    expect(firstPage.hasMore).toBe(true);
+
+    const secondPage = await repos.imports.listBatches({ limit: 20, offset: 20 });
+    expect(secondPage.rows).toHaveLength(5);
+    expect(secondPage.hasMore).toBe(false);
+
+    // 按文件名模糊搜索：用真实存在的那个名字，避免依赖批次序号。
+    const target = firstPage.rows[0]?.fileName ?? '';
+    const searched = await repos.imports.listBatches({ search: target });
+    expect(searched.total).toBe(1);
+    expect(searched.rows[0]?.fileName).toBe(target);
+
+    const none = await repos.imports.listBatches({ search: '不存在的文件名' });
+    expect(none.total).toBe(0);
+    expect(none.hasMore).toBe(false);
+  });
+});
+
+describe('批次字段迁移', () => {
+  it('版本 3 主库升级时给老批次补上撤回字段，且不编造撤回记录', async () => {
+    const name = `shiye-migrate-v4-${Date.now()}`;
+    const legacy = new Dexie(name);
+    legacy.version(3).stores({
+      bookmarks:
+        '&id, canonicalUrl, categoryKey, lifeState, [lifeState+unreadFlag], createdAt, lastOpenedAt, localRevision, *tagIds',
+      readingItems: '&id, canonicalUrl, status, [status+addedAt], relatedBookmarkId, localRevision',
+      categories: '&id, name',
+      tags: '&id, name',
+      settings: '&key',
+      policies: '&id',
+      tombstones: '&[entityType+id], deletedAt, canonicalUrl',
+      aiTasks: '&id, kind, state, createdAt',
+      handoffBatches: '&id, createdAt, status',
+      handoffItems: '&[batchId+n], [batchId+bookmarkId], status',
+      appliedChanges: '&id, taskId, bookmarkId, appliedAt',
+      importBatches: '&id, fileHash, status, createdAt',
+      importItems: '&[batchId+sourceKey], entityId',
+      purgeSnapshots: '&id, createdAt, entry',
+      meta: '&key',
+    });
+    await legacy.open();
+    await legacy.table('importBatches').add({
+      id: 'old-batch',
+      source: 'bookmarkHtml',
+      fileName: 'old.html',
+      fileHash: null,
+      destination: 'library',
+      status: 'applied',
+      total: 2,
+      inserted: 2,
+      skipped: 0,
+      invalid: 0,
+      createdAt: nowIso(),
+      appliedAt: nowIso(),
+      error: null,
+    });
+    legacy.close();
+
+    const upgraded = new ShiyeDB(name);
+    try {
+      await upgraded.open();
+      const row = await upgraded.importBatches.get('old-batch');
+      // 只补字段，不改状态：老批次仍然算「已写入、未撤回」。
+      expect(row?.status).toBe('applied');
+      expect(row?.revertedAt).toBeNull();
+      expect(row?.undoCounts).toBeNull();
+      expect(row?.undoKept).toEqual([]);
+    } finally {
+      upgraded.close();
+      await Dexie.delete(name);
+    }
+  });
+});

@@ -21,7 +21,10 @@ import type {
   HandoffBatchStatus,
   HandoffItem,
   ImportBatch,
+  ImportItem,
   ImportRow,
+  ImportUndoItem,
+  ImportUndoReason,
   Policy,
   PurgeCounts,
   PurgeRestorePreview,
@@ -43,7 +46,10 @@ import type {
   CreateHandoffParams,
   CreateReadingParams,
   HandoffRepository,
+  ImportBatchPage,
+  ImportBatchQuery,
   ImportRepository,
+  ImportUndoPreview,
   ImportUndoResult,
   ReadingRepository,
   Repositories,
@@ -67,6 +73,42 @@ function assertNotDeleted(bookmark: Bookmark): void {
   if (bookmark.deletedAt) {
     throw new AppError('DELETED_RECORD', '这条收藏已删除，请先在回收站恢复。');
   }
+}
+
+/** 批次列表一页最多取多少条，防止误传大数把界面拖死。 */
+const BATCH_PAGE_MAX = 200;
+
+const BATCH_STATUS_LABEL: Record<ImportBatch['status'], string> = {
+  planned: '待提交',
+  applied: '已写入',
+  failed: '失败',
+  reverted: '已撤销',
+};
+
+/** 判定一条导入记录的去向；removed 与 keep / missing 互斥。 */
+type UndoJudgement =
+  | { action: 'removeBookmark'; bookmark: Bookmark }
+  | { action: 'removeReading'; reading: ReadingItem }
+  | { action: 'keep'; item: ImportUndoItem }
+  | { action: 'missing'; item: ImportUndoItem };
+
+/** 预览与执行共用：不能撤回的批次给出同一个理由，避免两处文案不一致。 */
+function undoBlockedReason(batch: ImportBatch): string | null {
+  if (batch.status === 'reverted') return '这一批已经撤销过了。';
+  if (batch.status !== 'applied') return '这一批没有写入任何条目，不需要撤销。';
+  return null;
+}
+
+function toUndoItem(
+  row: { id: string; title: string; originalUrl: string },
+  reason: ImportUndoReason
+): ImportUndoItem {
+  return { entityId: row.id, title: row.title, originalUrl: row.originalUrl, reason };
+}
+
+/** 实体已不在库里，标题与网址都无从查起，只能如实标注，不能编造。 */
+function missingItem(entityId: string): ImportUndoItem {
+  return { entityId, title: '', originalUrl: '', reason: 'missing' };
 }
 
 function assertRevision(current: { localRevision: number }, expected: number): void {
@@ -1082,8 +1124,107 @@ export class DexieImportRepository implements ImportRepository {
     return this.db.importBatches.get(id);
   }
 
-  async listBatches(): Promise<ImportBatch[]> {
-    return this.db.importBatches.orderBy('createdAt').reverse().limit(20).toArray();
+  /**
+   * 批次历史：按文件名 / 状态搜索并分页。
+   *
+   * 以前固定只给最近 20 批，导错一次之后可能要翻很多页才找得到——用户找的是「那份文件」，
+   * 不是「最近那几批」，所以搜索比截断更重要。批次数量级本来就小，全量读进内存再切片即可。
+   */
+  async listBatches(query: ImportBatchQuery = {}): Promise<ImportBatchPage> {
+    const limit = Math.max(1, Math.min(query.limit ?? 20, BATCH_PAGE_MAX));
+    const offset = Math.max(0, query.offset ?? 0);
+    const search = (query.search ?? '').trim().toLowerCase();
+    const all = await this.db.importBatches.orderBy('createdAt').reverse().toArray();
+    const filtered = all.filter((batch) => {
+      if (query.status && batch.status !== query.status) return false;
+      if (!search) return true;
+      return (
+        batch.fileName.toLowerCase().includes(search) ||
+        `${batch.destination === 'library' ? '收藏库' : '待看'}`.includes(search) ||
+        BATCH_STATUS_LABEL[batch.status].includes(search)
+      );
+    });
+    const rows = filtered.slice(offset, offset + limit);
+    return { rows, total: filtered.length, hasMore: offset + rows.length < filtered.length };
+  }
+
+  /**
+   * 逐条判定一批导入里的每个条目该怎么处理。
+   *
+   * 预览与执行共用这一套规则，所以「预览说会删 8 条」与「实际删了 8 条」不会对不上。
+   * 判定只看当前状态，不改任何东西。
+   */
+  private async judgeBatchItems(batch: ImportBatch): Promise<{
+    items: ImportItem[];
+    judgements: UndoJudgement[];
+  }> {
+    const items = await this.db.importItems
+      .where('[batchId+sourceKey]')
+      .between([batch.id, Dexie.minKey], [batch.id, Dexie.maxKey])
+      .toArray();
+    const judgements: UndoJudgement[] = [];
+    for (const item of items) {
+      if (batch.destination === 'library') {
+        const row = await this.db.bookmarks.get(item.entityId);
+        if (!row) {
+          judgements.push({ action: 'missing', item: missingItem(item.entityId) });
+          continue;
+        }
+        if (row.deletedAt) {
+          // 先进回收站再说：撤回不替用户撤销「我要删它」这个决定。
+          judgements.push({ action: 'keep', item: toUndoItem(row, 'trashed') });
+          continue;
+        }
+        if (row.localRevision > 1) {
+          judgements.push({ action: 'keep', item: toUndoItem(row, 'modified') });
+          continue;
+        }
+        judgements.push({ action: 'removeBookmark', bookmark: row });
+        continue;
+      }
+      const row = await this.db.readingItems.get(item.entityId);
+      if (!row) {
+        judgements.push({ action: 'missing', item: missingItem(item.entityId) });
+        continue;
+      }
+      if (row.relatedBookmarkId) {
+        judgements.push({ action: 'keep', item: toUndoItem(row, 'converted') });
+        continue;
+      }
+      if (row.status === 'completed') {
+        judgements.push({ action: 'keep', item: toUndoItem(row, 'completed') });
+        continue;
+      }
+      if (row.localRevision > 1) {
+        judgements.push({ action: 'keep', item: toUndoItem(row, 'modified') });
+        continue;
+      }
+      judgements.push({ action: 'removeReading', reading: row });
+    }
+    return { items, judgements };
+  }
+
+  async previewUndoBatch(batchId: string): Promise<ImportUndoPreview> {
+    const batch = await this.db.importBatches.get(batchId);
+    if (!batch) throw new AppError('NOT_FOUND', '找不到这次导入的记录。');
+    const blockedReason = undoBlockedReason(batch);
+    if (blockedReason) {
+      return { batch, total: 0, removed: 0, kept: 0, missing: 0, items: [], blockedReason };
+    }
+    const { judgements } = await this.judgeBatchItems(batch);
+    const removed = judgements.filter(
+      (entry) => entry.action === 'removeBookmark' || entry.action === 'removeReading'
+    ).length;
+    const rest = judgements.filter((entry) => entry.action === 'keep' || entry.action === 'missing');
+    return {
+      batch,
+      total: judgements.length,
+      removed,
+      kept: rest.filter((entry) => entry.action === 'keep').length,
+      missing: rest.filter((entry) => entry.action === 'missing').length,
+      items: rest.map((entry) => (entry as { item: ImportUndoItem }).item),
+      blockedReason: null,
+    };
   }
 
   /**
@@ -1111,48 +1252,28 @@ export class DexieImportRepository implements ImportRepository {
       async () => {
         const batch = await this.db.importBatches.get(batchId);
         if (!batch) throw new AppError('NOT_FOUND', '找不到这次导入的记录。');
-        if (batch.status === 'reverted') {
-          throw new AppError('INVALID_INPUT', '这一批已经撤销过了。');
-        }
-        if (batch.status !== 'applied') {
-          throw new AppError('INVALID_INPUT', '这一批没有写入任何条目，不需要撤销。');
-        }
-        const items = await this.db.importItems
-          .where('[batchId+sourceKey]')
-          .between([batchId, Dexie.minKey], [batchId, Dexie.maxKey])
-          .toArray();
+        const blocked = undoBlockedReason(batch);
+        if (blocked) throw new AppError('INVALID_INPUT', blocked);
 
         // 先判定再删除：判定阶段只收集，删除阶段统一执行，
         // 中间才有位置写清理快照（撤销是硬删，误撤同样需要能找回）。
-        let kept = 0;
-        let missing = 0;
-        const removeBookmarks: Bookmark[] = [];
-        const removeReadings: ReadingItem[] = [];
-        for (const item of items) {
-          if (batch.destination === 'library') {
-            const row = await this.db.bookmarks.get(item.entityId);
-            if (!row) {
-              missing += 1;
-              continue;
-            }
-            if (row.localRevision > 1) {
-              kept += 1;
-              continue;
-            }
-            removeBookmarks.push(row);
-          } else {
-            const row = await this.db.readingItems.get(item.entityId);
-            if (!row) {
-              missing += 1;
-              continue;
-            }
-            if (row.localRevision > 1) {
-              kept += 1;
-              continue;
-            }
-            removeReadings.push(row);
-          }
-        }
+        // 判定结果同时决定「保留项与原因」，执行后要持久化下来，刷新仍可回看。
+        const { items, judgements } = await this.judgeBatchItems(batch);
+        const removeBookmarks = judgements
+          .filter(
+            (entry): entry is Extract<UndoJudgement, { action: 'removeBookmark' }> =>
+              entry.action === 'removeBookmark'
+          )
+          .map((entry) => entry.bookmark);
+        const removeReadings = judgements
+          .filter(
+            (entry): entry is Extract<UndoJudgement, { action: 'removeReading' }> =>
+              entry.action === 'removeReading'
+          )
+          .map((entry) => entry.reading);
+        const keptItems = judgements
+          .filter((entry) => entry.action === 'keep' || entry.action === 'missing')
+          .map((entry) => (entry as { item: ImportUndoItem }).item);
 
         const removedIds = new Set(removeBookmarks.map((row) => row.id));
         const batchTombstones = (await this.db.tombstones.toArray()).filter(
@@ -1182,14 +1303,19 @@ export class DexieImportRepository implements ImportRepository {
         await this.db.importItems.bulkDelete(
           items.map((item) => [item.batchId, item.sourceKey] as [string, string])
         );
-        const reverted: ImportBatch = { ...batch, status: 'reverted' };
-        await this.db.importBatches.put(reverted);
-        return {
-          batch: reverted,
-          removed: removeBookmarks.length + removeReadings.length,
-          kept,
-          missing,
+        // importItems 马上就要被清空，撤回结果从此只能靠批次上的这几个字段回看。
+        const removed = removeBookmarks.length + removeReadings.length;
+        const kept = keptItems.filter((entry) => entry.reason !== 'missing').length;
+        const missing = keptItems.filter((entry) => entry.reason === 'missing').length;
+        const reverted: ImportBatch = {
+          ...batch,
+          status: 'reverted',
+          revertedAt: nowIso(),
+          undoCounts: { removed, kept, missing },
+          undoKept: keptItems,
         };
+        await this.db.importBatches.put(reverted);
+        return { batch: reverted, removed, kept, missing, items: keptItems };
       }
     );
   }
@@ -1232,6 +1358,9 @@ export class DexieImportRepository implements ImportRepository {
           createdAt: now,
           appliedAt: null,
           error: null,
+          revertedAt: null,
+          undoCounts: null,
+          undoKept: [],
         };
         await this.db.importBatches.put(batch);
 

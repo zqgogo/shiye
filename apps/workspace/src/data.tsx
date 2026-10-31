@@ -9,7 +9,8 @@ import {
   type PurgeRestorePreview,
   type PurgeSnapshot,
 } from '@shiye/core';
-import { Notice, PageHeader } from './components.js';
+import type { ImportBatchPage, ImportUndoPreview, ImportUndoResult } from '@shiye/application';
+import { KeptList, Notice, PageHeader } from './components.js';
 import { useWorkspace } from './state.js';
 
 function download(name: string, text: string, mime: string): void {
@@ -57,18 +58,27 @@ export function DataPage() {
   const [safetyCopy, setSafetyCopy] = useState<{ id: string; text: string; savedAt: string } | null>(
     null
   );
-  /** 最近导入过的批次：撤销入口要靠它找回「刚刚那一次」，刷新页面也不会丢。 */
-  const [batches, setBatches] = useState<ImportBatch[] | null>(null);
+  /** 导入批次历史：支持搜索与分页，撤销入口要靠它找回「那一份文件」，而不是只给最近几批。 */
+  const [batches, setBatches] = useState<ImportBatchPage | null>(null);
+  const [batchSearch, setBatchSearch] = useState('');
+  const [batchLimit, setBatchLimit] = useState(20);
   const [snapshots, setSnapshots] = useState<PurgeSnapshot[] | null>(null);
   const [purgePreview, setPurgePreview] = useState<PurgeRestorePreview | null>(null);
   const [purgeBusy, setPurgeBusy] = useState('');
   const [undoing, setUndoing] = useState('');
-  /** 待确认撤销的批次编号：删除是不可逆的，先问一句再动手。 */
-  const [pendingUndo, setPendingUndo] = useState<string | null>(null);
+  /** 待确认的撤回：先预演，把「会删几条、留几条」直接摆在确认按钮旁边。 */
+  const [pendingUndo, setPendingUndo] = useState<ImportUndoPreview | null>(null);
+  /** 刚执行完的撤回结果：常驻在页面上，不放 toast，也不随刷新丢掉。 */
+  const [undoResult, setUndoResult] = useState<ImportUndoResult | null>(null);
 
-  const reloadBatches = async () => {
-    const rows = await service.listImportBatches().catch(() => [] as ImportBatch[]);
-    setBatches(rows);
+  const reloadBatches = async (options?: { search?: string; limit?: number }) => {
+    const search = options?.search ?? batchSearch;
+    const limit = options?.limit ?? batchLimit;
+    try {
+      setBatches(await service.listImportBatches({ search, limit }));
+    } catch {
+      setBatches({ rows: [], total: 0, hasMore: false });
+    }
   };
 
   /** 只读预览：算出这一次删掉的东西里哪些能找回、哪些会跳过或冲突。 */
@@ -235,16 +245,27 @@ export function DataPage() {
     toast('已导出发送下载，并在新标签页打开预览。');
   };
 
-  const undoBatch = async (batch: ImportBatch) => {
-    setPendingUndo(null);
+  /** 点「撤回」先预演：不写库，只把结果算出来给用户看。 */
+  const startUndo = async (batch: ImportBatch) => {
     setUndoing(batch.id);
-    const outcome = await run(() => service.undoImport(batch.id));
+    try {
+      const preview = await service.previewUndoImport(batch.id);
+      setPendingUndo(preview);
+    } catch (error) {
+      toast(toUserMessage(error), 'error');
+    } finally {
+      setUndoing('');
+    }
+  };
+
+  const undoBatch = async (preview: ImportUndoPreview) => {
+    setUndoing(preview.batch.id);
+    const outcome = await run(() => service.undoImport(preview.batch.id));
     setUndoing('');
+    setPendingUndo(null);
     if (!outcome) return;
-    const parts = [`移除 ${outcome.removed} 条`];
-    if (outcome.kept > 0) parts.push(`保留 ${outcome.kept} 条（导入后被改过）`);
-    if (outcome.missing > 0) parts.push(`${outcome.missing} 条已不在库里`);
-    toast(`已撤销「${batch.fileName}」：${parts.join('，')}。`);
+    // 结果常驻在页面上：撤回了多少、留下多少、为什么留，都要能一眼看到并回查。
+    setUndoResult(outcome);
     await reloadBatches();
   };
 
@@ -306,20 +327,75 @@ export function DataPage() {
       <div className="panel">
         <h2>最近导入</h2>
         <p>
-          导错了文件或选错了目标时，在这里整批撤回。撤销只移除这一批新建的条目；导入后被改过、
-          转成收藏或已完成的会保留并如实报数。
+          导错了文件或选错了目标时，在这里整批撤回。撤回只移除这一批新建的条目；导入后被改过、
+          转成收藏、已完成或已进回收站的会保留，并逐条说明原因。
         </p>
+
+        <div className="field">
+          <span>搜索批次</span>
+          <input
+            aria-label="搜索导入批次"
+            placeholder="按文件名搜索，例如 bookmarks.html"
+            value={batchSearch}
+            onChange={(event) => {
+              const next = event.target.value;
+              setBatchSearch(next);
+              void reloadBatches({ search: next });
+            }}
+          />
+        </div>
+
+        {undoResult ? (
+          <Notice tone="ok">
+            <strong>
+              已撤回「{undoResult.batch.fileName}」：移除 {undoResult.removed} 条，保留 {undoResult.kept} 条
+              {undoResult.missing > 0 ? `，${undoResult.missing} 条已不在库里` : ''}。
+            </strong>
+            <KeptList items={undoResult.items} />
+            <span>这份结果也存进了批次记录，刷新或关页之后仍能在下面查到。</span>
+            <button className="btn small" onClick={() => setUndoResult(null)}>
+              知道了
+            </button>
+          </Notice>
+        ) : null}
+
+        {pendingUndo ? (
+          <Notice tone="danger">
+            <strong>确认撤回「{pendingUndo.batch.fileName}」？</strong>
+            <span>
+              将移除 {pendingUndo.removed} 条，保留 {pendingUndo.kept} 条
+              {pendingUndo.missing > 0 ? `，另有 ${pendingUndo.missing} 条已不在库里` : ''}。
+            </span>
+            {pendingUndo.blockedReason ? <span>{pendingUndo.blockedReason}</span> : null}
+            <KeptList items={pendingUndo.items} />
+            <button
+              className="btn small danger"
+              disabled={Boolean(undoing)}
+              onClick={() => void undoBatch(pendingUndo)}
+            >
+              {undoing ? '撤回中…' : `确认撤回 ${pendingUndo.removed} 条`}
+            </button>
+            <button className="btn small" onClick={() => setPendingUndo(null)}>
+              取消
+            </button>
+          </Notice>
+        ) : null}
+
         {batches === null ? (
           <p className="micro">正在读取导入记录…</p>
-        ) : batches.length === 0 ? (
-          <p className="micro">还没有导入记录。从「粘贴 / 导入」页导入后，批次会出现在这里。</p>
+        ) : batches.rows.length === 0 ? (
+          <p className="micro">
+            {batchSearch
+              ? `没有文件名匹配「${batchSearch}」的导入记录。`
+              : '还没有导入记录。从「粘贴 / 导入」页导入后，批次会出现在这里。'}
+          </p>
         ) : (
           <div className="listbox">
             <div className="listhead">
               <span>批次</span>
               <span>新增 · 跳过 · 时间</span>
             </div>
-            {batches.map((batch) => (
+            {batches.rows.map((batch) => (
               <article className="bookmark" key={batch.id}>
                 <div className="favicon" aria-hidden="true">
                   {batch.destination === 'library' ? '藏' : '看'}
@@ -334,37 +410,59 @@ export function DataPage() {
                     <span>跳过 {batch.skipped} 条</span>
                     <span>·</span>
                     <span>{formatDateTime(batch.createdAt)}</span>
-                    {batch.status === 'reverted' ? <span>· 已撤销</span> : null}
+                    {batch.status === 'reverted' ? (
+                      <span>
+                        · 已撤回 {batch.revertedAt ? formatDateTime(batch.revertedAt) : ''}
+                        {batch.undoCounts
+                          ? `（移除 ${batch.undoCounts.removed} · 保留 ${batch.undoCounts.kept}${
+                              batch.undoCounts.missing > 0 ? ` · 缺失 ${batch.undoCounts.missing}` : ''
+                            }）`
+                          : ''}
+                      </span>
+                    ) : null}
                   </div>
+                  {batch.status === 'reverted' && batch.undoKept.length > 0 ? (
+                    <KeptList items={batch.undoKept} />
+                  ) : null}
                 </div>
                 <div className="rowactions">
                   {batch.status === 'applied' && batch.inserted > 0 ? (
-                    pendingUndo === batch.id ? (
-                      <>
-                        <button
-                          className="btn small danger"
-                          disabled={undoing === batch.id}
-                          onClick={() => void undoBatch(batch)}
-                        >
-                          {undoing === batch.id ? '撤销中…' : '确认撤销'}
-                        </button>
-                        <button className="btn small" onClick={() => setPendingUndo(null)}>
-                          取消
-                        </button>
-                      </>
-                    ) : (
-                      <button className="btn small" onClick={() => setPendingUndo(batch.id)}>
-                        撤销这次导入
-                      </button>
-                    )
+                    <button
+                      className="btn small"
+                      disabled={undoing === batch.id}
+                      onClick={() => void startUndo(batch)}
+                    >
+                      {undoing === batch.id ? '正在预演…' : '撤回这次导入'}
+                    </button>
                   ) : null}
                 </div>
               </article>
             ))}
           </div>
         )}
+
+        {batches && batches.total > 0 ? (
+          <div className="undolist">
+            <p className="micro">
+              共 {batches.total} 批，当前显示 {batches.rows.length} 批。
+            </p>
+            {batches.hasMore ? (
+              <button
+                className="btn small"
+                onClick={() => {
+                  const next = batchLimit + 20;
+                  setBatchLimit(next);
+                  void reloadBatches({ limit: next });
+                }}
+              >
+                再加载 20 批
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
         <p className="micro">
-          撤销会连这批条目的删除标记一起清掉，所以之后可以重新导入同一批书签；代价是撤销本身不可恢复。
+          撤回会连这批条目的删除标记一起清掉，所以之后可以重新导入同一批书签；代价是撤回本身不可恢复。
         </p>
       </div>
 

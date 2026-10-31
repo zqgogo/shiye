@@ -16,6 +16,7 @@ import type {
   ImportDestination,
   ImportRow,
   ImportSource,
+  ImportUndoItem,
   Policy,
   ReadingItem,
   Tag,
@@ -189,12 +190,53 @@ export interface ImportUndoResult {
   kept: number;
   /** 已经不在库里的条目数：用户自己删了、转了收藏，或已被别的操作清掉。 */
   missing: number;
+  /** 不会被移除的条目与原因（含已不存在），用于执行后常驻展示。 */
+  items: ImportUndoItem[];
+}
+
+/**
+ * 撤回前的只读预演。数字必须与随后真正执行的结果一致：
+ * 两次判定共用同一套规则，预览只是不写库。
+ */
+export interface ImportUndoPreview {
+  batch: ImportBatch;
+  /** 本批名下的条目总数（已撤销的批次为 0，因为 importItems 已清）。 */
+  total: number;
+  /** 将被移除的条目数。 */
+  removed: number;
+  /** 会被留下的条目数。 */
+  kept: number;
+  /** 已经不存在的条目数。 */
+  missing: number;
+  /** 不会被移除的条目与原因（含已不存在）。 */
+  items: ImportUndoItem[];
+  /** 已撤销或没有写入过内容的批次不能撤回，这里给出原因。 */
+  blockedReason: string | null;
+}
+
+export interface ImportBatchQuery {
+  /** 按文件名模糊匹配，空串表示不筛选。 */
+  search?: string;
+  /** 仅看某个状态。 */
+  status?: ImportBatch['status'];
+  limit?: number;
+  offset?: number;
+}
+
+export interface ImportBatchPage {
+  rows: ImportBatch[];
+  /** 满足筛选条件的总条数，用于「还有 N 条」提示。 */
+  total: number;
+  hasMore: boolean;
 }
 
 export interface ImportRepository {
   commit(params: CommitImportParams): Promise<CommitImportResult>;
   getBatch(id: string): Promise<ImportBatch | undefined>;
-  listBatches(): Promise<ImportBatch[]>;
+  /** 批次历史：支持按文件名搜索与分页，不再固定只给最近 20 批。 */
+  listBatches(query?: ImportBatchQuery): Promise<ImportBatchPage>;
+  /** 只读预演：不写库，给出可移除 / 会保留 / 已缺失的条目明细。 */
+  previewUndoBatch(batchId: string): Promise<ImportUndoPreview>;
   /**
    * 撤销一批导入：把这一批新建的收藏或待看删掉，回到「导入之前」。
    *
