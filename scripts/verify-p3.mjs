@@ -247,6 +247,18 @@ async function ensureCategory(page, name) {
   return id;
 }
 
+/** 读「最近清理」面板里实际渲染出来的快照行，不信任任何计数文案。 */
+function readPurgeSnapshots(page) {
+  return page.evaluate(() => {
+    const panels = [...document.querySelectorAll('.panel')];
+    const panel = panels.find((node) => (node.innerText ?? '').includes('最近清理'));
+    const rows = [...(panel?.querySelectorAll('article.bookmark') ?? [])].map((row) =>
+      (row.innerText ?? '').replace(/\s+/g, ' ').trim()
+    );
+    return { count: rows.length, rows: rows.slice(0, 3) };
+  });
+}
+
 async function createBookmark(page, { url, title }) {
   await clickIn(page, '.topbar', '收藏链接');
   await waitForSelectorReady(page, 'input[placeholder="https://"]', 10_000);
@@ -292,7 +304,8 @@ async function main() {
   report.browser.version = await attempt.browser.version();
   report.browser.headless = attempt.headless;
   report.browser.extensionId = attempt.extId;
-  const { browser } = attempt;
+  const { extId } = attempt;
+  let { browser } = attempt;
   const base = `chrome-extension://${attempt.extId}`;
   const manifest = JSON.parse(fs.readFileSync(path.join(DIST, 'manifest.json'), 'utf8'));
 
@@ -1077,6 +1090,8 @@ async function main() {
     const listedOk = await page.evaluate(() => document.body.innerText.includes('导入完成'));
 
     await goto(page, 'data', '数据在手里');
+    // 「最近导入」是异步加载的，页面标题一出现就点按钮会扑空。
+    await waitForText(page, '撤销这次导入', 15_000);
     const panelShown = await page.evaluate(() =>
       document.body.innerText.includes('最近导入')
     );
@@ -1095,14 +1110,7 @@ async function main() {
   phase('P9.4 清理快照与单次恢复', async () => {
     await goto(page, 'data', '最近清理');
     await waitForText(page, '看看能找回什么', 15_000);
-    const listed = await page.evaluate(() => {
-      const panels = [...document.querySelectorAll('.panel')];
-      const panel = panels.find((node) => (node.innerText ?? '').includes('最近清理'));
-      const rows = [...(panel?.querySelectorAll('article.bookmark') ?? [])].map((row) =>
-        (row.innerText ?? '').replace(/\s+/g, ' ').trim()
-      );
-      return { count: rows.length, rows: rows.slice(0, 3) };
-    });
+    const listed = await readPurgeSnapshots(page);
     report.counts.purgeSnapshots = listed;
     record(
       'P9.4 每次硬删除都在「最近清理」留下快照',
@@ -1146,6 +1154,33 @@ async function main() {
     );
   });
 
+  // 每份快照都得先有一次真实的硬删除才会产生，所以这里连续做六轮「新建一条 → 彻底清空」。
+  phase('P9.4 清理快照只保留最近 5 份', async () => {
+    await goto(page, 'data', '最近清理');
+    await waitForText(page, '看看能找回什么', 15_000);
+    const beforeEvict = await readPurgeSnapshots(page);
+    for (let round = 0; round < 6; round += 1) {
+      await createBookmark(page, {
+        url: `https://example.com/p9-evict-${round}`,
+        title: `第 ${round + 1} 轮清理`,
+      });
+      await goto(page, 'all', '全部收藏');
+      await clickIn(page, '.toolbar', '彻底清空…');
+      await waitForText(page, '确认彻底清空', 10_000);
+      await clickIn(page, '', '确认清空');
+      await sleep(900);
+    }
+    await goto(page, 'data', '最近清理');
+    await sleep(400);
+    const afterEvict = await readPurgeSnapshots(page);
+    report.counts.purgeEviction = { before: beforeEvict.count, after: afterEvict.count, latest: afterEvict.rows[0] ?? '' };
+    record(
+      'P9.4 清理快照只保留最近 5 份，超出时挤掉最旧的',
+      afterEvict.count === 5 && beforeEvict.count + 6 > 5,
+      `淘汰前=${beforeEvict.count} 条｜连做 6 轮后=${afterEvict.count} 条｜最新=${afterEvict.rows[0] ?? '无'}`
+    );
+  });
+
   try {
     for (const item of phases) {
       try {
@@ -1155,6 +1190,44 @@ async function main() {
       }
     }
     record('页面脚本错误检查', errors.length === 0, `errors=${JSON.stringify(errors)}`);
+
+    // ---- P9.4 关掉浏览器、用同一个 profile 重开：快照必须还在，扩展 ID 必须不变 ----
+    const beforeRestart = await readPurgeSnapshots(page).catch(() => ({ count: -1, rows: [] }));
+    try {
+      await browser.close();
+      const second = await launchBestEffort(target, profileDir, limitations);
+      browser = second.browser;
+      const reopened = await browser.newPage();
+      const reopenedErrors = [];
+      reopened.on('pageerror', (error) => reopenedErrors.push(String(error)));
+      await reopened.setViewport({ width: 1280, height: 900 });
+      await reopened.goto(`chrome-extension://${second.extId}/workspace.html#data`, {
+        waitUntil: 'domcontentloaded',
+      });
+      await waitForSelectorReady(reopened, '.brand-mark', 25_000);
+      await waitForText(reopened, '最近清理', 15_000);
+      await sleep(600);
+      const afterRestart = await readPurgeSnapshots(reopened);
+      const idStable = second.extId === extId;
+      report.counts.purgeAfterRestart = {
+        before: beforeRestart.count,
+        after: afterRestart.count,
+        extensionIdStable: idStable,
+      };
+      record(
+        'P9.4 关掉浏览器重开后「最近清理」仍在，扩展 ID 不变',
+        beforeRestart.count > 0 &&
+          afterRestart.count === beforeRestart.count &&
+          idStable &&
+          reopenedErrors.length === 0,
+        `重启前=${beforeRestart.count} 条｜重启后=${afterRestart.count} 条｜扩展 ID ${
+          idStable ? '不变' : `变了（${extId}→${second.extId}）`
+        }｜errors=${reopenedErrors.length}`
+      );
+      await reopened.close();
+    } catch (error) {
+      record('P9.4 关掉浏览器重开后「最近清理」仍在，扩展 ID 不变', false, errorText(error));
+    }
   } finally {
     await browser.close().catch(() => {});
   }

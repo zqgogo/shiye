@@ -602,3 +602,39 @@ describe('清理快照与单次恢复', () => {
     expect(await repos.reading.listPending()).toHaveLength(2);
   });
 });
+
+describe('清理快照与本机安全网', () => {
+  it('替换恢复不会清掉清理快照', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/safety-1', title: '安全网 1' });
+    await repos.bookmarks.purgeAll();
+    const [snapshot] = await repos.purge.list();
+    if (!snapshot) throw new Error('应当留下清理快照');
+    expect(await repos.purge.list()).toHaveLength(1);
+
+    const document = await repos.backup.exportDocument({ includeLocalOnly: true });
+    await repos.backup.restore(document, 'replace');
+
+    // 替换恢复会清空收藏、待看、分类等表——但清理快照是本机安全网，不能被连带清掉。
+    expect(await db.bookmarks.count()).toBe(0);
+    const survived = await repos.purge.list();
+    expect(survived).toHaveLength(1);
+    expect(survived[0]?.id).toBe(snapshot.id);
+    expect(survived[0]?.counts.bookmarks).toBe(1);
+  });
+
+  it('替换恢复后仍能找回清理前的条目', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/safety-2', title: '安全网 2' });
+    await repos.bookmarks.purgeAll();
+    const [snapshot] = await repos.purge.list();
+    if (!snapshot) throw new Error('应当留下清理快照');
+
+    const document = await repos.backup.exportDocument({ includeLocalOnly: true });
+    await repos.backup.restore(document, 'replace');
+    expect(await db.bookmarks.count()).toBe(0);
+
+    const outcome = await repos.purge.restore(snapshot.id);
+    expect(outcome.restored).toBe(1);
+    const titles = (await db.bookmarks.toArray()).map((row) => row.title);
+    expect(titles).toEqual(['安全网 2']);
+  });
+});
