@@ -12,7 +12,7 @@
     "dev": "vite --config apps/extension/vite.config.ts",
     "build": "vite build --config apps/extension/vite.config.ts && vite build --config apps/extension/vite.sw.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "node --max-old-space-size=768 node_modules/vitest/vitest.mjs run",
     "test:watch": "vitest",
     "verify": "npm run typecheck && npm run test && npm run build",
     "verify:browser": "node scripts/verify-p0.mjs",
@@ -24,7 +24,8 @@
     "verify:p4": "node scripts/verify-p4.mjs",
     "verify:p5": "node scripts/verify-p5.mjs",
     "verify:p6": "node scripts/verify-p6.mjs",
-    "verify:a11y": "node scripts/verify-a11y.mjs"
+    "verify:a11y": "node scripts/verify-a11y.mjs",
+    "test:lowmem": "node --max-old-space-size=384 --max-semi-space-size=2 node_modules/vitest/vitest.mjs run"
   },
   "dependencies": {
     "dexie": "4.0.11",
