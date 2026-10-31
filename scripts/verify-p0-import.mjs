@@ -140,9 +140,23 @@ async function main() {
       return el?.innerText ?? '';
     });
     report.counts.statsTextBeforeSwitch = statsText.replace(/\s+/g, ' ').trim();
-    record('默认目标为待看', /将写入 \d+ 条到待看/.test(statsText), report.counts.statsTextBeforeSwitch);
+    // 导入收藏夹的默认目标是收藏库（原先一律进待看，已按使用反馈改掉）。
+    record(
+      '默认目标为收藏库',
+      /将写入 \d+ 条到收藏库/.test(statsText),
+      report.counts.statsTextBeforeSwitch
+    );
 
-    // 书签导入应进收藏库：切换目标后重新去重并重置勾选。
+    // 切到待看再切回收藏库：确认切换目标会重新去重并重算统计。
+    await page.select('select[aria-label="保存目标"]', 'reading');
+    await waitForText(page, '条到待看', 20_000);
+    const statsReading = await page.evaluate(() => {
+      const el = [...document.querySelectorAll('.batchbar span')][0];
+      return el?.innerText ?? '';
+    });
+    report.counts.statsTextReading = statsReading.replace(/\s+/g, ' ').trim();
+    record('切换到待看后重新统计', /将写入 \d+ 条到待看/.test(statsReading), report.counts.statsTextReading);
+
     await page.select('select[aria-label="保存目标"]', 'library');
     await waitForText(page, '条到收藏库', 20_000);
     const statsLibrary = await page.evaluate(() => {
