@@ -89,6 +89,6 @@ docs/                    进度规划、安装说明、技术决定、未解决�
 - 右键菜单真实点击、正常页面划词读取、读屏播报尚未实测。
 - 没有自动备份；数据只在一个浏览器 profile 内共享，两个 profile 之间不同步。
 - 验证记录里的未验证项一律标注「未验证」，不当作通过。
-- **内存紧张的机器上跑验证**：`npm test` 已把 V8 老生代限制在 768 MB（`--max-old-space-size=768`），进一步吃紧时用 `npm run test:lowmem`（384 MB 堆 + 小 semi-space）。浏览器回归一次只跑一套，不要把 `build` 与验证串成一条命令；本机曾因 Windows 提交量打满（19.3 / 19.7 GB）导致进程被系统终止，表现为「闪退」而非用例失败。详见 [docs/ROADMAP.md](docs/ROADMAP.md) 的 2026-10-31 记录。
+- **内存紧张的机器上跑验证**：`npm test` 已把 V8 老生代限制在 768 MB（`--max-old-space-size=768`），进一步吃紧时用 `npm run test:lowmem`（384 MB 堆 + 小 semi-space）。浏览器回归一次只跑一套，不要把 `build` 与验证串成一条命令。若 Windows 提交量打满，进程会被系统终止，表现为「闪退」或 `Fatal process out of memory: Zone` 而非用例失败；常见原因是 `PagefileOnOsVolume` 这个注册表值把分页文件锁在系统盘（详见 [docs/ROADMAP.md](docs/ROADMAP.md) 的 2026-10-31 记录）。
 
 未解决的问题、数据风险与下一步见 [docs/open-issues.md](docs/open-issues.md)，验收清单的逐项对照见 [docs/verification/delivery-acceptance.md](docs/verification/delivery-acceptance.md)。
