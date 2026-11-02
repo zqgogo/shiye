@@ -199,7 +199,8 @@ export interface ImportItem {
  * 「查看本批」里每条记录的当前状态。
  *
  * 判定顺序与撤回保持一致：先看它还在不在，再看它变成了什么，最后才是「有没有被改过」。
- * 只有 untouched 能被批量清理，其余一律按「已加工」保留并说明原因。
+ * 状态只描述现状，不等同于「能不能清」：能不能清取决于用户选的是哪个动作，
+ * 见 `isBatchCleanupActionable()`。撤回始终把已加工的条目留下，主动清理则允许明确指定。
  */
 export type BatchEntryState = 'untouched' | 'modified' | 'trashed' | 'converted' | 'completed' | 'missing';
 
@@ -234,6 +235,11 @@ export interface BatchCleanupCriteria {
   folders: string[];
   sites: string[];
   states: BatchEntryState[];
+  /**
+   * 动作必须和筛选一起给出：它决定候选集合（彻底删除也收已在回收站里的记录），
+   * 所以不能等确认时才选，否则「预览 30 条、实删 33 条」。
+   */
+  mode: BatchCleanupMode;
 }
 
 /**
@@ -241,25 +247,30 @@ export interface BatchCleanupCriteria {
  *
  * 预览时把「哪些 id、当时的版本是多少」一起冻住，执行只认这份清单：
  * 预览之后新增的命中不会因为「条件还成立」被悄悄卷进来，改动过的条目也会因版本不符被跳过。
+ * `mode` 一并冻住，确认阶段不能换成另一个动作来沿用这份范围。
  */
 export interface BatchCleanupToken {
   batchId: Id;
+  mode: BatchCleanupMode;
   frozenAt: ISODateTime;
   /** 写进清理快照的范围描述，例如「批次：bookmarks.html · 目录：工作」。 */
   label: string;
-  items: { entityId: Id; localRevision: number }[];
+  items: { entityId: Id; localRevision: number; state: BatchEntryState }[];
 }
 
 export interface BatchCleanupPreview {
   batch: ImportBatch;
+  mode: BatchCleanupMode;
   total: number;
   /** 命中筛选条件的条数（全部状态）。 */
   matched: number;
-  /** 其中可以处理的条数（未改动、未删除），也就是本次冻结的范围。 */
+  /** 其中这个动作能处理的条数，也就是本次冻结的范围。 */
   actionable: number;
-  /** 命中但不能处理（已加工或已删除）的条数。 */
+  /** 命中但这个动作不处理的条数。 */
   protectedCount: number;
   byState: Record<BatchEntryState, number>;
+  /** 本次会处理的条目按状态分布，用来如实说明「其中 N 条改过」。 */
+  actionableByState: Record<BatchEntryState, number>;
   /** 前若干条明细，供界面展示「处理的是哪些」。 */
   sample: BatchEntryRow[];
   token: BatchCleanupToken;

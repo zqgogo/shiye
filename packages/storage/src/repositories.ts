@@ -15,7 +15,6 @@ import type {
   AISuggestionPatch,
   AppliedChange,
   BatchCleanupCriteria,
-  BatchCleanupMode,
   BatchCleanupPreview,
   BatchCleanupResult,
   BatchCleanupToken,
@@ -1152,9 +1151,9 @@ export class DexieImportRepository implements ImportRepository {
     return previewBatchView(this.db, criteria);
   }
 
-  /** 执行批量清理：只认冻结清单，事务内复核，硬删除先写清理快照。 */
-  async cleanupBatch(token: BatchCleanupToken, mode: BatchCleanupMode): Promise<BatchCleanupResult> {
-    return runBatchCleanup(this.db, token, mode, this.hooks);
+  /** 执行批量清理：只认冻结清单（含冻住的动作），事务内复核，硬删除先写清理快照。 */
+  async cleanupBatch(token: BatchCleanupToken): Promise<BatchCleanupResult> {
+    return runBatchCleanup(this.db, token, this.hooks);
   }
 
   /**

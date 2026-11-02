@@ -4,7 +4,6 @@ import type {
   AppliedChange,
   BackupDocument,
   BatchCleanupCriteria,
-  BatchCleanupMode,
   BatchCleanupPreview,
   BatchCleanupResult,
   BatchCleanupToken,
@@ -264,16 +263,17 @@ export interface ImportRepository {
   listBatchEntries(batchId: string): Promise<BatchEntryView>;
 
   /**
-   * 预览「处理全部匹配」：命中数按筛选条件算，处理范围只冻结其中未改动的记录并记下版本。
-   * 冻结之后新增或改动的条目不会因为「条件还成立」被卷进这次处理。
+   * 预览「处理全部匹配」：命中数按筛选条件算，可处理数按动作判定并冻结其 id、版本与现状。
+   * 动作是条件的一部分（彻底删除也收回收站里的记录），所以在这里就定；冻结之后新增、
+   * 改性状态或再被改动的条目不会因为「条件还成立」被卷进这次处理。
    */
   previewBatchCleanup(criteria: BatchCleanupCriteria): Promise<BatchCleanupPreview>;
 
   /**
-   * 执行批量清理：只处理冻结清单，事务内复核，并发的改动会被跳过并报原因。
-   * 收藏默认进回收站；彻底删除与待看删除先写本机清理快照，写不进去就一条都不删。
+   * 执行批量清理：动作随令牌一起冻住，只处理冻结清单，事务内复核，并发的改动会被跳过并报原因。
+   * 收藏默认进回收站；彻底删除（含已在回收站里的）与待看删除先写本机清理快照，写不进去就一条都不删。
    */
-  cleanupBatch(token: BatchCleanupToken, mode: BatchCleanupMode): Promise<BatchCleanupResult>;
+  cleanupBatch(token: BatchCleanupToken): Promise<BatchCleanupResult>;
 }
 
 export interface CreateHandoffParams {

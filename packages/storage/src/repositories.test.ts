@@ -975,6 +975,7 @@ describe('查看本批与处理全部匹配', () => {
       folders: ['工作'],
       sites: [],
       states: [],
+      mode: 'trash',
     });
     expect(preview.total).toBe(5);
     expect(preview.matched).toBe(3);
@@ -982,7 +983,7 @@ describe('查看本批与处理全部匹配', () => {
     expect(preview.protectedCount).toBe(0);
     expect(preview.token.items).toHaveLength(3);
 
-    const outcome = await repos.imports.cleanupBatch(preview.token, 'trash');
+    const outcome = await repos.imports.cleanupBatch(preview.token);
     expect(outcome.removed).toBe(3);
     expect(outcome.skipped).toHaveLength(0);
     // 只进回收站：不产生清理快照，回收站本身就能撤销。
@@ -1007,8 +1008,9 @@ describe('查看本批与处理全部匹配', () => {
       folders: ['旧项目'],
       sites: [],
       states: [],
+      mode: 'delete',
     });
-    const outcome = await repos.imports.cleanupBatch(preview.token, 'delete');
+    const outcome = await repos.imports.cleanupBatch(preview.token);
     expect(outcome.removed).toBe(1);
     expect(outcome.snapshotId).toBeTruthy();
     expect(await db.bookmarks.count()).toBe(1);
@@ -1036,6 +1038,7 @@ describe('查看本批与处理全部匹配', () => {
       folders: ['待清'],
       sites: [],
       states: [],
+      mode: 'trash',
     });
     expect(preview.actionable).toBe(3);
 
@@ -1044,7 +1047,7 @@ describe('查看本批与处理全部匹配', () => {
     if (!changed) throw new Error('样本缺失');
     await repos.bookmarks.update(changed.id, changed.localRevision, { note: '确认前改的' }, 'human');
 
-    const outcome = await repos.imports.cleanupBatch(preview.token, 'trash');
+    const outcome = await repos.imports.cleanupBatch(preview.token);
     expect(outcome.removed).toBe(2);
     expect(outcome.skipped).toHaveLength(1);
     expect(outcome.skipped[0]?.reason).toContain('预览后被修改');
@@ -1062,8 +1065,9 @@ describe('查看本批与处理全部匹配', () => {
       folders: [],
       sites: [],
       states: [],
+      mode: 'trash',
     });
-    const outcome = await repos.imports.cleanupBatch(preview.token, 'trash');
+    const outcome = await repos.imports.cleanupBatch(preview.token);
     expect(outcome.removed).toBe(2);
     expect(outcome.snapshotId).toBeTruthy();
     expect(await repos.reading.listPending()).toHaveLength(0);
@@ -1072,6 +1076,158 @@ describe('查看本批与处理全部匹配', () => {
     const restored = await repos.purge.restore(snapshot!.id);
     expect(restored.restored).toBe(2);
     expect(await repos.reading.listPending()).toHaveLength(2);
+  });
+
+  it('已改动的记录在明确筛选后可以清理，不再当成永久豁免', async () => {
+    const { batchId } = await commitFolderBatch('library', [
+      { title: '原样', url: 'https://edit.example.com/1', folder: '整理过' },
+      { title: '改过标题', url: 'https://edit.example.com/2', folder: '整理过' },
+    ]);
+    const edited = await repos.bookmarks.findByCanonical('https://edit.example.com/2');
+    if (!edited) throw new Error('样本缺失');
+    await repos.bookmarks.update(edited.id, edited.localRevision, { title: '我改过的标题' }, 'human');
+
+    // 默认只看未改动：撤回的保护口径不变，改过的不会因为条件为空被顺手带走。
+    const untouchedOnly = await repos.imports.previewBatchCleanup({
+      batchId,
+      folders: [],
+      sites: [],
+      states: ['untouched'],
+      mode: 'trash',
+    });
+    expect(untouchedOnly.matched).toBe(1);
+    expect(untouchedOnly.actionable).toBe(1);
+
+    // 明确筛「已改动」，就是用户要清这一类：允许处理，并如实给出已加工条数。
+    const preview = await repos.imports.previewBatchCleanup({
+      batchId,
+      folders: [],
+      sites: [],
+      states: ['modified'],
+      mode: 'trash',
+    });
+    expect(preview.matched).toBe(1);
+    expect(preview.actionable).toBe(1);
+    expect(preview.actionableByState.modified).toBe(1);
+    expect(preview.token.items[0]?.state).toBe('modified');
+
+    const outcome = await repos.imports.cleanupBatch(preview.token);
+    expect(outcome.removed).toBe(1);
+    expect((await db.bookmarks.get(edited.id))?.deletedAt).toBeTruthy();
+  });
+
+  it('回收站里的本批记录可以按批彻底删除，之后同一网址能重新导入', async () => {
+    const { batchId } = await commitFolderBatch('library', [
+      { title: '先放进回收站', url: 'https://trashbin.example.com/1', folder: '旧项目' },
+    ]);
+    const row = await repos.bookmarks.findByCanonical('https://trashbin.example.com/1');
+    if (!row) throw new Error('样本缺失');
+    await repos.bookmarks.softDelete(row.id);
+
+    // 移入回收站这个动作碰不到它：已经在了，没有「移入」可言，界面上要能说清而不是静默 0 条。
+    const asTrash = await repos.imports.previewBatchCleanup({
+      batchId,
+      folders: [],
+      sites: [],
+      states: ['trashed'],
+      mode: 'trash',
+    });
+    expect(asTrash.matched).toBe(1);
+    expect(asTrash.actionable).toBe(0);
+    expect(asTrash.byState.trashed).toBe(1);
+
+    const preview = await repos.imports.previewBatchCleanup({
+      batchId,
+      folders: [],
+      sites: [],
+      states: ['trashed'],
+      mode: 'delete',
+    });
+    expect(preview.actionable).toBe(1);
+    expect(preview.actionableByState.trashed).toBe(1);
+    // 快照范围要写明这次动了回收站里的记录，事后才分得清删的是哪一段。
+    expect(preview.token.label).toContain('含回收站 1 条');
+
+    const outcome = await repos.imports.cleanupBatch(preview.token);
+    expect(outcome.removed).toBe(1);
+    expect(outcome.snapshotId).toBeTruthy();
+    expect(await db.bookmarks.get(row.id)).toBeUndefined();
+    // 墓碑一起清掉，重导才不会被自己的删除标记挡住——这正是「彻底删除并重导」的意义。
+    const left = (await db.tombstones.toArray()).filter(
+      (entry) => entry.entityType === 'bookmark' && entry.id === row.id
+    );
+    expect(left).toHaveLength(0);
+
+    const again = await commitFolderBatch('library', [
+      { title: '重新导入', url: 'https://trashbin.example.com/1', folder: '旧项目' },
+    ]);
+    expect(again.createdIds).toHaveLength(1);
+  });
+
+  it('从清理快照恢复后记录变成「已改动」，仍可再明确清理一次', async () => {
+    const { batchId } = await commitFolderBatch('library', [
+      { title: '来回一次', url: 'https://roundtrip.example.com/1', folder: '实验' },
+    ]);
+    const preview = await repos.imports.previewBatchCleanup({
+      batchId,
+      folders: [],
+      sites: [],
+      states: [],
+      mode: 'delete',
+    });
+    await repos.imports.cleanupBatch(preview.token);
+    const [snapshot] = await repos.purge.list();
+    await repos.purge.restore(snapshot!.id);
+
+    // 恢复会把版本推到清理前之上，因此它不再是 untouched——但用户可以明确清掉它。
+    const view = await repos.imports.listBatchEntries(batchId);
+    expect(view.rows[0]?.state).toBe('modified');
+    const again = await repos.imports.previewBatchCleanup({
+      batchId,
+      folders: [],
+      sites: [],
+      states: ['modified'],
+      mode: 'delete',
+    });
+    expect(again.actionable).toBe(1);
+    const outcome = await repos.imports.cleanupBatch(again.token);
+    expect(outcome.removed).toBe(1);
+  });
+
+  it('待看：已改动可以移除，已转收藏与已完成仍不在这里动', async () => {
+    const { batchId, createdIds } = await commitFolderBatch('reading', [
+      { title: '改过', url: 'https://read2.example.com/1', folder: '' },
+      { title: '已转', url: 'https://read2.example.com/2', folder: '' },
+      { title: '完成', url: 'https://read2.example.com/3', folder: '' },
+    ]);
+    const [editedId, convertedId, completedId] = createdIds;
+    if (!editedId || !convertedId || !completedId) throw new Error('样本缺失');
+
+    // 完成再恢复：状态的来回让它成为「已改动」。
+    await repos.reading.complete(editedId);
+    await repos.reading.reopen(editedId);
+    const converted = await repos.reading.get(convertedId);
+    if (!converted) throw new Error('样本缺失');
+    await repos.reading.convertToBookmark(convertedId, converted.localRevision, {});
+    await repos.reading.complete(completedId);
+
+    const preview = await repos.imports.previewBatchCleanup({
+      batchId,
+      folders: [],
+      sites: [],
+      states: [],
+      mode: 'delete',
+    });
+    expect(preview.matched).toBe(3);
+    expect(preview.actionable).toBe(1);
+    expect(preview.actionableByState.modified).toBe(1);
+    expect(preview.byState).toMatchObject({ converted: 1, completed: 1 });
+
+    const outcome = await repos.imports.cleanupBatch(preview.token);
+    expect(outcome.removed).toBe(1);
+    // 删待看不牵动已经转出来的收藏。
+    expect(await repos.bookmarks.listActive()).toHaveLength(1);
+    expect((await repos.reading.get(completedId))?.status).toBe('completed');
   });
 
   it('撤回后查看本批给出说明，不假装还能查到原批次', async () => {
@@ -1084,7 +1240,7 @@ describe('查看本批与处理全部匹配', () => {
     expect(view.total).toBe(0);
     expect(view.note).toContain('编号映射已清空');
     await expect(
-      repos.imports.previewBatchCleanup({ batchId, folders: [], sites: [], states: [] })
+      repos.imports.previewBatchCleanup({ batchId, folders: [], sites: [], states: [], mode: 'trash' })
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 });

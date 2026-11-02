@@ -345,7 +345,9 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
             {purge.note ? `${purge.note} ` : ''}
             删除标记会一起清掉，之后可以重新导入同一批书签。
           </span>
-          <span>不可恢复。想留后路请先到「数据与备份」导出完整 JSON。</span>
+          <span>
+            本机「最近清理」会留一份快照，可以按次找回（只留最近 5 份、仅本机）；想长期留后路，请先到「数据与备份」导出完整 JSON。
+          </span>
           <button
             className="btn small danger"
             onClick={async () => {
@@ -551,7 +553,9 @@ export function ReadingPage() {
         <Notice tone="danger">
           <strong>确认清空待看的 {pending.length} 条？</strong>
           <span>只清空待看队列，不影响任何收藏；完成历史单独清理。</span>
-          <span>待看没有回收站，清空后不可恢复。</span>
+          <span>
+            待看没有回收站，清空即彻底删除；本机「最近清理」会留一份快照，可按次找回（只留最近 5 份、仅本机）。
+          </span>
           <button
             className="btn small danger"
             onClick={async () => {

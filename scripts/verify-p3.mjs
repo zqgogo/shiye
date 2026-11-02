@@ -1291,8 +1291,8 @@ async function main() {
     });
     record(
       'P9.2 按站点筛选后命中数与可处理数同步收敛',
-      /匹配 30 条，当前显示 30 条/.test(siteFiltered) && /30 条可处理/.test(siteFiltered),
-      siteFiltered.slice(0, 140)
+      /匹配 30 条，当前显示 30 条/.test(siteFiltered) && /可移入回收站 30 条/.test(siteFiltered),
+      siteFiltered.slice(0, 160)
     );
 
     const before = await page.evaluate(readMainLibrary);
@@ -1392,6 +1392,182 @@ async function main() {
       'P9.2 清理后可按次找回这 30 条，回收站里的不被动',
       /可找回 30 条/.test(restorePreview) && activeAfterRestore === activeAfterDelete + 30,
       `在库 ${activeAfterDelete}→${activeAfterRestore}｜${restorePreview.slice(0, 100)}`
+    );
+  });
+
+  phase('P9.2b 已改动与回收站记录的按批处理', async () => {
+    // 三条同一站点：一条改过、两条原样。验证两件事——
+    // ① 明确筛「已改动」后能主动清理，不再被当成永久豁免；
+    // ② 「先移入回收站看看，确定不要了再按本批彻底删除并重导」这条路走得通。
+    await goto(page, 'capture', '一次收下多个链接');
+    await setReactInput(
+      page,
+      'textarea[aria-label="粘贴链接"]',
+      ['https://mod.example.com/item-1', 'https://mod.example.com/item-2', 'https://mod.example.com/item-3'].join(
+        '\n'
+      )
+    );
+    await clickIn(page, '.panel', '预览链接 →');
+    await waitPreview(page);
+    await page.select('select[aria-label="保存目标"]', 'library');
+    await sleep(700);
+    await clickIn(page, '.batchbar', '确认写入');
+    await waitForText(page, '导入完成', 40_000);
+    await sleep(800);
+
+    // 在打开批次明细之前改一条：明细才会如实反映「已改动」。
+    const edited = await page.evaluate(async () => {
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('shiye');
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(request.result);
+      });
+      const all = await new Promise((resolve, reject) => {
+        const tx = db.transaction('bookmarks', 'readonly');
+        const request = tx.objectStore('bookmarks').getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const row = all.find((entry) => entry.originalUrl === 'https://mod.example.com/item-2');
+      if (!row) return null;
+      row.localRevision += 1;
+      row.revision += 1;
+      row.title = '我改过的标题';
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction('bookmarks', 'readwrite');
+        tx.objectStore('bookmarks').put(row);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+      db.close();
+      return row.id;
+    });
+    if (!edited) throw new Error('没找到用于「已改动」的样本');
+
+    await goto(page, 'data', '数据在手里');
+    await waitForText(page, '查看本批', 20_000);
+
+    const undoCopyText = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' '));
+    record(
+      'P9.2b 撤回说明改为可从最近清理快照找回',
+      /按次从本机快照恢复/.test(undoCopyText) && !/撤回本身不可恢复/.test(undoCopyText),
+      /按次从本机快照恢复/.test(undoCopyText) ? '已写明可按次找回' : '仍写着不可恢复'
+    );
+
+    await clickIn(page, '', '查看本批');
+    await waitForText(page, '本批明细', 20_000);
+    await sleep(500);
+
+    const detailText = () =>
+      page.evaluate(() => {
+        const notice = [...document.querySelectorAll('.notice')].find((node) =>
+          (node.innerText ?? '').includes('本批明细')
+        );
+        return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
+      });
+
+    const allStates = await detailText();
+    record(
+      'P9.2b 默认只看未改动：三条里只列出没动过的两条',
+      /匹配 2 条/.test(allStates) && !/其中已改动/.test(allStates),
+      allStates.slice(0, 180)
+    );
+
+    await page.select('select[aria-label="本批状态"]', 'all');
+    await sleep(400);
+    const everyState = await detailText();
+    record(
+      'P9.2b 切到全部状态后标出「已改动 1 条」，并给出两种动作各自的可处理数',
+      /匹配 3 条/.test(everyState) &&
+        /可移入回收站 3 条/.test(everyState) &&
+        /可彻底删除 3 条/.test(everyState) &&
+        /其中已改动 1 条/.test(everyState),
+      everyState.slice(0, 190)
+    );
+
+    await page.select('select[aria-label="本批状态"]', 'modified');
+    await sleep(400);
+    const modifiedOnly = await detailText();
+    record(
+      'P9.2b 明确筛「已改动」后可以处理，不再是永久豁免',
+      /匹配 1 条/.test(modifiedOnly) && /可移入回收站 1 条/.test(modifiedOnly),
+      modifiedOnly.slice(0, 180)
+    );
+
+    await clickIn(page, '', '移入回收站 1 条');
+    await waitForText(page, '确认处理 1 条', 15_000);
+    const confirmCopy = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('确认处理')
+      );
+      return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    });
+    record(
+      'P9.2b 确认框写明「导入后改过，会按当前内容一起处理」',
+      /导入后改过，会按当前内容一起处理/.test(confirmCopy),
+      confirmCopy.slice(0, 190)
+    );
+    await clickIn(page, '', '确认处理 1 条');
+    await waitForText(page, '已处理 1 条', 20_000);
+    await sleep(900);
+
+    await page.select('select[aria-label="本批状态"]', 'trashed');
+    await sleep(500);
+    const trashedOnly = await detailText();
+    const trashButtonDisabled = await page.evaluate(() => {
+      const button = [...document.querySelectorAll('button')].find((node) =>
+        (node.textContent ?? '').includes('移入回收站')
+      );
+      return button ? button.disabled : null;
+    });
+    record(
+      'P9.2b 回收站记录只能彻底删除：移入按钮禁用，彻底删除可处理 1 条',
+      /可移入回收站 0 条/.test(trashedOnly) &&
+        /可彻底删除 1 条/.test(trashedOnly) &&
+        trashButtonDisabled === true,
+      `${trashedOnly.slice(0, 150)}｜移入按钮禁用=${trashButtonDisabled}`
+    );
+
+    await clickIn(page, '', '彻底删除 1 条');
+    await waitForText(page, '确认处理 1 条', 15_000);
+    const deleteCopy = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('确认处理')
+      );
+      return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    });
+    record(
+      'P9.2b 彻底删除的确认框点明包含回收站里的记录',
+      /含 1 条已在回收站里的/.test(deleteCopy),
+      deleteCopy.slice(0, 200)
+    );
+    await clickIn(page, '', '确认处理 1 条');
+    await waitForText(page, '已处理 1 条', 20_000);
+    await sleep(1000);
+
+    const afterHard = await page.evaluate(readMainLibrary);
+    const stillThere = afterHard.bookmarks.some(
+      (row) => row.originalUrl === 'https://mod.example.com/item-2'
+    );
+    record('P9.2b 彻底删除后记录连删除标记一起消失', !stillThere, `仍在库=${stillThere}`);
+
+    // 墓碑没了，同一网址重导才不会被自己的删除标记挡住——这是「彻底删除并重导」的落点。
+    await goto(page, 'capture', '一次收下多个链接');
+    await setReactInput(page, 'textarea[aria-label="粘贴链接"]', 'https://mod.example.com/item-2');
+    await clickIn(page, '.panel', '预览链接 →');
+    await waitPreview(page);
+    const restat = await page.evaluate(() =>
+      Object.fromEntries(
+        [...document.querySelectorAll('.stat')].map((node) => [
+          (node.querySelector('span')?.textContent ?? '').trim(),
+          (node.querySelector('strong')?.textContent ?? '').trim(),
+        ])
+      )
+    );
+    record(
+      'P9.2b 彻底删除后同一网址重新导入被判为可新增',
+      restat['可新增'] === '1' && restat['重复'] === '0',
+      `可新增=${restat['可新增']} 重复=${restat['重复']}`
     );
   });
 

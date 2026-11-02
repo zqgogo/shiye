@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   backupFileName,
   formatDateTime,
+  isBatchCleanupActionable,
   parseBackup,
   toUserMessage,
   type BackupDocument,
@@ -18,7 +19,8 @@ import type { ImportBatchPage, ImportUndoPreview, ImportUndoResult } from '@shiy
 import { KeptList, Notice, PageHeader } from './components.js';
 import { useWorkspace } from './state.js';
 
-function download(name: string, text: string, mime: string): void {  const blob = new Blob([text], { type: mime });
+function download(name: string, text: string, mime: string): void {
+  const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
@@ -41,6 +43,19 @@ const BATCH_STATE_LABEL: Record<BatchEntryState, string> = {
 
 /** 下拉里表示「没有原始目录」的那一项：空串已经被「全部目录」占了。 */
 const NO_FOLDER = '__none__';
+
+/** 一条都处理不了时说清是哪一种情况，而不是笼统地让人以为条件选错了。 */
+function emptyCleanupHint(preview: BatchCleanupPreview): string {
+  if (preview.matched === 0) return '当前筛选没有命中任何记录。';
+  if (preview.mode === 'trash' && preview.byState.trashed === preview.matched) {
+    return `匹配的 ${preview.byState.trashed} 条都在回收站里。要彻底删除并重新导入，请用「彻底删除」。`;
+  }
+  if (preview.byState.missing === preview.matched) return '匹配的记录都已经不在库里了，没有可删的东西。';
+  if (preview.batch.destination === 'reading') {
+    return '这些待看已经转成收藏或已完成，不在这个入口处理；转成收藏的请到收藏侧清理。';
+  }
+  return '这些记录不在这个动作的处理范围里。';
+}
 
 export function DataPage() {
   const { data, service, run, reload, toast } = useWorkspace();
@@ -324,7 +339,7 @@ export function DataPage() {
     }
   };
 
-  /** 先冻结范围再确认：数字来自这次预览，不用界面里可能过期的列表估。 */
+  /** 先按动作冻结范围再确认：数字来自这次预览，不用界面里可能过期的列表估。 */
   const startCleanup = async (mode: BatchCleanupMode) => {
     if (!detail) return;
     setCleanupBusy(mode);
@@ -335,9 +350,10 @@ export function DataPage() {
         folders: folderFilter ? [folderFilter === NO_FOLDER ? '' : folderFilter] : [],
         sites: siteFilter ? [siteFilter] : [],
         states: stateFilter === 'all' ? [] : [stateFilter],
+        mode,
       });
       if (preview.actionable === 0) {
-        toast('匹配到的记录都已加工或已删除，没有可处理的条目。', 'error');
+        toast(emptyCleanupHint(preview), 'error');
         return;
       }
       setCleanupPreview(preview);
@@ -350,10 +366,10 @@ export function DataPage() {
   };
 
   const runCleanup = async () => {
-    if (!cleanupPreview || !cleanupMode) return;
+    if (!cleanupPreview) return;
     const batchId = cleanupPreview.batch.id;
-    setCleanupBusy(cleanupMode);
-    const outcome = await run(() => service.cleanupBatch(cleanupPreview.token, cleanupMode));
+    setCleanupBusy(cleanupPreview.mode);
+    const outcome = await run(() => service.cleanupBatch(cleanupPreview.token));
     setCleanupBusy('');
     if (!outcome) return;
     setCleanupResult(outcome);
@@ -376,9 +392,18 @@ export function DataPage() {
           (stateFilter === 'all' || row.state === stateFilter)
       )
     : [];
-  const actionableRows = detailRows.filter((row) => row.state === 'untouched');
+  // 计数必须和仓库用同一个判定：界面写 30 条、实际处理 33 条，是这类功能最典型的翻车方式。
+  const destination = detail?.batch.destination ?? 'library';
+  const trashableRows = detailRows.filter((row) =>
+    isBatchCleanupActionable(row.state, destination, 'trash')
+  );
+  const deletableRows = detailRows.filter((row) =>
+    isBatchCleanupActionable(row.state, destination, 'delete')
+  );
+  const modifiedRows = detailRows.filter((row) => row.state === 'modified');
   const displayedRows = detailRows.slice(0, 50);
-  const protectedRows = detailRows.length - actionableRows.length;
+  // 彻底删除是范围最宽的动作，它都处理不了的就是真的不在这里动（已转收藏 / 已完成 / 已不存在）。
+  const outOfScopeRows = detailRows.length - deletableRows.length;
 
   return (
     <>
@@ -656,10 +681,10 @@ export function DataPage() {
                       setCleanupPreview(null);
                     }}
                   >
-                    <option value="untouched">未改动（可处理）</option>
+                    <option value="untouched">未改动</option>
                     <option value="all">全部状态</option>
                     <option value="modified">已改动</option>
-                    <option value="trashed">已删除</option>
+                    <option value="trashed">已删除（回收站）</option>
                     <option value="converted">已转收藏</option>
                     <option value="completed">已完成</option>
                     <option value="missing">已不存在</option>
@@ -667,13 +692,35 @@ export function DataPage() {
                 </div>
 
                 <span>
-                  匹配 {detailRows.length} 条，当前显示 {displayedRows.length} 条；其中{' '}
-                  {actionableRows.length} 条可处理
-                  {protectedRows > 0
-                    ? `，${protectedRows} 条已加工或已删除，不会被处理`
+                  匹配 {detailRows.length} 条，当前显示 {displayedRows.length} 条；
+                  {detail.batch.destination === 'library' ? (
+                    <>
+                      可移入回收站 {trashableRows.length} 条，可彻底删除 {deletableRows.length} 条
+                      {modifiedRows.length > 0 ? `（其中已改动 ${modifiedRows.length} 条）` : ''}
+                    </>
+                  ) : (
+                    <>
+                      可从待看移除 {deletableRows.length} 条
+                      {modifiedRows.length > 0 ? `（其中已改动 ${modifiedRows.length} 条）` : ''}
+                    </>
+                  )}
+                  {outOfScopeRows > 0
+                    ? `；另有 ${outOfScopeRows} 条已转收藏、已完成或已不存在，不在这里处理`
                     : ''}
                   。
                 </span>
+
+                {modifiedRows.length > 0 && stateFilter !== 'untouched' ? (
+                  <span className="micro">
+                    已改动的记录也会按当前内容处理：确认前会冻结版本，冻结之后又被改过的仍会跳过并报出来。
+                  </span>
+                ) : null}
+                {stateFilter === 'trashed' ? (
+                  <span className="micro">
+                    回收站里的记录只能「彻底删除」：移入回收站对它们没有意义。彻底删除会连删除标记一起清，
+                    之后同一批书签可以重新导入；动手前会先留一份清理快照。
+                  </span>
+                ) : null}
 
                 <div className="listbox">
                   {displayedRows.map((row) => (
@@ -707,32 +754,33 @@ export function DataPage() {
                   <div className="actions" style={{ justifyContent: 'flex-start' }}>
                     <button
                       className="btn small"
-                      disabled={actionableRows.length === 0 || cleanupBusy !== ''}
+                      disabled={trashableRows.length === 0 || cleanupBusy !== ''}
                       onClick={() => void startCleanup('trash')}
                     >
-                      移入回收站 {actionableRows.length} 条
+                      移入回收站 {trashableRows.length} 条
                     </button>
                     <button
                       className="btn small danger"
-                      disabled={actionableRows.length === 0 || cleanupBusy !== ''}
+                      disabled={deletableRows.length === 0 || cleanupBusy !== ''}
                       onClick={() => void startCleanup('delete')}
                     >
-                      彻底删除 {actionableRows.length} 条…
+                      彻底删除 {deletableRows.length} 条…
                     </button>
                   </div>
                 ) : (
                   <div className="actions" style={{ justifyContent: 'flex-start' }}>
                     <button
                       className="btn small danger"
-                      disabled={actionableRows.length === 0 || cleanupBusy !== ''}
+                      disabled={deletableRows.length === 0 || cleanupBusy !== ''}
                       onClick={() => void startCleanup('delete')}
                     >
-                      从待看移除 {actionableRows.length} 条
+                      从待看移除 {deletableRows.length} 条…
                     </button>
                   </div>
                 )}
                 <span className="micro">
-                  按的是「全部匹配」，不是上面显示的前 50 条。待看没有回收站，移除即彻底删除，但会先留一份清理快照。
+                  按的是「全部匹配」，不是上面显示的前 50 条。彻底删除会连删除标记一起清（含回收站里的），
+                  所以之后能重新导入；待看没有回收站，移除即彻底删除。两种硬删除都会先留一份清理快照。
                 </span>
               </>
             ) : null}
@@ -771,17 +819,27 @@ export function DataPage() {
           <Notice tone="danger">
             <strong>确认处理 {cleanupPreview.actionable} 条？</strong>
             <span>
-              范围：{cleanupPreview.token.label}；命中 {cleanupPreview.matched} 条，其中{' '}
-              {cleanupPreview.protectedCount} 条已加工或已删除，不在这次处理里。
+              范围：{cleanupPreview.token.label}；命中 {cleanupPreview.matched} 条
+              {cleanupPreview.actionableByState.modified > 0
+                ? `，其中 ${cleanupPreview.actionableByState.modified} 条导入后改过，会按当前内容一起处理`
+                : ''}
+              {cleanupPreview.protectedCount > 0
+                ? `；另有 ${cleanupPreview.protectedCount} 条不在这个动作的处理范围里`
+                : ''}
+              。
             </span>
             <span>
               {cleanupMode === 'delete' || detail?.batch.destination === 'reading'
-                ? '彻底删除：连删除标记一起清，之后可以重新导入；动手前会先写一份本机清理快照，写不进去就一条都不删。'
-                : '移入回收站：可以撤销，需要时在回收站里单独恢复。'}
+                ? `彻底删除：连删除标记一起清${
+                    cleanupPreview.actionableByState.trashed > 0
+                      ? `（含 ${cleanupPreview.actionableByState.trashed} 条已在回收站里的）`
+                      : ''
+                  }，之后可以重新导入；动手前会先写一份本机清理快照，写不进去就一条都不删。`
+                : '移入回收站：可以撤销，需要时在回收站里单独恢复；已经在回收站里的记录不在这次范围里。'}
             </span>
             <span className="micro">
               范围冻结于 {formatDateTime(cleanupPreview.frozenAt)}。此后新增的命中不会纳入这次处理；
-              预览后被改动的条目会自动跳过并报出来。
+              预览后又被改动或挪进回收站的条目会自动跳过并报出来。
             </span>
             <button
               className="btn small danger"
@@ -803,7 +861,8 @@ export function DataPage() {
         ) : null}
 
         <p className="micro">
-          撤回会连这批条目的删除标记一起清掉，所以之后可以重新导入同一批书签；代价是撤回本身不可恢复。
+          撤回不会进回收站。需要找回时，可在下面「最近清理」里按次从本机快照恢复（只留最近 5 份）；
+          导入后改过或已删除的记录会保留，重新导入同一批书签时它们仍可能被判成重复或已删除。
         </p>
       </div>
 

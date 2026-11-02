@@ -27,7 +27,6 @@ import {
   type AIReply,
   type BackupDocument,
   type BatchCleanupCriteria,
-  type BatchCleanupMode,
   type BatchCleanupPreview,
   type BatchCleanupResult,
   type BatchCleanupToken,
@@ -421,14 +420,14 @@ export class WorkspaceService {
     return this.repos.imports.listBatchEntries(batchId);
   }
 
-  /** 冻结「处理全部匹配」的范围：命中多少、能处理多少、处理哪些 id 与版本。 */
+  /** 冻结「处理全部匹配」的范围：命中多少、这个动作能处理多少、处理哪些 id 与版本。 */
   async previewBatchCleanup(criteria: BatchCleanupCriteria): Promise<BatchCleanupPreview> {
     return this.repos.imports.previewBatchCleanup(criteria);
   }
 
-  /** 执行批量清理：只处理冻结清单；收藏默认进回收站，彻底删除先写清理快照。 */
-  async cleanupBatch(token: BatchCleanupToken, mode: BatchCleanupMode): Promise<BatchCleanupResult> {
-    return this.repos.imports.cleanupBatch(token, mode);
+  /** 执行批量清理：动作随令牌冻结；收藏默认进回收站，彻底删除先写清理快照。 */
+  async cleanupBatch(token: BatchCleanupToken): Promise<BatchCleanupResult> {
+    return this.repos.imports.cleanupBatch(token);
   }
 
   /** 彻底清空收藏库（含墓碑）：清空后同一网址可以重新导入。不可恢复。 */

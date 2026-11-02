@@ -1,9 +1,9 @@
 import Dexie from 'dexie';
 import {
   AppError,
+  isBatchCleanupActionable,
   nowIso,
   type BatchCleanupCriteria,
-  type BatchCleanupMode,
   type BatchCleanupPreview,
   type BatchCleanupResult,
   type BatchCleanupToken,
@@ -149,23 +149,32 @@ function matchesCriteria(row: BatchEntryRow, criteria: BatchCleanupCriteria): bo
   return true;
 }
 
-function describeScope(criteria: BatchCleanupCriteria, batch: ImportBatch): string {
+function describeScope(
+  criteria: BatchCleanupCriteria,
+  batch: ImportBatch,
+  actionable: Record<BatchEntryState, number>
+): string {
   const parts: string[] = [];
   if (criteria.folders.length === 1) parts.push(`目录：${criteria.folders[0] || '（无目录）'}`);
   else if (criteria.folders.length > 1) parts.push(`${criteria.folders.length} 个目录`);
   if (criteria.sites.length === 1) parts.push(`站点：${criteria.sites[0]}`);
   else if (criteria.sites.length > 1) parts.push(`${criteria.sites.length} 个站点`);
-  if (criteria.states.length === 1 && criteria.states[0] !== 'untouched') {
-    parts.push(`状态：${criteria.states[0]}`);
-  }
+  if (criteria.mode === 'delete') parts.push('彻底删除');
+  // 快照范围要能读出「这次动了回收站里的记录」：只写批次与站点，事后分不清删的是哪一段。
+  if (actionable.trashed > 0) parts.push(`含回收站 ${actionable.trashed} 条`);
   return `批次：${batch.fileName}${parts.length > 0 ? ` · ${parts.join(' · ')}` : ''}`;
 }
 
 /**
  * 预览「处理全部匹配」。
  *
- * 命中数按筛选条件算，处理范围只冻结其中 untouched 的记录，并把版本一并记下。
- * 执行阶段只认这份冻结清单：预览之后新导入、新改动的条目不会被默默算进去。
+ * 命中数按筛选条件算；可处理数是「这些命中里，当前动作能动的那些」，按
+ * `isBatchCleanupActionable()` 判定——界面按钮计数用的是同一个函数，不另写一套。
+ * 冻结范围时把每条的当前版本一起记下，执行阶段只认这份清单：预览之后新导入、
+ * 新改动的条目不会被默默算进去。
+ *
+ * 动作必须在预览时给出：彻底删除会收已在回收站里的记录，范围比移入回收站大，
+ * 等确认时再选动作就会出现「预览 30 条、实删 33 条」。
  */
 export async function previewBatchCleanup(
   db: ShiyeDB,
@@ -180,25 +189,36 @@ export async function previewBatchCleanup(
 
     const rows = await readBatchEntries(db, batch);
     const matchedRows = rows.filter((row) => matchesCriteria(row, criteria));
-    const actionable = matchedRows.filter((row) => row.state === 'untouched');
+    const actionableRows = matchedRows.filter((row) =>
+      isBatchCleanupActionable(row.state, batch.destination, criteria.mode)
+    );
     const byState = emptyCounts();
     for (const row of matchedRows) byState[row.state] += 1;
+    const actionableByState = emptyCounts();
+    for (const row of actionableRows) actionableByState[row.state] += 1;
 
     const frozenAt = nowIso();
     const token: BatchCleanupToken = {
       batchId: batch.id,
+      mode: criteria.mode,
       frozenAt,
-      label: describeScope(criteria, batch),
-      items: actionable.map((row) => ({ entityId: row.entityId, localRevision: row.localRevision })),
+      label: describeScope(criteria, batch, actionableByState),
+      items: actionableRows.map((row) => ({
+        entityId: row.entityId,
+        localRevision: row.localRevision,
+        state: row.state,
+      })),
     };
 
     return {
       batch,
+      mode: criteria.mode,
       total: rows.length,
       matched: matchedRows.length,
-      actionable: actionable.length,
-      protectedCount: matchedRows.length - actionable.length,
+      actionable: actionableRows.length,
+      protectedCount: matchedRows.length - actionableRows.length,
       byState,
+      actionableByState,
       sample: matchedRows.slice(0, 50),
       token,
       frozenAt,
@@ -232,18 +252,20 @@ async function softDeleteBookmark(db: ShiyeDB, row: Bookmark, now: string): Prom
 /**
  * 执行「处理全部匹配」。
  *
- * 只处理冻结清单里的条目，并在事务内复核：不在本批名下、已删除、预览后改动过的一律跳过并报原因。
- * 收藏默认进回收站（可撤销）；彻底删除与待看删除都先写本机清理快照，写不进去就一条都不删。
+ * 动作来自令牌，不接受调用方另传一个：范围是随动作算出来的，换动作就不能沿用旧清单。
+ * 只处理冻结清单里的条目，并在事务内复核：不在本批名下、记录状态变了、预览后改动过的一律跳过并报原因。
+ * 收藏默认进回收站（可撤销）；彻底删除（含已在回收站里的）与待看删除都先写本机清理快照，
+ * 写不进去就一条都不删。
  */
 export async function cleanupBatch(
   db: ShiyeDB,
   token: BatchCleanupToken,
-  mode: BatchCleanupMode,
   hooks?: PurgeHooks
 ): Promise<BatchCleanupResult> {
   if (token.items.length === 0) {
     throw new AppError('INVALID_INPUT', '这次没有匹配到可处理的条目。');
   }
+  const mode = token.mode;
 
   return db.transaction(
     'rw',
@@ -286,8 +308,13 @@ export async function cleanupBatch(
             skipped.push({ entityId: item.entityId, title: '', reason: '已不在库里' });
             continue;
           }
-          if (row.deletedAt) {
-            skipped.push({ entityId: item.entityId, title: row.title, reason: '已在回收站里' });
+          // 预览之后被别人动了状态：不是这次要处理的那一段，一律留下并说清楚。
+          if (item.state !== 'trashed' && row.deletedAt) {
+            skipped.push({ entityId: item.entityId, title: row.title, reason: '预览后被移入回收站，已保留' });
+            continue;
+          }
+          if (item.state === 'trashed' && !row.deletedAt) {
+            skipped.push({ entityId: item.entityId, title: row.title, reason: '预览后已从回收站恢复，已保留' });
             continue;
           }
           if (row.localRevision !== item.localRevision) {
