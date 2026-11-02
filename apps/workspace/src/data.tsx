@@ -44,6 +44,9 @@ const BATCH_STATE_LABEL: Record<BatchEntryState, string> = {
 /** 下拉里表示「没有原始目录」的那一项：空串已经被「全部目录」占了。 */
 const NO_FOLDER = '__none__';
 
+/** 明细分页步长：默认列这么多，剩下的点按钮再列，避免一次把几千条塞进 DOM。 */
+const DETAIL_PAGE = 50;
+
 /** 一条都处理不了时说清是哪一种情况，而不是笼统地让人以为条件选错了。 */
 function emptyCleanupHint(preview: BatchCleanupPreview): string {
   if (preview.matched === 0) return '当前筛选没有命中任何记录。';
@@ -115,6 +118,8 @@ export function DataPage() {
   const [cleanupMode, setCleanupMode] = useState<BatchCleanupMode | null>(null);
   const [cleanupResult, setCleanupResult] = useState<BatchCleanupResult | null>(null);
   const [cleanupBusy, setCleanupBusy] = useState('');
+  /** 明细一次列多少条：大批次一次铺满 DOM 会卡，但又不能只给前 50 条不给后路。 */
+  const [detailLimit, setDetailLimit] = useState(DETAIL_PAGE);
 
   const reloadBatches = async (options?: { search?: string; limit?: number }) => {
     const search = options?.search ?? batchSearch;
@@ -329,6 +334,7 @@ export function DataPage() {
       setSiteFilter('');
       // 默认只看没动过的：这类才可能被处理，也不会一上来就把已加工的混进计数。
       setStateFilter('untouched');
+      setDetailLimit(DETAIL_PAGE);
       setCleanupPreview(null);
       setCleanupMode(null);
       setCleanupResult(null);
@@ -401,7 +407,8 @@ export function DataPage() {
     isBatchCleanupActionable(row.state, destination, 'delete')
   );
   const modifiedRows = detailRows.filter((row) => row.state === 'modified');
-  const displayedRows = detailRows.slice(0, 50);
+  const displayedRows = detailRows.slice(0, detailLimit);
+  const hiddenRows = detailRows.length - displayedRows.length;
   // 彻底删除是范围最宽的动作，它都处理不了的就是真的不在这里动（已转收藏 / 已完成 / 已不存在）。
   const outOfScopeRows = detailRows.length - deletableRows.length;
 
@@ -692,7 +699,8 @@ export function DataPage() {
                 </div>
 
                 <span>
-                  匹配 {detailRows.length} 条，当前显示 {displayedRows.length} 条；
+                  匹配 {detailRows.length} 条，当前显示 {displayedRows.length} 条
+                  {hiddenRows > 0 ? `，还有 ${hiddenRows} 条未列出` : ''}；
                   {detail.batch.destination === 'library' ? (
                     <>
                       可移入回收站 {trashableRows.length} 条，可彻底删除 {deletableRows.length} 条
@@ -750,6 +758,18 @@ export function DataPage() {
                   ))}
                 </div>
 
+                {hiddenRows > 0 ? (
+                  <div className="actions" style={{ justifyContent: 'flex-start' }}>
+                    <button
+                      className="btn small"
+                      onClick={() => setDetailLimit((current) => current + DETAIL_PAGE)}
+                    >
+                      再显示 {Math.min(DETAIL_PAGE, hiddenRows)} 条
+                      {hiddenRows > DETAIL_PAGE ? `（还有 ${hiddenRows} 条未列出）` : ''}
+                    </button>
+                  </div>
+                ) : null}
+
                 {detail.batch.destination === 'library' ? (
                   <div className="actions" style={{ justifyContent: 'flex-start' }}>
                     <button
@@ -779,7 +799,8 @@ export function DataPage() {
                   </div>
                 )}
                 <span className="micro">
-                  按的是「全部匹配」，不是上面显示的前 50 条。彻底删除会连删除标记一起清（含回收站里的），
+                  按的是「全部匹配」，不是上面列出的这些条数——列表一页 {DETAIL_PAGE} 条，够不够看都不影响处理范围。
+                  彻底删除会连删除标记一起清（含回收站里的），
                   所以之后能重新导入；待看没有回收站，移除即彻底删除。两种硬删除都会先留一份清理快照。
                 </span>
               </>

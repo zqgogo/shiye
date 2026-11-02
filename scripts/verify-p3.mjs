@@ -1276,9 +1276,29 @@ async function main() {
     });
     report.counts.batchDetail = detailText.slice(0, 220);
     record(
-      'P9.2 查看本批列出这一批新建的记录，并写明「匹配 60 条、当前只显示 50 条」',
-      /本批明细/.test(detailText) && /匹配 60 条，当前显示 50 条/.test(detailText),
+      'P9.2 查看本批列出这一批新建的记录，并写明「匹配 60 条、当前显示 50 条、还有 10 条未列出」',
+      /本批明细/.test(detailText) && /匹配 60 条，当前显示 50 条，还有 10 条未列出/.test(detailText),
       detailText.slice(0, 160)
+    );
+
+    // 列表默认只列 50 条，剩下 10 条要能点出来：截断在展示上，不能变成看不到。
+    await clickIn(page, '', '再显示 10 条');
+    await sleep(400);
+    const expanded = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('本批明细')
+      );
+      return {
+        text: (notice?.innerText ?? '').replace(/\s+/g, ' ').trim(),
+        rows: notice?.querySelectorAll('.listbox .bookmark').length ?? 0,
+      };
+    });
+    record(
+      'P9.2 明细「再显示」把剩下 10 条补出来，总数与命中一致',
+      /匹配 60 条，当前显示 60 条/.test(expanded.text) &&
+        !/未列出/.test(expanded.text) &&
+        expanded.rows === 60,
+      `列出=${expanded.rows}`
     );
 
     await page.select('select[aria-label="本批站点"]', 'work.example.com');
