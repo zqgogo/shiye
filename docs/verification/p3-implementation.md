@@ -1,6 +1,6 @@
 # P3 收集、粘贴与导入：回归覆盖与执行状态
 
-更新日期：2026-10-28。对应 [P3 任务](../ROADMAP.md#p3--扩展收集粘贴与书签导入)。
+更新日期：2026-11-02。对应 [P3 任务](../ROADMAP.md#p3--扩展收集粘贴与书签导入)。当前 `verify:p3` **73 项**，单测 **126 项**；下方各轮保留当时的条数，不能直接相加。
 
 ## 1. 本轮新增的东西
 
@@ -8,7 +8,7 @@ P3 的功能实现此前已落地（P0.4 的导入与快照记录覆盖了文件
 
 | 交付 | 说明 |
 | --- | --- |
-| `scripts/verify-p3.mjs`（`npm run verify:p3`） | 41 项页面级检查，覆盖 P3.1–P3.5，断言回读 IndexedDB 主库；每个阶段单独 try/catch，单项失败不中断整轮 |
+| `scripts/verify-p3.mjs`（`npm run verify:p3`） | 页面级检查，覆盖 P3.1–P3.5，断言回读 IndexedDB 主库；每个阶段单独 try/catch，单项失败不中断整轮（首轮 41 项，后续各轮累加到 73 项） |
 | `fixtures/bookmarks-edge.html` | Edge 导出格式（Netscape），4 层目录 + 同 URL 重复 + `edge://` 内部页 |
 | `fixtures/bookmarks-firefox.html` | Firefox PLACES 格式（`LAST_CHARSET`、`TAGS`、`PLACE` 智能书签） |
 | `fixtures/bookmarks-hostile.html` | 含 `<script>`、`<style>`、`<img>`、`<iframe>` 与 `javascript:` / `data:` 链接，外部引用指向 `127.0.0.1:9` |
@@ -163,7 +163,7 @@ P9.4 第一段落地时留了两条边界只有单测保证，本轮补成浏览
 
 | 改动 | 落点 | 断言 |
 | --- | --- | --- |
-| 只读预演 `previewUndoBatch()`，与执行共用 `judgeBatchItems()` | `packages/storage/src/repositories.ts` | 单测「预览的三类计数与执行结果完全一致」并在预览后核对主库条数不变 |
+| 只读预演 `previewUndoBatch()`，与执行共用 `judgeBatchItems()` | `packages/storage/src/repositories.ts` | 单测「没有并发改动时，预览的三类计数与执行结果一致」并在预览后核对主库条数不变 |
 | 五类保留原因 `modified / trashed / completed / converted / missing` | `packages/core/src/types.ts` | 单测「保留原因区分改过 / 回收站 / 待看已完成 / 已转收藏 / 已不存在」 |
 | 批次持久化 `revertedAt / undoCounts / undoKept`（schema v3 → v4） | `packages/storage/src/db.ts`、`packages/core/src/types.ts` | 单测「撤回结果写进批次，刷新后仍能回看条数与原因」+「版本 3 主库升级时给老批次补上撤回字段」 |
 | 结果页与数据页都改成「预演 → 确认 → 常驻结果面板」 | `apps/workspace/src/capture.tsx`、`apps/workspace/src/data.tsx`、`components.tsx` | `verify:p3` 四条：预演条数、常驻面板、刷新后仍可查、批次搜索 |
@@ -172,3 +172,33 @@ P9.4 第一段落地时留了两条边界只有单测保证，本轮补成浏览
 实测（`verify:p3`，Chrome 156 无头）：结果页预演文案为「将移除 4 条，保留 0 条」，撤回后批次上 `undoCounts={removed:4,kept:0,missing:0}` 且 `revertedAt` 有值；数据页撤回同样先给「将移除 2 条」；刷新后批次行仍显示「已撤回 时间（移除 2 · 保留 0）」；搜索 `bookmarks-firefox` 只命中该批。`verify:p3` 62 → **68 项全通过**，单测 110 → 116 项。
 
 仍存的边界：撤回本身不可撤销（靠 P9.4 清理快照找回）；被移走的条目没有留存清单，只有三数，P9.2 的「查看本批记录」才会补上。
+
+### 第 8 轮：恢复版本边界 + 查看本批与处理全部匹配（2026-11-02）
+
+**先修的边界**：清理快照恢复原先写回 `revision = 1`、`localRevision = 1`。清理前打开的编辑页拿着旧基线，恢复后版本退回 1，旧页面一保存就通过校验，把恢复后的内容覆盖掉；旧 AI 材料包的 `baseLocalRevision` 同理。修复方式：
+
+| 改动 | 落点 | 断言 |
+| --- | --- | --- |
+| 硬删除时记每条记录的版本高水位（`meta` 表 `revfloor:<类型>:<id>`） | `packages/storage/src/purge.ts` 的 `writePurgeSnapshot()` → `recordRevisionFloors()` | 单测「恢复把版本推到清理前之上，旧编辑基线保存会被拒绝」 |
+| 恢复时新版本 = `max(高水位, 快照版本) + 1`，收藏与待看都处理 | `purge.ts` `allocateRestoredVersion()` | 单测「从更早的快照恢复，版本也不会退回到中间的旧基线」；「待看恢复同样换版本，旧基线不能再用于转换」 |
+| 旧 AI 材料包必须失效 | 应用层不动，靠 `localRevision` 递增 | 单测「清理快照恢复后，清理前的材料包不能再写进库」 |
+
+为什么不是「快照版本 + 1」：从更早的快照恢复时，中间几次编辑的版本可能更高，回退到「快照版本 + 1」正好撞上旧基线。高水位只增不减，第几次恢复、从哪份快照恢复都不会退回去。
+
+**再校正的说法**：「预览与执行共用一套规则」不等于「计数必然一致」。`previewUndoBatch()` 改在只读事务里取一致快照，执行阶段仍各自读库；确认框写明「这是此刻的算法结果，不是承诺」，执行后若有差额，结果面板报出「预览时 3 条、实际 2 条：确认前有 1 条被修改…已保留」。
+
+**P9.2 交付**：
+
+| 改动 | 落点 | 断言 |
+| --- | --- | --- |
+| `listBatchEntries()` 按编号映射列出本批新建记录与六种状态 | `packages/storage/src/batch-cleanup.ts` | 单测「查看本批只列这一批新建的记录，并标出各自现状」 |
+| `previewBatchCleanup()` 按目录 / 站点 / 状态筛，冻结候选 id 与版本 | 同上 + `packages/core/src/types.ts` | 单测「按目录筛选后一次处理全部匹配，目录之外的一条不动」 |
+| `cleanupBatch()` 事务内复核冻结清单；收藏默认进回收站，硬删除先写快照 | 同上 | 单测「彻底删除会留清理快照，可以按次找回」「预览之后被改动的条目不纳入执行」「待看没有回收站：选回收站也是彻底删除，但留了快照」「撤回后查看本批给出说明」 |
+| 数据页「查看本批」面板（目录 / 站点 / 状态三个下拉 + 全部匹配计数） | `apps/workspace/src/data.tsx` | `verify:p3` 五条，见下 |
+| 导入结果页加「按目录清理这一批 →」 | `apps/workspace/src/capture.tsx` | 人工走查（导航落点） |
+
+实测（`verify:p3`，Chrome 156 无头）：60 条分属两个站点的批次，明细写「匹配 60 条，当前显示 50 条」；选 `work.example.com` 后收敛到 30 条；确认前用另一个标签页改掉其中一条，执行结果是「已处理 29 条，跳过 1 条（预览后被修改，已保留）」；另一站点「彻底删除 30 条」后，最新快照显示 `批次：粘贴链接 · 站点：life.example.com 收藏 30`；点「恢复这 30 条」后这 30 条回到库里，回收站里的 29 条不受影响。`verify:p3` 68 → **73 项全通过**（`errors=[]`），单测 116 → **126 项**，`typecheck`、`build` 通过。
+
+同时修了验证脚本自身的一个缺陷：`readPurgeSnapshots()` 原先按「面板全文包含『最近清理』」定位，P9.2 新增的说明文案让它误命中「最近导入」面板、读到一堆批次行；改为按 `h2` 标题精确定位。
+
+仍存的边界：P9.2 只覆盖**批次内**清理，跨批次的全库条件面板未做（P9.3/P9.5）；恢复版本高水位存在 `meta` 表，条数随硬删除量增长（每条几十字节），备份不含它——跨设备恢复后高水位从头开始，但恢复快照本身也不随备份走，不影响本机语义。
