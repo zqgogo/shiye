@@ -338,6 +338,12 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
                 {busy ? '正在预演…' : '撤回这次导入'}
               </button>
             ) : null}
+            {result.inserted > 0 ? (
+              // 只清掉其中一部分（例如某个收藏夹目录）时，撤回太粗：去数据页按目录筛出来再处理。
+              <button className="btn" onClick={() => navigate('data')}>
+                按目录清理这一批 →
+              </button>
+            ) : null}
           </div>
         </div>
       ) : null}

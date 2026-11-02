@@ -5,6 +5,11 @@ import {
   parseBackup,
   toUserMessage,
   type BackupDocument,
+  type BatchCleanupMode,
+  type BatchCleanupPreview,
+  type BatchCleanupResult,
+  type BatchEntryState,
+  type BatchEntryView,
   type ImportBatch,
   type PurgeRestorePreview,
   type PurgeSnapshot,
@@ -13,8 +18,7 @@ import type { ImportBatchPage, ImportUndoPreview, ImportUndoResult } from '@shiy
 import { KeptList, Notice, PageHeader } from './components.js';
 import { useWorkspace } from './state.js';
 
-function download(name: string, text: string, mime: string): void {
-  const blob = new Blob([text], { type: mime });
+function download(name: string, text: string, mime: string): void {  const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
@@ -24,6 +28,19 @@ function download(name: string, text: string, mime: string): void {
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
+
+/** 「查看本批」的状态标签：与撤回判据一致，顺序也是先看在不在、再看变成了什么、最后才是改没改过。 */
+const BATCH_STATE_LABEL: Record<BatchEntryState, string> = {
+  untouched: '未改动',
+  modified: '已改动',
+  trashed: '已删除',
+  converted: '已转收藏',
+  completed: '已完成',
+  missing: '已不存在',
+};
+
+/** 下拉里表示「没有原始目录」的那一项：空串已经被「全部目录」占了。 */
+const NO_FOLDER = '__none__';
 
 export function DataPage() {
   const { data, service, run, reload, toast } = useWorkspace();
@@ -70,6 +87,19 @@ export function DataPage() {
   const [pendingUndo, setPendingUndo] = useState<ImportUndoPreview | null>(null);
   /** 刚执行完的撤回结果：常驻在页面上，不放 toast，也不随刷新丢掉。 */
   const [undoResult, setUndoResult] = useState<ImportUndoResult | null>(null);
+  /** 预览数与实际执行数的差异：并发保护生效时如实报出来，而不是假装两边一致。 */
+  const [undoDrift, setUndoDrift] = useState<{ previewRemoved: number; actualRemoved: number } | null>(null);
+  /** 「查看本批」：这一批实际新建的记录与现状，按目录 / 站点 / 状态筛。 */
+  const [detail, setDetail] = useState<BatchEntryView | null>(null);
+  const [detailBusy, setDetailBusy] = useState('');
+  const [folderFilter, setFolderFilter] = useState('');
+  const [siteFilter, setSiteFilter] = useState('');
+  const [stateFilter, setStateFilter] = useState<'all' | BatchEntryState>('untouched');
+  /** 冻结后的处理范围：确认框里的数字就是它，执行时也只认它。 */
+  const [cleanupPreview, setCleanupPreview] = useState<BatchCleanupPreview | null>(null);
+  const [cleanupMode, setCleanupMode] = useState<BatchCleanupMode | null>(null);
+  const [cleanupResult, setCleanupResult] = useState<BatchCleanupResult | null>(null);
+  const [cleanupBusy, setCleanupBusy] = useState('');
 
   const reloadBatches = async (options?: { search?: string; limit?: number }) => {
     const search = options?.search ?? batchSearch;
@@ -266,8 +296,89 @@ export function DataPage() {
     if (!outcome) return;
     // 结果常驻在页面上：撤回了多少、留下多少、为什么留，都要能一眼看到并回查。
     setUndoResult(outcome);
+    setUndoDrift(
+      outcome.removed === preview.removed
+        ? null
+        : { previewRemoved: preview.removed, actualRemoved: outcome.removed }
+    );
     await reloadBatches();
   };
+
+  /** 打开「查看本批」：读的是编号映射，不是同目录下的记录。 */
+  const openBatchDetail = async (batch: ImportBatch) => {
+    setDetailBusy(batch.id);
+    try {
+      const view = await service.listBatchEntries(batch.id);
+      setDetail(view);
+      setFolderFilter('');
+      setSiteFilter('');
+      // 默认只看没动过的：这类才可能被处理，也不会一上来就把已加工的混进计数。
+      setStateFilter('untouched');
+      setCleanupPreview(null);
+      setCleanupMode(null);
+      setCleanupResult(null);
+    } catch (error) {
+      toast(toUserMessage(error), 'error');
+    } finally {
+      setDetailBusy('');
+    }
+  };
+
+  /** 先冻结范围再确认：数字来自这次预览，不用界面里可能过期的列表估。 */
+  const startCleanup = async (mode: BatchCleanupMode) => {
+    if (!detail) return;
+    setCleanupBusy(mode);
+    setCleanupResult(null);
+    try {
+      const preview = await service.previewBatchCleanup({
+        batchId: detail.batch.id,
+        folders: folderFilter ? [folderFilter === NO_FOLDER ? '' : folderFilter] : [],
+        sites: siteFilter ? [siteFilter] : [],
+        states: stateFilter === 'all' ? [] : [stateFilter],
+      });
+      if (preview.actionable === 0) {
+        toast('匹配到的记录都已加工或已删除，没有可处理的条目。', 'error');
+        return;
+      }
+      setCleanupPreview(preview);
+      setCleanupMode(mode);
+    } catch (error) {
+      toast(toUserMessage(error), 'error');
+    } finally {
+      setCleanupBusy('');
+    }
+  };
+
+  const runCleanup = async () => {
+    if (!cleanupPreview || !cleanupMode) return;
+    const batchId = cleanupPreview.batch.id;
+    setCleanupBusy(cleanupMode);
+    const outcome = await run(() => service.cleanupBatch(cleanupPreview.token, cleanupMode));
+    setCleanupBusy('');
+    if (!outcome) return;
+    setCleanupResult(outcome);
+    setCleanupPreview(null);
+    setCleanupMode(null);
+    try {
+      setDetail(await service.listBatchEntries(batchId));
+    } catch {
+      setDetail(null);
+    }
+    await reloadBatches();
+  };
+
+  const detailRows = detail
+    ? detail.rows.filter(
+        (row) =>
+          (!folderFilter ||
+            (folderFilter === NO_FOLDER ? !row.folder : row.folder === folderFilter)) &&
+          (!siteFilter || row.site === siteFilter) &&
+          (stateFilter === 'all' || row.state === stateFilter)
+      )
+    : [];
+  const actionableRows = detailRows.filter((row) => row.state === 'untouched');
+  const displayedRows = detailRows.slice(0, 50);
+  const protectedRows = detailRows.length - actionableRows.length;
 
   return (
     <>
@@ -351,9 +462,21 @@ export function DataPage() {
               已撤回「{undoResult.batch.fileName}」：移除 {undoResult.removed} 条，保留 {undoResult.kept} 条
               {undoResult.missing > 0 ? `，${undoResult.missing} 条已不在库里` : ''}。
             </strong>
+            {undoDrift ? (
+              <span>
+                预览时是 {undoDrift.previewRemoved} 条，实际移除 {undoDrift.actualRemoved} 条：
+                确认前有 {undoDrift.previewRemoved - undoDrift.actualRemoved} 条被修改、转过收藏或删除，已按最新状态保留。
+              </span>
+            ) : null}
             <KeptList items={undoResult.items} />
             <span>这份结果也存进了批次记录，刷新或关页之后仍能在下面查到。</span>
-            <button className="btn small" onClick={() => setUndoResult(null)}>
+            <button
+              className="btn small"
+              onClick={() => {
+                setUndoResult(null);
+                setUndoDrift(null);
+              }}
+            >
               知道了
             </button>
           </Notice>
@@ -365,6 +488,10 @@ export function DataPage() {
             <span>
               将移除 {pendingUndo.removed} 条，保留 {pendingUndo.kept} 条
               {pendingUndo.missing > 0 ? `，另有 ${pendingUndo.missing} 条已不在库里` : ''}。
+            </span>
+            <span className="micro">
+              这是此刻的算法结果，不是承诺：执行时会重新读一遍，确认前被修改、转过收藏或删掉的条目会保留，
+              实际移除数可能少于这个数字，执行后会如实报出差额。
             </span>
             {pendingUndo.blockedReason ? <span>{pendingUndo.blockedReason}</span> : null}
             <KeptList items={pendingUndo.items} />
@@ -426,6 +553,15 @@ export function DataPage() {
                   ) : null}
                 </div>
                 <div className="rowactions">
+                  {batch.inserted > 0 ? (
+                    <button
+                      className="btn small"
+                      disabled={detailBusy === batch.id}
+                      onClick={() => void openBatchDetail(batch)}
+                    >
+                      {detailBusy === batch.id ? '读取中…' : '查看本批'}
+                    </button>
+                  ) : null}
                   {batch.status === 'applied' && batch.inserted > 0 ? (
                     <button
                       className="btn small"
@@ -459,6 +595,211 @@ export function DataPage() {
               </button>
             ) : null}
           </div>
+        ) : null}
+
+        {detail ? (
+          <div className="notice">
+            <strong>本批明细：{detail.batch.fileName}</strong>
+            <span>
+              {detail.note ??
+                `这一批实际新建 ${detail.total} 条。只列本批新建的记录：导入时被判成重复而跳过、或库里原有的同目录条目不会混进来。`}
+            </span>
+
+            {detail.total > 0 ? (
+              <>
+                <div className="field">
+                  <span>原始目录</span>
+                  <select
+                    aria-label="本批原始目录"
+                    value={folderFilter}
+                    onChange={(event) => {
+                      setFolderFilter(event.target.value);
+                      setCleanupPreview(null);
+                    }}
+                  >
+                    <option value="">全部目录</option>
+                    {detail.folders.map((folder) => (
+                      <option key={folder} value={folder}>
+                        {folder}
+                      </option>
+                    ))}
+                    {detail.rows.some((row) => !row.folder) ? (
+                      <option value={NO_FOLDER}>（无目录 / 已不存在）</option>
+                    ) : null}
+                  </select>
+                </div>
+                <div className="field">
+                  <span>站点</span>
+                  <select
+                    aria-label="本批站点"
+                    value={siteFilter}
+                    onChange={(event) => {
+                      setSiteFilter(event.target.value);
+                      setCleanupPreview(null);
+                    }}
+                  >
+                    <option value="">全部站点</option>
+                    {detail.sites.map((site) => (
+                      <option key={site} value={site}>
+                        {site}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field">
+                  <span>状态</span>
+                  <select
+                    aria-label="本批状态"
+                    value={stateFilter}
+                    onChange={(event) => {
+                      setStateFilter(event.target.value as 'all' | BatchEntryState);
+                      setCleanupPreview(null);
+                    }}
+                  >
+                    <option value="untouched">未改动（可处理）</option>
+                    <option value="all">全部状态</option>
+                    <option value="modified">已改动</option>
+                    <option value="trashed">已删除</option>
+                    <option value="converted">已转收藏</option>
+                    <option value="completed">已完成</option>
+                    <option value="missing">已不存在</option>
+                  </select>
+                </div>
+
+                <span>
+                  匹配 {detailRows.length} 条，当前显示 {displayedRows.length} 条；其中{' '}
+                  {actionableRows.length} 条可处理
+                  {protectedRows > 0
+                    ? `，${protectedRows} 条已加工或已删除，不会被处理`
+                    : ''}
+                  。
+                </span>
+
+                <div className="listbox">
+                  {displayedRows.map((row) => (
+                    <article className="bookmark" key={row.entityId}>
+                      <div className="favicon" aria-hidden="true">
+                        {row.folder ? row.folder.slice(0, 1) : '—'}
+                      </div>
+                      <div className="rowbody" role="group">
+                        <h3>{row.title || '（记录已不存在）'}</h3>
+                        <div className="rowmeta">
+                          <span>{BATCH_STATE_LABEL[row.state]}</span>
+                          {row.site ? (
+                            <>
+                              <span>·</span>
+                              <span>{row.site}</span>
+                            </>
+                          ) : null}
+                          {row.folder ? (
+                            <>
+                              <span>·</span>
+                              <span>{row.folder}</span>
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+
+                {detail.batch.destination === 'library' ? (
+                  <div className="actions" style={{ justifyContent: 'flex-start' }}>
+                    <button
+                      className="btn small"
+                      disabled={actionableRows.length === 0 || cleanupBusy !== ''}
+                      onClick={() => void startCleanup('trash')}
+                    >
+                      移入回收站 {actionableRows.length} 条
+                    </button>
+                    <button
+                      className="btn small danger"
+                      disabled={actionableRows.length === 0 || cleanupBusy !== ''}
+                      onClick={() => void startCleanup('delete')}
+                    >
+                      彻底删除 {actionableRows.length} 条…
+                    </button>
+                  </div>
+                ) : (
+                  <div className="actions" style={{ justifyContent: 'flex-start' }}>
+                    <button
+                      className="btn small danger"
+                      disabled={actionableRows.length === 0 || cleanupBusy !== ''}
+                      onClick={() => void startCleanup('delete')}
+                    >
+                      从待看移除 {actionableRows.length} 条
+                    </button>
+                  </div>
+                )}
+                <span className="micro">
+                  按的是「全部匹配」，不是上面显示的前 50 条。待看没有回收站，移除即彻底删除，但会先留一份清理快照。
+                </span>
+              </>
+            ) : null}
+
+            <button className="btn small" onClick={() => setDetail(null)}>
+              收起本批明细
+            </button>
+          </div>
+        ) : null}
+
+        {cleanupResult ? (
+          <Notice tone="ok">
+            <strong>已处理 {cleanupResult.removed} 条。</strong>
+            {cleanupResult.skipped.length > 0 ? (
+              <span>
+                跳过 {cleanupResult.skipped.length} 条：
+                {cleanupResult.skipped
+                  .slice(0, 6)
+                  .map((row) => `${row.title || row.entityId}（${row.reason}）`)
+                  .join('；')}
+                {cleanupResult.skipped.length > 6 ? ' 等' : ''}。
+              </span>
+            ) : null}
+            <span>
+              {cleanupResult.snapshotId
+                ? '已留下清理快照，可在下面「最近清理」里按次找回。'
+                : '这些条目在回收站里，需要时可以单独恢复。'}
+            </span>
+            <button className="btn small" onClick={() => setCleanupResult(null)}>
+              知道了
+            </button>
+          </Notice>
+        ) : null}
+
+        {cleanupPreview && cleanupMode ? (
+          <Notice tone="danger">
+            <strong>确认处理 {cleanupPreview.actionable} 条？</strong>
+            <span>
+              范围：{cleanupPreview.token.label}；命中 {cleanupPreview.matched} 条，其中{' '}
+              {cleanupPreview.protectedCount} 条已加工或已删除，不在这次处理里。
+            </span>
+            <span>
+              {cleanupMode === 'delete' || detail?.batch.destination === 'reading'
+                ? '彻底删除：连删除标记一起清，之后可以重新导入；动手前会先写一份本机清理快照，写不进去就一条都不删。'
+                : '移入回收站：可以撤销，需要时在回收站里单独恢复。'}
+            </span>
+            <span className="micro">
+              范围冻结于 {formatDateTime(cleanupPreview.frozenAt)}。此后新增的命中不会纳入这次处理；
+              预览后被改动的条目会自动跳过并报出来。
+            </span>
+            <button
+              className="btn small danger"
+              disabled={cleanupBusy !== ''}
+              onClick={() => void runCleanup()}
+            >
+              {cleanupBusy ? '处理中…' : `确认处理 ${cleanupPreview.actionable} 条`}
+            </button>
+            <button
+              className="btn small"
+              onClick={() => {
+                setCleanupPreview(null);
+                setCleanupMode(null);
+              }}
+            >
+              取消
+            </button>
+          </Notice>
         ) : null}
 
         <p className="micro">

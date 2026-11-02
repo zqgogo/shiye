@@ -14,6 +14,12 @@ import type {
   AIField,
   AISuggestionPatch,
   AppliedChange,
+  BatchCleanupCriteria,
+  BatchCleanupMode,
+  BatchCleanupPreview,
+  BatchCleanupResult,
+  BatchCleanupToken,
+  BatchEntryView,
   Bookmark,
   BookmarkPatch,
   Category,
@@ -68,6 +74,11 @@ import {
   writePurgeSnapshot,
   type PurgeHooks,
 } from './purge.js';
+import {
+  cleanupBatch as runBatchCleanup,
+  listBatchEntries as readBatchView,
+  previewBatchCleanup as previewBatchView,
+} from './batch-cleanup.js';
 
 function assertNotDeleted(bookmark: Bookmark): void {
   if (bookmark.deletedAt) {
@@ -346,7 +357,7 @@ export class DexieBookmarkRepository implements BookmarkRepository {
   async purgeAll(): Promise<number> {
     return this.db.transaction(
       'rw',
-      [this.db.bookmarks, this.db.tombstones, this.db.settings, this.db.purgeSnapshots],
+      [this.db.bookmarks, this.db.tombstones, this.db.settings, this.db.purgeSnapshots, this.db.meta],
       async () => {
         const rows = await this.db.bookmarks.toArray();
         const tombstones = (await this.db.tombstones.toArray()).filter(
@@ -372,7 +383,14 @@ export class DexieBookmarkRepository implements BookmarkRepository {
   async purgeCategory(categoryId: string | null): Promise<number> {
     return this.db.transaction(
       'rw',
-      [this.db.bookmarks, this.db.tombstones, this.db.categories, this.db.settings, this.db.purgeSnapshots],
+      [
+        this.db.bookmarks,
+        this.db.tombstones,
+        this.db.categories,
+        this.db.settings,
+        this.db.purgeSnapshots,
+        this.db.meta,
+      ],
       async () => {
         const rows = (
           await this.db.bookmarks.toArray()
@@ -827,7 +845,7 @@ export class DexieReadingRepository implements ReadingRepository {
   async purgePending(): Promise<number> {
     return this.db.transaction(
       'rw',
-      [this.db.readingItems, this.db.settings, this.db.purgeSnapshots],
+      [this.db.readingItems, this.db.settings, this.db.purgeSnapshots, this.db.meta],
       async () => {
         const pending = await this.listPending();
         if (pending.length === 0) return 0;
@@ -846,7 +864,7 @@ export class DexieReadingRepository implements ReadingRepository {
   async purgeCompleted(): Promise<number> {
     return this.db.transaction(
       'rw',
-      [this.db.readingItems, this.db.settings, this.db.purgeSnapshots],
+      [this.db.readingItems, this.db.settings, this.db.purgeSnapshots, this.db.meta],
       async () => {
         const completed = await this.listCompleted();
         if (completed.length === 0) return 0;
@@ -1124,6 +1142,21 @@ export class DexieImportRepository implements ImportRepository {
     return this.db.importBatches.get(id);
   }
 
+  /** 查看本批：按编号映射列出这一批新建的记录与现状，供按目录 / 站点 / 状态筛选。 */
+  async listBatchEntries(batchId: string): Promise<BatchEntryView> {
+    return readBatchView(this.db, batchId);
+  }
+
+  /** 冻结「处理全部匹配」的范围：命中多少、能处理多少、要处理哪些 id 与版本。 */
+  async previewBatchCleanup(criteria: BatchCleanupCriteria): Promise<BatchCleanupPreview> {
+    return previewBatchView(this.db, criteria);
+  }
+
+  /** 执行批量清理：只认冻结清单，事务内复核，硬删除先写清理快照。 */
+  async cleanupBatch(token: BatchCleanupToken, mode: BatchCleanupMode): Promise<BatchCleanupResult> {
+    return runBatchCleanup(this.db, token, mode, this.hooks);
+  }
+
   /**
    * 批次历史：按文件名 / 状态搜索并分页。
    *
@@ -1151,8 +1184,10 @@ export class DexieImportRepository implements ImportRepository {
   /**
    * 逐条判定一批导入里的每个条目该怎么处理。
    *
-   * 预览与执行共用这一套规则，所以「预览说会删 8 条」与「实际删了 8 条」不会对不上。
-   * 判定只看当前状态，不改任何东西。
+   * 预览和执行都调用它，规则只有一套，所以「什么样的条目会被保留」两处不会各说一套；
+   * 但两次调用各自读当时的数据库，预览之后被改过、转过收藏或删掉的条目，
+   * 执行时会按最新状态改判为保留。计数因此**允许不同**——那是并发保护生效，
+   * 不是 bug，界面要把这个差异如实说出来。
    */
   private async judgeBatchItems(batch: ImportBatch): Promise<{
     items: ImportItem[];
@@ -1205,26 +1240,34 @@ export class DexieImportRepository implements ImportRepository {
   }
 
   async previewUndoBatch(batchId: string): Promise<ImportUndoPreview> {
-    const batch = await this.db.importBatches.get(batchId);
-    if (!batch) throw new AppError('NOT_FOUND', '找不到这次导入的记录。');
-    const blockedReason = undoBlockedReason(batch);
-    if (blockedReason) {
-      return { batch, total: 0, removed: 0, kept: 0, missing: 0, items: [], blockedReason };
-    }
-    const { judgements } = await this.judgeBatchItems(batch);
-    const removed = judgements.filter(
-      (entry) => entry.action === 'removeBookmark' || entry.action === 'removeReading'
-    ).length;
-    const rest = judgements.filter((entry) => entry.action === 'keep' || entry.action === 'missing');
-    return {
-      batch,
-      total: judgements.length,
-      removed,
-      kept: rest.filter((entry) => entry.action === 'keep').length,
-      missing: rest.filter((entry) => entry.action === 'missing').length,
-      items: rest.map((entry) => (entry as { item: ImportUndoItem }).item),
-      blockedReason: null,
-    };
+    // 只读事务：批次、编号映射与每条记录要在同一个快照上判定，
+    // 否则读到一半另一页改了记录，预览里的「删几条」本身就是拼出来的。
+    return this.db.transaction(
+      'r',
+      [this.db.importBatches, this.db.importItems, this.db.bookmarks, this.db.readingItems],
+      async () => {
+        const batch = await this.db.importBatches.get(batchId);
+        if (!batch) throw new AppError('NOT_FOUND', '找不到这次导入的记录。');
+        const blockedReason = undoBlockedReason(batch);
+        if (blockedReason) {
+          return { batch, total: 0, removed: 0, kept: 0, missing: 0, items: [], blockedReason };
+        }
+        const { judgements } = await this.judgeBatchItems(batch);
+        const removed = judgements.filter(
+          (entry) => entry.action === 'removeBookmark' || entry.action === 'removeReading'
+        ).length;
+        const rest = judgements.filter((entry) => entry.action === 'keep' || entry.action === 'missing');
+        return {
+          batch,
+          total: judgements.length,
+          removed,
+          kept: rest.filter((entry) => entry.action === 'keep').length,
+          missing: rest.filter((entry) => entry.action === 'missing').length,
+          items: rest.map((entry) => (entry as { item: ImportUndoItem }).item),
+          blockedReason: null,
+        };
+      }
+    );
   }
 
   /**
@@ -1248,6 +1291,7 @@ export class DexieImportRepository implements ImportRepository {
         this.db.importItems,
         this.db.settings,
         this.db.purgeSnapshots,
+        this.db.meta,
       ],
       async () => {
         const batch = await this.db.importBatches.get(batchId);

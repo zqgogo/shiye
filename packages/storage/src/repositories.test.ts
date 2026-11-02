@@ -601,6 +601,92 @@ describe('清理快照与单次恢复', () => {
     expect(outcome.restored).toBe(2);
     expect(await repos.reading.listPending()).toHaveLength(2);
   });
+
+  it('恢复把版本推到清理前之上，旧编辑基线保存会被拒绝', async () => {
+    const created = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/stale-edit',
+      title: '初始标题',
+    });
+    // 清理前就打开的编辑页，手里拿着这个基线。
+    const staleBaseline = created.localRevision;
+    await repos.bookmarks.update(created.id, staleBaseline, { title: '清理前的修改' }, 'human');
+    await repos.bookmarks.purgeAll();
+    const [snapshot] = await repos.purge.list();
+    if (!snapshot) throw new Error('应当留下清理快照');
+
+    await repos.purge.restore(snapshot.id);
+    const restored = await db.bookmarks.get(created.id);
+    expect(restored?.title).toBe('清理前的修改');
+    expect(restored?.localRevision).toBeGreaterThan(staleBaseline);
+
+    // 关键断言：旧基线不能再写进去，否则「恢复」等于没恢复。
+    await expect(
+      repos.bookmarks.update(created.id, staleBaseline, { title: '旧页面覆盖' }, 'human')
+    ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
+    expect((await db.bookmarks.get(created.id))?.title).toBe('清理前的修改');
+
+    // 刷新后拿到新基线仍然可以正常编辑，恢复不是把条目变成只读。
+    const next = await repos.bookmarks.update(
+      created.id,
+      restored!.localRevision,
+      { title: '恢复后的修改' },
+      'human'
+    );
+    expect(next.title).toBe('恢复后的修改');
+  });
+
+  it('从更早的快照恢复，版本也不会退回到中间的旧基线', async () => {
+    const created = await repos.bookmarks.create({
+      originalUrl: 'https://example.com/stale-rollback',
+      title: '第一版',
+    });
+    await repos.bookmarks.purgeAll();
+    const [first] = await repos.purge.list();
+    if (!first) throw new Error('应当留下清理快照');
+
+    await repos.purge.restore(first.id);
+    // 恢复后再改一次：这一版的版本号高于最早那份快照里记的版本。
+    const afterRestore = await db.bookmarks.get(created.id);
+    const edited = await repos.bookmarks.update(
+      created.id,
+      afterRestore!.localRevision,
+      { title: '恢复后又改' },
+      'human'
+    );
+    const staleBaseline = edited.localRevision;
+
+    await repos.bookmarks.purgeAll();
+    // 故意从更早的那份快照恢复，而不是最近一次。
+    const outcome = await repos.purge.restore(first.id);
+    expect(outcome.restored).toBe(1);
+
+    const restored = await db.bookmarks.get(created.id);
+    expect(restored?.localRevision).toBeGreaterThan(staleBaseline);
+    await expect(
+      repos.bookmarks.update(created.id, staleBaseline, { title: '中间那一版覆盖' }, 'human')
+    ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
+  });
+
+  it('待看恢复同样换版本，旧基线不能再用于转换', async () => {
+    const { item } = await repos.reading.add({
+      originalUrl: 'https://example.com/reading-stale',
+      title: '待看旧基线',
+    });
+    const staleBaseline = item.localRevision;
+    await repos.reading.purgePending();
+    const [snapshot] = await repos.purge.list();
+    if (!snapshot) throw new Error('应当留下清理快照');
+
+    await repos.purge.restore(snapshot.id);
+    const restored = await repos.reading.get(item.id);
+    expect(restored!.localRevision).toBeGreaterThan(staleBaseline);
+
+    await expect(repos.reading.convertToBookmark(item.id, staleBaseline, {})).rejects.toMatchObject({
+      code: 'REVISION_CONFLICT',
+    });
+    const converted = await repos.reading.convertToBookmark(item.id, restored!.localRevision, {});
+    expect(converted.bookmark.originalUrl).toBe('https://example.com/reading-stale');
+  });
 });
 
 describe('清理快照与本机安全网', () => {
@@ -671,7 +757,7 @@ describe('批次撤回：预览、保留原因与留档', () => {
     return { batchId, createdIds: result.createdIds };
   }
 
-  it('预览的三类计数与执行结果完全一致', async () => {
+  it('没有并发改动时，预览的三类计数与执行结果一致', async () => {
     const { batchId, createdIds } = await commitBatch('library', [
       { title: '原样未动', url: 'https://example.com/keep-clean' },
       { title: '被改过', url: 'https://example.com/keep-modified' },
@@ -809,9 +895,202 @@ describe('批次撤回：预览、保留原因与留档', () => {
   });
 });
 
+describe('查看本批与处理全部匹配', () => {
+  let seq = 0;
+
+  /** 带目录与不同站点的批次：目录来自导入时的收藏夹名，站点来自主机名。 */
+  async function commitFolderBatch(
+    destination: 'library' | 'reading',
+    specs: { title: string; url: string; folder: string }[]
+  ): Promise<{ batchId: string; createdIds: string[] }> {
+    seq += 1;
+    const batchId = `view-batch-${seq}-${Date.now()}`;
+    const result = await repos.imports.commit({
+      batchId,
+      source: 'bookmarkHtml',
+      fileName: `folder-${seq}.html`,
+      fileHash: null,
+      destination,
+      rows: specs.map((spec, index) => ({
+        sourceKey: `row-${index + 1}`,
+        line: index + 1,
+        originalUrl: spec.url,
+        canonicalUrl: spec.url,
+        title: spec.title,
+        sourceFolder: spec.folder,
+        targetCategoryId: null,
+        status: 'new' as const,
+        reason: '可保存',
+        selected: true,
+        duplicateOf: null,
+      })),
+    });
+    return { batchId, createdIds: result.createdIds };
+  }
+
+  it('查看本批只列这一批新建的记录，并标出各自现状', async () => {
+    const { batchId } = await commitFolderBatch('library', [
+      { title: '原样未动', url: 'https://a.example.com/1', folder: '工作' },
+      { title: '被改过', url: 'https://b.example.com/2', folder: '工作' },
+      { title: '进了回收站', url: 'https://a.example.com/3', folder: '生活' },
+      { title: '被删掉了', url: 'https://c.example.com/4', folder: '生活' },
+    ]);
+
+    const edited = await repos.bookmarks.findByCanonical('https://b.example.com/2');
+    if (!edited) throw new Error('样本缺失');
+    await repos.bookmarks.update(edited.id, edited.localRevision, { title: '改过的标题' }, 'human');
+    const trashed = await repos.bookmarks.findByCanonical('https://a.example.com/3');
+    if (!trashed) throw new Error('样本缺失');
+    await repos.bookmarks.softDelete(trashed.id);
+    const gone = await repos.bookmarks.findByCanonical('https://c.example.com/4');
+    if (!gone) throw new Error('样本缺失');
+    await db.bookmarks.delete(gone.id);
+
+    const view = await repos.imports.listBatchEntries(batchId);
+    expect(view.total).toBe(4);
+    expect(view.note).toBeNull();
+    expect(view.folders.sort()).toEqual(['工作', '生活']);
+    // 已不存在的记录连标题和站点都无从查起，只保留 id 与状态，不能编造。
+    expect(view.sites.sort()).toEqual(['a.example.com', 'b.example.com']);
+    expect(view.counts).toMatchObject({ untouched: 1, modified: 1, trashed: 1, missing: 1 });
+    const missing = view.rows.find((row) => row.state === 'missing');
+    expect(missing?.title).toBe('');
+    expect(missing?.site).toBe('');
+    const untouched = view.rows.find((row) => row.state === 'untouched');
+    expect(untouched?.folder).toBe('工作');
+    expect(untouched?.site).toBe('a.example.com');
+  });
+
+  it('按目录筛选后一次处理全部匹配，目录之外的一条不动', async () => {
+    const { batchId } = await commitFolderBatch('library', [
+      { title: '工作一', url: 'https://work.example.com/1', folder: '工作' },
+      { title: '工作二', url: 'https://work.example.com/2', folder: '工作' },
+      { title: '工作三', url: 'https://work.example.com/3', folder: '工作' },
+      { title: '生活一', url: 'https://life.example.com/1', folder: '生活' },
+      { title: '生活二', url: 'https://life.example.com/2', folder: '生活' },
+    ]);
+
+    const preview = await repos.imports.previewBatchCleanup({
+      batchId,
+      folders: ['工作'],
+      sites: [],
+      states: [],
+    });
+    expect(preview.total).toBe(5);
+    expect(preview.matched).toBe(3);
+    expect(preview.actionable).toBe(3);
+    expect(preview.protectedCount).toBe(0);
+    expect(preview.token.items).toHaveLength(3);
+
+    const outcome = await repos.imports.cleanupBatch(preview.token, 'trash');
+    expect(outcome.removed).toBe(3);
+    expect(outcome.skipped).toHaveLength(0);
+    // 只进回收站：不产生清理快照，回收站本身就能撤销。
+    expect(outcome.snapshotId).toBeNull();
+
+    const active = (await repos.bookmarks.listActive()).map((row) => row.title).sort();
+    expect(active).toEqual(['生活一', '生活二']);
+    expect(await repos.bookmarks.listDeleted()).toHaveLength(3);
+    expect(
+      (await db.tombstones.toArray()).filter((row) => row.entityType === 'bookmark')
+    ).toHaveLength(3);
+  });
+
+  it('彻底删除会留清理快照，可以按次找回', async () => {
+    const { batchId } = await commitFolderBatch('library', [
+      { title: '要清的', url: 'https://purge.example.com/1', folder: '旧项目' },
+      { title: '留下的', url: 'https://purge.example.com/2', folder: '新项目' },
+    ]);
+
+    const preview = await repos.imports.previewBatchCleanup({
+      batchId,
+      folders: ['旧项目'],
+      sites: [],
+      states: [],
+    });
+    const outcome = await repos.imports.cleanupBatch(preview.token, 'delete');
+    expect(outcome.removed).toBe(1);
+    expect(outcome.snapshotId).toBeTruthy();
+    expect(await db.bookmarks.count()).toBe(1);
+
+    const [snapshot] = await repos.purge.list();
+    expect(snapshot?.entry).toBe('importBatch');
+    expect(snapshot?.counts.bookmarks).toBe(1);
+    // 范围描述要能看出是哪一批、按什么条件清的。
+    expect(snapshot?.scopeLabel).toContain('folder-');
+
+    const restored = await repos.purge.restore(snapshot!.id);
+    expect(restored.restored).toBe(1);
+    expect(await db.bookmarks.count()).toBe(2);
+  });
+
+  it('预览之后被改动的条目不纳入执行，少处理一条并报原因', async () => {
+    const { batchId } = await commitFolderBatch('library', [
+      { title: '甲', url: 'https://drift.example.com/1', folder: '待清' },
+      { title: '乙', url: 'https://drift.example.com/2', folder: '待清' },
+      { title: '丙', url: 'https://drift.example.com/3', folder: '待清' },
+    ]);
+
+    const preview = await repos.imports.previewBatchCleanup({
+      batchId,
+      folders: ['待清'],
+      sites: [],
+      states: [],
+    });
+    expect(preview.actionable).toBe(3);
+
+    // 确认之前，另一个页面改了这一条：执行时要按最新状态保留，不能照旧删。
+    const changed = await repos.bookmarks.findByCanonical('https://drift.example.com/2');
+    if (!changed) throw new Error('样本缺失');
+    await repos.bookmarks.update(changed.id, changed.localRevision, { note: '确认前改的' }, 'human');
+
+    const outcome = await repos.imports.cleanupBatch(preview.token, 'trash');
+    expect(outcome.removed).toBe(2);
+    expect(outcome.skipped).toHaveLength(1);
+    expect(outcome.skipped[0]?.reason).toContain('预览后被修改');
+    expect((await db.bookmarks.get(changed.id))?.deletedAt).toBeNull();
+  });
+
+  it('待看没有回收站：选回收站也是彻底删除，但留了快照', async () => {
+    const { batchId } = await commitFolderBatch('reading', [
+      { title: '队列甲', url: 'https://read.example.com/1', folder: '稍后读' },
+      { title: '队列乙', url: 'https://read.example.com/2', folder: '稍后读' },
+    ]);
+
+    const preview = await repos.imports.previewBatchCleanup({
+      batchId,
+      folders: [],
+      sites: [],
+      states: [],
+    });
+    const outcome = await repos.imports.cleanupBatch(preview.token, 'trash');
+    expect(outcome.removed).toBe(2);
+    expect(outcome.snapshotId).toBeTruthy();
+    expect(await repos.reading.listPending()).toHaveLength(0);
+
+    const [snapshot] = await repos.purge.list();
+    const restored = await repos.purge.restore(snapshot!.id);
+    expect(restored.restored).toBe(2);
+    expect(await repos.reading.listPending()).toHaveLength(2);
+  });
+
+  it('撤回后查看本批给出说明，不假装还能查到原批次', async () => {
+    const { batchId } = await commitFolderBatch('library', [
+      { title: '撤回样本', url: 'https://undo.example.com/1', folder: '临时' },
+    ]);
+    await repos.imports.undoBatch(batchId);
+
+    const view = await repos.imports.listBatchEntries(batchId);
+    expect(view.total).toBe(0);
+    expect(view.note).toContain('编号映射已清空');
+    await expect(
+      repos.imports.previewBatchCleanup({ batchId, folders: [], sites: [], states: [] })
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+});
+
 describe('批次字段迁移', () => {
-  it('版本 3 主库升级时给老批次补上撤回字段，且不编造撤回记录', async () => {
-    const name = `shiye-migrate-v4-${Date.now()}`;
+  it('版本 3 主库升级时给老批次补上撤回字段，且不编造撤回记录', async () => {    const name = `shiye-migrate-v4-${Date.now()}`;
     const legacy = new Dexie(name);
     legacy.version(3).stores({
       bookmarks:

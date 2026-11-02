@@ -432,6 +432,26 @@ describe('手动交接的批次持久化与撤销', () => {
     return { bookmark, category, pack, checked };
   }
 
+  it('清理快照恢复后，清理前的材料包不能再写进库', async () => {
+    const { pack, checked } = await prepare('恢复后旧建议');
+
+    // 清空整库再从快照找回：条目本身回来了，但恢复前的编辑/AI 基线必须失效。
+    await service.purgeAllBookmarks();
+    const snapshots = await service.listPurgeSnapshots();
+    expect(snapshots).toHaveLength(1);
+    await service.restorePurgeSnapshot(snapshots[0]!.id);
+
+    const outcome = await service.applySuggestions(
+      pack.batchId,
+      checked.applied.map((item) => ({ n: item.n, bookmark: item.bookmark, patch: item.patch }))
+    );
+    expect(outcome.applied).toHaveLength(0);
+    expect(outcome.skipped[0]?.reason).toContain('内容已在别处修改');
+    // 恢复后的条目保持原样，没有被旧建议悄悄改掉。
+    const after = await repos.bookmarks.get(checked.applied[0]!.bookmark.id);
+    expect(after?.aiPurpose).toBe('');
+  });
+
   it('批次与编号映射落库，刷新后可续接同一批', async () => {
     const bookmark = await repos.bookmarks.create({
       originalUrl: 'https://example.com/resume',

@@ -195,6 +195,89 @@ export interface ImportItem {
   entityId: Id;
 }
 
+/**
+ * 「查看本批」里每条记录的当前状态。
+ *
+ * 判定顺序与撤回保持一致：先看它还在不在，再看它变成了什么，最后才是「有没有被改过」。
+ * 只有 untouched 能被批量清理，其余一律按「已加工」保留并说明原因。
+ */
+export type BatchEntryState = 'untouched' | 'modified' | 'trashed' | 'converted' | 'completed' | 'missing';
+
+export interface BatchEntryRow {
+  entityId: Id;
+  title: string;
+  originalUrl: string;
+  /** 站点（主机名），用于按站点筛选。 */
+  site: string;
+  /** 导入时的收藏夹目录；待看没有目录，为空串。 */
+  folder: string;
+  state: BatchEntryState;
+  /** 预览时的版本，用于执行阶段复核「有没有被改过」。 */
+  localRevision: number;
+}
+
+export interface BatchEntryView {
+  batch: ImportBatch;
+  /** 本批仍能查到的记录数（按编号映射）。 */
+  total: number;
+  rows: BatchEntryRow[];
+  folders: string[];
+  sites: string[];
+  counts: Record<BatchEntryState, number>;
+  /** 撤回后编号映射已被清空，无法再查原批次；此处给出可读说明。 */
+  note: string | null;
+}
+
+/** 批量清理的筛选条件：留空即该项不限。 */
+export interface BatchCleanupCriteria {
+  batchId: Id;
+  folders: string[];
+  sites: string[];
+  states: BatchEntryState[];
+}
+
+/**
+ * 冻结后的处理范围。
+ *
+ * 预览时把「哪些 id、当时的版本是多少」一起冻住，执行只认这份清单：
+ * 预览之后新增的命中不会因为「条件还成立」被悄悄卷进来，改动过的条目也会因版本不符被跳过。
+ */
+export interface BatchCleanupToken {
+  batchId: Id;
+  frozenAt: ISODateTime;
+  /** 写进清理快照的范围描述，例如「批次：bookmarks.html · 目录：工作」。 */
+  label: string;
+  items: { entityId: Id; localRevision: number }[];
+}
+
+export interface BatchCleanupPreview {
+  batch: ImportBatch;
+  total: number;
+  /** 命中筛选条件的条数（全部状态）。 */
+  matched: number;
+  /** 其中可以处理的条数（未改动、未删除），也就是本次冻结的范围。 */
+  actionable: number;
+  /** 命中但不能处理（已加工或已删除）的条数。 */
+  protectedCount: number;
+  byState: Record<BatchEntryState, number>;
+  /** 前若干条明细，供界面展示「处理的是哪些」。 */
+  sample: BatchEntryRow[];
+  token: BatchCleanupToken;
+  frozenAt: ISODateTime;
+}
+
+/** trash 仅对收藏有意义：进回收站可撤销；待看没有回收站，两个模式都是彻底删除。 */
+export type BatchCleanupMode = 'trash' | 'delete';
+
+export interface BatchCleanupResult {
+  mode: BatchCleanupMode;
+  removed: number;
+  /** 执行时因「已被改动、已删除、已不属于本批」而跳过的条目。 */
+  skipped: { entityId: Id; title: string; reason: string }[];
+  /** 本次硬删除留下的清理快照；只进回收站时为 null。 */
+  snapshotId: string | null;
+}
+
 export type ImportRowStatus = 'new' | 'duplicate' | 'invalid' | 'suspected';
 
 export interface ImportRow {

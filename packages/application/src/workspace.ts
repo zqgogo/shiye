@@ -26,6 +26,12 @@ import {
   type AiInputItem,
   type AIReply,
   type BackupDocument,
+  type BatchCleanupCriteria,
+  type BatchCleanupMode,
+  type BatchCleanupPreview,
+  type BatchCleanupResult,
+  type BatchCleanupToken,
+  type BatchEntryView,
   type Bookmark,
   type BookmarkPatch,
   type Category,
@@ -396,13 +402,33 @@ export class WorkspaceService {
     return this.repos.imports.listBatches(query);
   }
 
-  /** 撤回前的只读预演：数字必须与随后真正执行的结果一致。 */
+  /**
+   * 撤回前的只读预演。
+   *
+   * 数字是「此刻按这套规则会删多少」，不是承诺：执行时在事务里重算，
+   * 期间被改过、转过收藏或删掉的条目会保留。执行结果以 `undoImport` 返回的计数为准。
+   */
   async previewUndoImport(batchId: string): Promise<ImportUndoPreview> {
     return this.repos.imports.previewUndoBatch(batchId);
   }
 
   async undoImport(batchId: string): Promise<ImportUndoResult> {
     return this.repos.imports.undoBatch(batchId);
+  }
+
+  /** 查看本批：这一批实际新建的记录与现状，供按原始目录 / 站点 / 状态筛选。 */
+  async listBatchEntries(batchId: string): Promise<BatchEntryView> {
+    return this.repos.imports.listBatchEntries(batchId);
+  }
+
+  /** 冻结「处理全部匹配」的范围：命中多少、能处理多少、处理哪些 id 与版本。 */
+  async previewBatchCleanup(criteria: BatchCleanupCriteria): Promise<BatchCleanupPreview> {
+    return this.repos.imports.previewBatchCleanup(criteria);
+  }
+
+  /** 执行批量清理：只处理冻结清单；收藏默认进回收站，彻底删除先写清理快照。 */
+  async cleanupBatch(token: BatchCleanupToken, mode: BatchCleanupMode): Promise<BatchCleanupResult> {
+    return this.repos.imports.cleanupBatch(token, mode);
   }
 
   /** 彻底清空收藏库（含墓碑）：清空后同一网址可以重新导入。不可恢复。 */

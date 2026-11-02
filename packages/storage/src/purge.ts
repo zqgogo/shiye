@@ -11,7 +11,9 @@ import {
   type ReadingItem,
   type Tombstone,
 } from '@shiye/core';
-import { deriveIndexFields, type ShiyeDB } from './db.js';
+import { deriveIndexFields, type MetaRow, type ShiyeDB } from './db.js';
+
+type FloorEntity = 'bookmark' | 'reading';
 
 /**
  * 测试与故障演练用的注入点。
@@ -122,6 +124,7 @@ export async function writePurgeSnapshot(
   }
 
   await hooks?.beforeSnapshotWrite?.();
+  await recordRevisionFloors(db, { bookmarks, readingItems });
   await db.purgeSnapshots.put(snapshot);
   return snapshot.id;
 }
@@ -133,6 +136,63 @@ export async function triggerDeleteHook(hooks?: PurgeHooks): Promise<void> {
 
 function skip(id: string, title: string, reason: string): PurgeRestoreDecision {
   return { id, title, action: 'skip', reason };
+}
+
+/** 每个实体一条版本高水位记录，键里带类型，收藏与待看同 id 也不会串。 */
+function floorKey(entityType: FloorEntity, id: string): string {
+  return `revfloor:${entityType}:${id}`;
+}
+
+/**
+ * 硬删除前记下这些实体用过的最高版本号。
+ *
+ * 恢复如果直接写回「快照里的版本」或退回 1，清理前打开的编辑页仍拿着旧基线，
+ * 版本校验会重新放行，让旧页面覆盖恢复后的内容。所以版本必须只增不减：
+ * 删除时记高水位，恢复时从高水位往上加。放在写快照这一步统一做，
+ * 是因为所有硬删除入口都必经此处，没有第二条路会漏记。
+ */
+export async function recordRevisionFloors(
+  db: ShiyeDB,
+  payload: Pick<PurgeSnapshotPayload, 'bookmarks' | 'readingItems'>
+): Promise<void> {
+  const entries: MetaRow[] = [];
+  for (const row of payload.bookmarks ?? []) {
+    entries.push({ key: floorKey('bookmark', row.id), value: Math.max(row.revision, row.localRevision) });
+  }
+  for (const row of payload.readingItems ?? []) {
+    entries.push({ key: floorKey('reading', row.id), value: Math.max(row.revision, row.localRevision) });
+  }
+  if (entries.length === 0) return;
+
+  const stored = await db.meta.bulkGet(entries.map((entry) => entry.key));
+  await db.meta.bulkPut(
+    entries.map((entry, index) => {
+      const previous = stored[index]?.value;
+      const floor = typeof previous === 'number' ? previous : 0;
+      const value = typeof entry.value === 'number' ? entry.value : 0;
+      return { key: entry.key, value: Math.max(floor, value) };
+    })
+  );
+}
+
+/**
+ * 分配恢复后的版本号：严格大于这条记录用过的任何版本。
+ *
+ * 只比「快照里的版本」大是不够的：从更早的快照恢复时，中间那几次编辑的版本
+ * 可能已经更高，回退到「快照版本 + 1」正好撞上旧基线。高水位记录只增不减，
+ * 所以无论是第几次恢复、从哪份快照恢复，新版本都必然大于此前所有基线。
+ */
+async function allocateRestoredVersion(
+  db: ShiyeDB,
+  entityType: FloorEntity,
+  row: { id: string; revision: number; localRevision: number }
+): Promise<number> {
+  const key = floorKey(entityType, row.id);
+  const stored = await db.meta.get(key);
+  const floor = typeof stored?.value === 'number' ? stored.value : 0;
+  const next = Math.max(floor, row.revision, row.localRevision) + 1;
+  await db.meta.put({ key, value: next });
+  return next;
 }
 
 async function decideBookmark(db: ShiyeDB, row: Bookmark): Promise<PurgeRestoreDecision> {
@@ -224,7 +284,7 @@ export async function restorePurgeSnapshot(
 ): Promise<{ preview: PurgeRestorePreview; restored: number }> {
   return db.transaction(
     'rw',
-    [db.bookmarks, db.readingItems, db.tombstones, db.categories, db.purgeSnapshots],
+    [db.bookmarks, db.readingItems, db.tombstones, db.categories, db.purgeSnapshots, db.meta],
     async () => {
       const snapshot = await db.purgeSnapshots.get(snapshotId);
       if (!snapshot) throw new AppError('NOT_FOUND', '这条清理快照已经不在了。');
@@ -244,13 +304,16 @@ export async function restorePurgeSnapshot(
         if (bookmark) {
           const categoryId =
             bookmark.categoryId && (await db.categories.get(bookmark.categoryId)) ? bookmark.categoryId : null;
+          // 版本只能往上走：写回快照里的版本（甚至退回 1）会让清理前的旧编辑基线重新生效，
+          // 旧页面一保存就把恢复后的内容覆盖掉，而版本校验还认为「没冲突」。
+          const version = await allocateRestoredVersion(db, 'bookmark', bookmark);
           const next: Bookmark = {
             ...bookmark,
             categoryId,
             // 原本在回收站的就回回收站，不复活的条目不会突然出现在收藏列表里。
             deletedAt: bookmark.deletedAt ?? null,
-            revision: 1,
-            localRevision: 1,
+            revision: version,
+            localRevision: version,
             updatedAt: now,
           };
           Object.assign(next, deriveIndexFields(next));
@@ -261,7 +324,9 @@ export async function restorePurgeSnapshot(
         }
         const reading = readingById.get(decision.id);
         if (reading) {
-          await db.readingItems.put({ ...reading });
+          // 待看同样要换版本：旧页面拿着的 localRevision 不能再用来转换或改写这条。
+          const version = await allocateRestoredVersion(db, 'reading', reading);
+          await db.readingItems.put({ ...reading, revision: version, localRevision: version });
           restored += 1;
         }
       }

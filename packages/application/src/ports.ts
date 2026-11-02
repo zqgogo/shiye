@@ -3,6 +3,12 @@ import type {
   AppSettings,
   AppliedChange,
   BackupDocument,
+  BatchCleanupCriteria,
+  BatchCleanupMode,
+  BatchCleanupPreview,
+  BatchCleanupResult,
+  BatchCleanupToken,
+  BatchEntryView,
   Bookmark,
   BookmarkPatch,
   Category,
@@ -235,7 +241,12 @@ export interface ImportRepository {
   getBatch(id: string): Promise<ImportBatch | undefined>;
   /** 批次历史：支持按文件名搜索与分页，不再固定只给最近 20 批。 */
   listBatches(query?: ImportBatchQuery): Promise<ImportBatchPage>;
-  /** 只读预演：不写库，给出可移除 / 会保留 / 已缺失的条目明细。 */
+  /**
+   * 只读预演：在同一个只读事务里给出可移除 / 会保留 / 已缺失的条目明细。
+   *
+   * 预览数字不是承诺：执行时会重新读库，预览之后被改过、转过收藏或删掉的条目会改判为保留，
+   * 实际移除数可能少于预览数。界面必须说明这一点，并把实际结果报出来。
+   */
   previewUndoBatch(batchId: string): Promise<ImportUndoPreview>;
   /**
    * 撤销一批导入：把这一批新建的收藏或待看删掉，回到「导入之前」。
@@ -245,6 +256,24 @@ export interface ImportRepository {
    * 否则同一网址重新导入会被自己留下的删除标记挡住。
    */
   undoBatch(batchId: string): Promise<ImportUndoResult>;
+
+  /**
+   * 查看本批：按编号映射列出这一批实际新建的记录与现状（未改动 / 已改动 / 已删除 / 已转收藏 / 已完成 / 已不存在）。
+   * 不拿目录猜一份看起来完整的列表；撤回后映射已清空，会返回可读说明而不是空列表。
+   */
+  listBatchEntries(batchId: string): Promise<BatchEntryView>;
+
+  /**
+   * 预览「处理全部匹配」：命中数按筛选条件算，处理范围只冻结其中未改动的记录并记下版本。
+   * 冻结之后新增或改动的条目不会因为「条件还成立」被卷进这次处理。
+   */
+  previewBatchCleanup(criteria: BatchCleanupCriteria): Promise<BatchCleanupPreview>;
+
+  /**
+   * 执行批量清理：只处理冻结清单，事务内复核，并发的改动会被跳过并报原因。
+   * 收藏默认进回收站；彻底删除与待看删除先写本机清理快照，写不进去就一条都不删。
+   */
+  cleanupBatch(token: BatchCleanupToken, mode: BatchCleanupMode): Promise<BatchCleanupResult>;
 }
 
 export interface CreateHandoffParams {

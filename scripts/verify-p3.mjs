@@ -250,8 +250,12 @@ async function ensureCategory(page, name) {
 /** 读「最近清理」面板里实际渲染出来的快照行，不信任任何计数文案。 */
 function readPurgeSnapshots(page) {
   return page.evaluate(() => {
+    // 按标题定位，不按全文：页面别处的说明里也会提到「最近清理」，
+    // 用 innerText.includes 会把「最近导入」面板当成它，读到一堆批次行。
     const panels = [...document.querySelectorAll('.panel')];
-    const panel = panels.find((node) => (node.innerText ?? '').includes('最近清理'));
+    const panel = panels.find((node) =>
+      [...node.querySelectorAll('h2')].some((heading) => (heading.textContent ?? '').trim() === '最近清理')
+    );
     const rows = [...(panel?.querySelectorAll('article.bookmark') ?? [])].map((row) =>
       (row.innerText ?? '').replace(/\s+/g, ' ').trim()
     );
@@ -1239,6 +1243,155 @@ async function main() {
       'P9.4 恢复不产生外部请求也不触发页面错误',
       externalRequests.length === 0,
       `外部请求=${JSON.stringify(externalRequests)}`
+    );
+  });
+
+  phase('P9.2 查看本批与处理全部匹配', async () => {
+    // 造一批 60 条、两个站点各 30 条：用「站点」把其中一半切出来，
+    // 验证「处理全部匹配」按的是全部命中，而不是页面上显示的前 50 条。
+    await goto(page, 'capture', '一次收下多个链接');
+    const lines = [];
+    for (let index = 0; index < 30; index += 1) lines.push(`https://work.example.com/item-${index}`);
+    for (let index = 0; index < 30; index += 1) lines.push(`https://life.example.com/item-${index}`);
+    await setReactInput(page, 'textarea[aria-label="粘贴链接"]', lines.join('\n'));
+    await clickIn(page, '.panel', '预览链接 →');
+    await waitPreview(page);
+    await page.select('select[aria-label="保存目标"]', 'library');
+    await sleep(800);
+    await clickIn(page, '.batchbar', '确认写入');
+    await waitForText(page, '导入完成', 40_000);
+    await sleep(800);
+
+    await goto(page, 'data', '数据在手里');
+    await waitForText(page, '查看本批', 20_000);
+    await clickIn(page, '', '查看本批');
+    await waitForText(page, '本批明细', 20_000);
+    await sleep(600);
+
+    const detailText = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('本批明细')
+      );
+      return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    });
+    report.counts.batchDetail = detailText.slice(0, 220);
+    record(
+      'P9.2 查看本批列出这一批新建的记录，并写明「匹配 60 条、当前只显示 50 条」',
+      /本批明细/.test(detailText) && /匹配 60 条，当前显示 50 条/.test(detailText),
+      detailText.slice(0, 160)
+    );
+
+    await page.select('select[aria-label="本批站点"]', 'work.example.com');
+    await sleep(500);
+    const siteFiltered = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('本批明细')
+      );
+      return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    });
+    record(
+      'P9.2 按站点筛选后命中数与可处理数同步收敛',
+      /匹配 30 条，当前显示 30 条/.test(siteFiltered) && /30 条可处理/.test(siteFiltered),
+      siteFiltered.slice(0, 140)
+    );
+
+    const before = await page.evaluate(readMainLibrary);
+    const activeBefore = before.bookmarks.filter((row) => row.lifeState === 'active').length;
+
+    // 预览冻结之后，另一个页面改掉其中一条：执行时必须跳过它，不能照旧删。
+    await clickIn(page, '', '移入回收站 30 条');
+    await waitForText(page, '确认处理 30 条', 15_000);
+    const mutated = await page.evaluate(async () => {
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('shiye');
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(request.result);
+      });
+      const all = await new Promise((resolve, reject) => {
+        const tx = db.transaction('bookmarks', 'readonly');
+        const request = tx.objectStore('bookmarks').getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const row = all.find((entry) => entry.originalUrl === 'https://work.example.com/item-7');
+      if (!row) return null;
+      row.localRevision += 1;
+      row.revision += 1;
+      row.note = '预览之后改的';
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction('bookmarks', 'readwrite');
+        tx.objectStore('bookmarks').put(row);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+      db.close();
+      return row.localRevision;
+    });
+    if (!mutated) throw new Error('没找到用于并发改动的样本');
+
+    await clickIn(page, '', '确认处理 30 条');
+    await waitForText(page, '已处理', 25_000);
+    await sleep(900);
+    const afterTrash = await page.evaluate(readMainLibrary);
+    const activeAfterTrash = afterTrash.bookmarks.filter((row) => row.lifeState === 'active').length;
+    const keptOne = afterTrash.bookmarks.find(
+      (row) => row.originalUrl === 'https://work.example.com/item-7'
+    );
+    const trashResult = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('已处理')
+      );
+      return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    });
+    report.counts.batchCleanupTrash = trashResult.slice(0, 200);
+    record(
+      'P9.2 移入回收站按全部匹配执行（29 条），并按最新状态留下被改动的那条',
+      activeBefore - activeAfterTrash === 29 &&
+        keptOne?.lifeState === 'active' &&
+        /跳过 1 条/.test(trashResult) &&
+        /预览后被修改/.test(trashResult),
+      `在库 ${activeBefore}→${activeAfterTrash}｜${trashResult.slice(0, 120)}`
+    );
+
+    // 另一站点整段彻底删除：连删除标记一起清，但先留一份清理快照。
+    const snapshotsBefore = await readPurgeSnapshots(page);
+    await page.select('select[aria-label="本批站点"]', 'life.example.com');
+    await sleep(500);
+    await clickIn(page, '', '彻底删除 30 条');
+    await waitForText(page, '确认处理 30 条', 15_000);
+    await clickIn(page, '', '确认处理 30 条');
+    await waitForText(page, '已处理 30 条', 25_000);
+    await sleep(1200);
+    const snapshotsAfter = await readPurgeSnapshots(page);
+    const afterDelete = await page.evaluate(readMainLibrary);
+    const activeAfterDelete = afterDelete.bookmarks.filter((row) => row.lifeState === 'active').length;
+    record(
+      'P9.2 彻底删除留下清理快照，范围写明批次与站点',
+      snapshotsAfter.rows[0] !== snapshotsBefore.rows[0] &&
+        /批次：/.test(snapshotsAfter.rows[0] ?? '') &&
+        /life\.example\.com/.test(snapshotsAfter.rows[0] ?? '') &&
+        /收藏 30/.test(snapshotsAfter.rows[0] ?? '') &&
+        activeAfterDelete === activeAfterTrash - 30,
+      `最新快照=${(snapshotsAfter.rows[0] ?? '').slice(0, 100)}｜在库 ${activeAfterTrash}→${activeAfterDelete}`
+    );
+
+    // 误操作后按次找回：这份快照只加回刚删的 30 条，不动回收站里那 29 条。
+    await clickIn(page, '', '看看能找回什么');
+    await waitForText(page, '可找回', 15_000);
+    const restorePreview = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('可找回')
+      );
+      return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    });
+    await clickIn(page, '', '恢复这 30 条');
+    await sleep(1600);
+    const afterRestore = await page.evaluate(readMainLibrary);
+    const activeAfterRestore = afterRestore.bookmarks.filter((row) => row.lifeState === 'active').length;
+    record(
+      'P9.2 清理后可按次找回这 30 条，回收站里的不被动',
+      /可找回 30 条/.test(restorePreview) && activeAfterRestore === activeAfterDelete + 30,
+      `在库 ${activeAfterDelete}→${activeAfterRestore}｜${restorePreview.slice(0, 100)}`
     );
   });
 
