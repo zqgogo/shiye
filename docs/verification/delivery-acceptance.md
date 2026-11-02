@@ -14,7 +14,7 @@
   - **阻塞**：外部条件不具备，代码也没做，不在本轮范围。
 - 所有断言名都能在 `.verify/reports/*.json` 的 `steps[].step` 里搜到；单测名在 `npm test` 的 verbose 输出里。
 
-最近一次执行（2026-11-02）：`npm test` **130 项通过**、`npm run typecheck` 通过、`npm run build` 通过、`verify:p3` **82 项全通过**（`errors=[]`）。其余阶段条数沿用各报告记录（P2 37 / P4 46 / P5 37 / P6 31 / a11y 16），本轮未逐条重跑，不与本轮结果混算。
+最近一次执行（2026-11-02）：`npm test` **130 项通过**、`npm run typecheck` 通过、`npm run build` 通过、`verify:p3` **83 项全通过**（`errors=[]`）。其余阶段条数沿用各报告记录（P2 37 / P4 46 / P5 37 / P6 31 / a11y 16），本轮未逐条重跑，不与本轮结果混算。
 
 ## 逐条对照
 
