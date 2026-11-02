@@ -203,6 +203,13 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
   const [selected, setSelected] = useState<string[]>([]);
   const [bulkPending, setBulkPending] = useState<'trash' | 'purge' | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
+  /**
+   * 刚做完一次硬删除（清空或批量彻底删除）。
+   *
+   * 硬删除不进回收站，只留本机快照；清完之后如果只弹一句 toast 就消失，
+   * 用户找不到「去哪儿找回」。这里留一张卡片，直接给一个跳到「最近清理」的按钮。
+   */
+  const [purged, setPurged] = useState<{ removed: number; label: string } | null>(null);
   const category = categoryId ? data.categories.find((entry) => entry.id === categoryId) : undefined;
 
   useEffect(() => {
@@ -293,6 +300,8 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
     setBulkPending(null);
     setSelected([]);
     const verb = action === 'trash' ? '移入回收站' : action === 'restore' ? '恢复' : '彻底删除';
+    // 彻底删除不进回收站，把「去哪儿找回」直接摆在页面上。
+    if (action === 'purge' && done > 0) setPurged({ removed: done, label: `手动选择的 ${done} 条` });
     if (done === ids.length) {
       toast(`已${verb} ${done} 条。`, 'ok');
     } else {
@@ -340,6 +349,8 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
   useEffect(() => {
     // 换页后不能保留上一页的确认状态，否则在另一页按一次就误清空了这一页的数据。
     setConfirmPurge(false);
+    // 上一次清空的提示同理：换了范围还说「刚删了 120 条」只会让人以为这一页也没了。
+    setPurged(null);
   }, [mode, categoryId]);
 
   /**
@@ -431,6 +442,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
               const removed = await run(purge.action, purge.done);
               if (removed === null) return;
               setConfirmPurge(false);
+              if (removed > 0) setPurged({ removed, label: purge.label });
               if (expected !== null && removed !== expected) {
                 toast(`实际删除 ${removed} 条，与确认时的 ${expected} 条不一致，请核对后重试。`, 'error');
               }
@@ -440,6 +452,24 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
           </button>
           <button className="btn small" onClick={() => setConfirmPurge(false)}>
             取消
+          </button>
+        </Notice>
+      ) : null}
+
+      {purged ? (
+        <Notice>
+          <strong>
+            已删除 {purged.removed} 条（{purged.label}）。
+          </strong>
+          <span>
+            这批记录不进回收站，删除标记也一起清掉了，所以可以重新导入同一批书签。动手前在本机留了一份快照，
+            可以按条找回（只留最近 5 份、仅本机）。
+          </span>
+          <button className="btn small primary" onClick={() => navigate('data:cleanup')}>
+            去最近清理找回
+          </button>
+          <button className="btn small" onClick={() => setPurged(null)}>
+            知道了
           </button>
         </Notice>
       ) : null}
@@ -668,6 +698,8 @@ export function ReadingPage() {
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  /** 刚清空 / 批量移出之后的回收提示：待看没有回收站，只能去「最近清理」找回。 */
+  const [purged, setPurged] = useState<number | null>(null);
   const pending = [...data.pendingReading].sort((a, b) => b.addedAt.localeCompare(a.addedAt));
   // 待看独立搜索：只查队列本身，不混入收藏库。
   const term = search.trim().toLowerCase();
@@ -708,6 +740,7 @@ export function ReadingPage() {
     setConfirmRemove(false);
     setSelected([]);
     // 待看没有回收站，说清楚去哪儿找回，别让人以为彻底没了。
+    if (removed > 0) setPurged(removed);
     toast(
       removed === ids.length
         ? `已移出 ${removed} 条待看；需要时可在「数据与备份 → 最近清理」里找回。`
@@ -760,12 +793,28 @@ export function ReadingPage() {
             onClick={async () => {
               const removed = await run(() => service.purgePendingReading(), '待看已清空。');
               if (removed !== null) setConfirmPurge(false);
+              if (removed) setPurged(removed);
             }}
           >
             确认清空
           </button>
           <button className="btn small" onClick={() => setConfirmPurge(false)}>
             取消
+          </button>
+        </Notice>
+      ) : null}
+
+      {purged ? (
+        <Notice>
+          <strong>已移出 {purged} 条待看。</strong>
+          <span>
+            待看没有回收站，移出即彻底删除；动手前在本机留了一份快照，可以按条找回（只留最近 5 份、仅本机）。
+          </span>
+          <button className="btn small primary" onClick={() => navigate('data:cleanup')}>
+            去最近清理找回
+          </button>
+          <button className="btn small" onClick={() => setPurged(null)}>
+            知道了
           </button>
         </Notice>
       ) : null}
@@ -908,6 +957,8 @@ export function ReadingPage() {
 export function ReadingHistoryPage() {
   const { data, service, run, navigate, toast } = useWorkspace();
   const [confirming, setConfirming] = useState(false);
+  /** 刚清理掉的条数：同样是硬删除，给一个直达「最近清理」的入口。 */
+  const [purged, setPurged] = useState<number | null>(null);
   const items = [...data.completedReading].sort((a, b) =>
     (b.completedAt ?? '').localeCompare(a.completedAt ?? '')
   );
@@ -935,6 +986,7 @@ export function ReadingHistoryPage() {
                 onClick={async () => {
                   const removed = await run(() => service.purgeCompletedReading(), '完成历史已清理。');
                   if (removed !== null) setConfirming(false);
+                  if (removed) setPurged(removed);
                 }}
               >
                 确认清理
@@ -950,6 +1002,19 @@ export function ReadingHistoryPage() {
           )
         ) : null}
       </Notice>
+
+      {purged ? (
+        <Notice>
+          <strong>已清理 {purged} 条完成记录。</strong>
+          <span>只影响完成历史，不动收藏；本机「最近清理」留了一份快照，可以按条找回。</span>
+          <button className="btn small primary" onClick={() => navigate('data:cleanup')}>
+            去最近清理找回
+          </button>
+          <button className="btn small" onClick={() => setPurged(null)}>
+            知道了
+          </button>
+        </Notice>
+      ) : null}
 
       <div className="listbox">
         <div className="listhead">

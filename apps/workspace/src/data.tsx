@@ -60,7 +60,13 @@ function emptyCleanupHint(preview: BatchCleanupPreview): string {
   return '这些记录不在这个动作的处理范围里。';
 }
 
-export function DataPage() {
+/**
+ * 数据与备份。
+ *
+ * focus='cleanup' 来自「清空完成后」的提示按钮（路由 data:cleanup）：进页面直接滚到
+ * 「最近清理」，不用让用户自己在长页面里找。
+ */
+export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
   const { data, service, run, reload, toast } = useWorkspace();
   const [includeLocalOnly, setIncludeLocalOnly] = useState(false);
   const [includeNote, setIncludeNote] = useState(true);
@@ -190,6 +196,22 @@ export function DataPage() {
     // 主库变化（导入、撤销、清理、恢复）后批次与清理快照都要跟着变。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [service, data.bookmarks.length, data.pendingReading.length, data.completedReading.length]);
+
+  // 从「清空完成」的提示进来时，直接把「最近清理」滚到视野里。
+  // 上面的「最近导入」和快照列表都是异步加载的，内容一到位就把面板往下推；
+  // 所以既在快照到货后重滚，也留两次延时校正，免得滚到一半被打回原处。
+  useEffect(() => {
+    if (focus !== 'cleanup') return;
+    const scroll = (behavior: ScrollBehavior) =>
+      document.getElementById('recent-cleanup')?.scrollIntoView({ block: 'start', behavior });
+    const frame = window.requestAnimationFrame(() => scroll('smooth'));
+    // 校正用瞬时滚动：内容加载完时如果还在做平滑动画，会被新高度顶回原处。
+    const timers = [window.setTimeout(() => scroll('auto'), 400), window.setTimeout(() => scroll('auto'), 1000)];
+    return () => {
+      window.cancelAnimationFrame(frame);
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [focus, snapshots, batches]);
 
   useEffect(() => {
     let alive = true;
@@ -936,7 +958,7 @@ export function DataPage() {
         </p>
       </div>
 
-      <div className="panel">
+      <div className="panel" id="recent-cleanup">
         <h2>最近清理</h2>
         <p>
           彻底清空、清空待看、清理完成历史和撤销导入都是硬删除，动手前会自动在本机留一份快照（保留最近 5

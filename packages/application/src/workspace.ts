@@ -72,6 +72,13 @@ export interface WorkspaceSnapshot {
   policy: Policy;
   pendingReading: ReadingItem[];
   completedReading: ReadingItem[];
+  /**
+   * 回收站里的条数。
+   *
+   * 侧栏要一个「回收站」入口，计数得跟快照一起下来；否则每次刷新侧栏都要
+   * 单独查一次回收站。listDeleted() 走 lifeState 索引，代价很小。
+   */
+  trashedCount: number;
 }
 
 export interface ImportPreview {
@@ -116,7 +123,7 @@ export class WorkspaceService {
   }
 
   private async loadAll(): Promise<WorkspaceSnapshot> {
-    const [bookmarks, categories, tags, settings, policy, pendingReading, completedReading] =
+    const [bookmarks, categories, tags, settings, policy, pendingReading, completedReading, trashed] =
       await Promise.all([
         this.repos.bookmarks.listActive(),
         this.repos.categories.list(),
@@ -125,8 +132,18 @@ export class WorkspaceService {
         this.repos.settings.getPolicy(),
         this.repos.reading.listPending(),
         this.repos.reading.listCompleted(),
+        this.repos.bookmarks.listDeleted(),
       ]);
-    return { bookmarks, categories, tags, settings, policy, pendingReading, completedReading };
+    return {
+      bookmarks,
+      categories,
+      tags,
+      settings,
+      policy,
+      pendingReading,
+      completedReading,
+      trashedCount: trashed.length,
+    };
   }
 
   async snapshot(): Promise<WorkspaceSnapshot> {

@@ -9,6 +9,7 @@ export const ICONS = {
   inbox: '▧',
   uncategorized: '◌',
   all: '▤',
+  trash: '⌫',
   search: '⌕',
   ai: '✧',
   settings: '⚙',
@@ -74,6 +75,8 @@ export function Sidebar() {
         {item('inbox', ICONS.inbox, '收件箱', inboxCount)}
         {item('uncategorized', ICONS.uncategorized, '未分类', uncategorized)}
         {item('all', ICONS.all, '全部收藏', active.length)}
+        {/* 删完东西第一反应是找回收站，所以把它从「设置与管理」里提到日常组。 */}
+        {item('trash', ICONS.trash, '回收站', data.trashedCount)}
       </div>
 
       <div className="navgroup" style={{ marginTop: 24 }}>

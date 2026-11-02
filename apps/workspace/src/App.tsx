@@ -31,6 +31,8 @@ function CurrentPage() {
   if (route === 'capture:file') return <CapturePage key="capture-file" initialMode="file" />;
   if (route === 'settings') return <SettingsPage />;
   if (route === 'data') return <DataPage />;
+  // 清空完成后的「去最近清理找回」：同一个页面，进来自动滚到「最近清理」。
+  if (route === 'data:cleanup') return <DataPage focus="cleanup" />;
   if (route === 'rules') return <RulesPage />;
   if (route === 'ai') return <AiPage />;
   if (route === 'aiconfig') return <AiConfigPage />;
@@ -55,6 +57,7 @@ function FooterHint() {
     'capture:file': '书签 HTML · 本地解析',
     settings: '设置与管理',
     data: '备份 / 恢复 / 手机快照',
+    'data:cleanup': '最近清理 · 按次找回',
     rules: '分类与整理策略',
     ai: 'AI 助手 · 手动交接可用',
     aiconfig: '内置 AI · 未启用',

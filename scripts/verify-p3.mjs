@@ -1842,6 +1842,85 @@ async function main() {
   });
 
   // 每份快照都得先有一次真实的硬删除才会产生，所以这里连续做六轮「新建一条 → 彻底清空」。
+  phase('P9.7 回收站入口与清空后的找回入口', async () => {
+    // 侧栏入口：删完东西第一反应是找回收站，它不能只藏在「设置与管理」里。
+    await goto(page, 'all', '全部收藏');
+    await sleep(500);
+    const navTrash = await page.evaluate(() => {
+      const nav = [...document.querySelectorAll('aside .nav')].find((node) =>
+        (node.innerText ?? '').includes('回收站')
+      );
+      if (!nav) return null;
+      const count = nav.querySelector('.count');
+      return {
+        text: (nav.innerText ?? '').replace(/\s+/g, ' ').trim(),
+        count: (count?.textContent ?? '').trim(),
+      };
+    });
+    const libraryBeforeNav = await page.evaluate(readMainLibrary);
+    const trashedBeforeNav = libraryBeforeNav.bookmarks.filter((row) => row.lifeState === 'deleted').length;
+    record(
+      'P9.7 侧栏日常组直接有「回收站」入口，计数与库里回收站条数一致',
+      Boolean(navTrash) && navTrash.count === String(trashedBeforeNav),
+      `入口=${JSON.stringify(navTrash)}｜库里回收站=${trashedBeforeNav}`
+    );
+
+    await clickIn(page, 'aside', '回收站');
+    await sleep(700);
+    const trashRoute = await page.evaluate(() => ({
+      hash: window.location.hash,
+      heading: document.querySelector('h1')?.textContent ?? '',
+      countLine: (document.querySelector('.toolbar .micro')?.textContent ?? '').trim(),
+    }));
+    record(
+      'P9.7 点侧栏「回收站」直接进入回收站页',
+      trashRoute.hash === '#trash' && /回收站/.test(trashRoute.heading),
+      `hash=${trashRoute.hash}｜标题=${trashRoute.heading}｜${trashRoute.countLine}`
+    );
+
+    // 第二入口：彻底清空是硬删除，不进回收站，所以清完之后必须就地给出「去哪儿找回」。
+    await goto(page, 'all', '全部收藏');
+    await sleep(500);
+    const beforeEntryPurge = await page.evaluate(readMainLibrary);
+    await clickIn(page, '.toolbar', '彻底清空…');
+    await waitForText(page, '确认彻底清空', 10_000);
+    await clickIn(page, '', '确认清空');
+    await sleep(1400);
+    const purgeEntryCopy = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('去最近清理找回')
+      );
+      return notice ? (notice.innerText ?? '').replace(/\s+/g, ' ').trim() : '';
+    });
+    record(
+      'P9.7 清空完成后页面留下「去最近清理找回」按钮，并写清不进回收站',
+      /已删除 \d+ 条/.test(purgeEntryCopy) && /不进回收站/.test(purgeEntryCopy),
+      `清空前 ${beforeEntryPurge.bookmarks.length} 条｜${purgeEntryCopy.slice(0, 160)}`
+    );
+
+    await clickIn(page, '', '去最近清理找回');
+    await sleep(1800);
+    const cleanupFocus = await page.evaluate(() => {
+      const panel = document.querySelector('#recent-cleanup');
+      if (!panel) return null;
+      const rect = panel.getBoundingClientRect();
+      return {
+        hash: window.location.hash,
+        top: Math.round(rect.top),
+        inView: rect.top < window.innerHeight && rect.bottom > 0,
+        snapshots: [...document.querySelectorAll('#recent-cleanup .bookmark h3')].length,
+      };
+    });
+    record(
+      'P9.7 点「去最近清理找回」进数据页并滚到「最近清理」区块',
+      Boolean(cleanupFocus) &&
+        cleanupFocus.hash === '#data:cleanup' &&
+        cleanupFocus.inView &&
+        cleanupFocus.snapshots > 0,
+      JSON.stringify(cleanupFocus)
+    );
+  });
+
   phase('P9.4 清理快照只保留最近 5 份', async () => {
     await goto(page, 'data', '最近清理');
     await waitForText(page, '看看能找回什么', 15_000);
