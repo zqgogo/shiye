@@ -193,6 +193,19 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .tag.private { background: #f1eaf3; color: #8b7395; }
 .tag.noai { background: #f5ece3; color: #9c7a53; }
 .tag.pinned { background: #f3f1e0; color: #8a7a3c; }
+/* 清理快照的逐条明细：只读清单，不和收藏列表抢同一种行样式 */
+.snapentries { list-style: none; margin: 10px 0 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.snapentry {
+  display: flex; align-items: flex-start; gap: 11px; padding: 10px 14px;
+  border-bottom: 1px solid #eff1e9; font-size: 11px;
+}
+.snapentry:last-child { border: 0; }
+.snapentry > input { margin: 2px 0 0; flex-shrink: 0; }
+.snapentrybody { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.snapentrybody strong { font-size: 12px; font-weight: 550; overflow-wrap: anywhere; }
+.tag.restore { background: #eaf1e3; color: #4d6b40; }
+.tag.skip { background: #f3f1e0; color: #857439; }
+.tag.conflict { background: #f7ece6; color: #96604a; }
 .rowactions { display: flex; align-items: center; gap: 2px; margin-top: 3px; flex-wrap: wrap; justify-content: flex-end; }
 .iconbtn { border-radius: 5px; color: #99a28f; padding: 4px 7px; font-size: 15px; }
 .iconbtn:hover { background: #edf1e8; color: #41623c; }
@@ -377,7 +390,9 @@ main { min-width: 0; display: flex; flex-direction: column; }
   .stats { gap: 20px; }
   .pin-grid { grid-template-columns: 1fr 1fr; gap: 9px; }
   .bookmark { padding: 13px 10px; gap: 9px; }
-  .bookmark > input { display: none; }
+  /* 批量选择在小屏上同样要能点：勾选框只在选择模式出现，不再整行隐藏。 */
+  .bookmark > input { margin-top: 11px; }
+  .snapentry { padding: 9px 10px; gap: 8px; }
   .rowbody .desc { max-width: 100%; font-size: 10px; }
   .two, .griddata { grid-template-columns: 1fr; }
   .drawer { width: 100%; }

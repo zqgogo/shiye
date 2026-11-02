@@ -194,10 +194,10 @@ export function BookmarkRow({
   bookmark: Bookmark;
   category: Category | undefined;
   tags: { id: string; name: string }[];
-  selected?: boolean;
-  selectable?: boolean;
+  selected?: boolean | undefined;
+  selectable?: boolean | undefined;
   mode?: 'trash' | 'inbox' | 'normal' | undefined;
-  onSelect?: (checked: boolean) => void;
+  onSelect?: ((checked: boolean) => void) | undefined;
 }) {
   const { openBookmark, openModal, run, service, toast } = useWorkspace();
   const deleted = Boolean(bookmark.deletedAt);
@@ -387,15 +387,30 @@ export function ReadingRow({
   onOpen,
   onComplete,
   onConvert,
+  selectable,
+  selected,
+  onSelect,
 }: {
   item: { id: string; title: string; originalUrl: string; note: string; addedAt: string; status: string };
   linkedBookmark: Bookmark | undefined;
   onOpen: () => void;
   onComplete: () => void;
   onConvert: () => void;
+  /** 批量选择模式：行前出现勾选框。 */
+  selectable?: boolean | undefined;
+  selected?: boolean | undefined;
+  onSelect?: ((checked: boolean) => void) | undefined;
 }) {
   return (
     <article className="bookmark">
+      {selectable ? (
+        <input
+          type="checkbox"
+          aria-label={`选择待看 ${item.title}`}
+          checked={Boolean(selected)}
+          onChange={(event) => onSelect?.(event.target.checked)}
+        />
+      ) : null}
       <div className="favicon" aria-hidden="true">
         {[...item.title][0] ?? '读'}
       </div>

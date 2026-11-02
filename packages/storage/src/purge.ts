@@ -1,6 +1,7 @@
 import {
   AppError,
   LIMITS,
+  domainOf,
   newId,
   nowIso,
   type Bookmark,
@@ -8,6 +9,8 @@ import {
   type PurgeRestoreDecision,
   type PurgeRestorePreview,
   type PurgeSnapshot,
+  type PurgeSnapshotDetail,
+  type PurgeSnapshotEntry,
   type ReadingItem,
   type Tombstone,
 } from '@shiye/core';
@@ -97,6 +100,7 @@ export async function writePurgeSnapshot(
     bytes: bytesOf({ bookmarks, readingItems, tombstones }),
     restoredAt: null,
     restoredCounts: null,
+    restoredIds: [],
   };
 
   if (total > LIMITS.purgeSnapshotMaxItems || snapshot.bytes > LIMITS.purgeSnapshotMaxBytes) {
@@ -273,14 +277,94 @@ export async function previewPurgeRestore(db: ShiyeDB, snapshotId: string): Prom
 }
 
 /**
+ * 「看看能找回什么」背后的逐条明细：每条长什么样、现在能不能回来、为什么不能。
+ *
+ * 判定直接复用 `planRestore`，界面上的计数与恢复执行走的是同一套逻辑；
+ * 这里只额外补上展示需要的字段（站点、原始目录、分类名），不另算一套规则。
+ */
+export async function readPurgeSnapshotDetail(
+  db: ShiyeDB,
+  snapshotId: string
+): Promise<PurgeSnapshotDetail> {
+  return db.transaction(
+    'r',
+    [db.purgeSnapshots, db.bookmarks, db.readingItems, db.categories],
+    async () => {
+      const snapshot = await db.purgeSnapshots.get(snapshotId);
+      if (!snapshot) throw new AppError('NOT_FOUND', '这条清理快照已经不在了。');
+      const decisions = await planRestore(db, snapshot);
+      const byId = new Map(decisions.map((row) => [row.id, row]));
+      const categories = new Map((await db.categories.toArray()).map((row) => [row.id, row.name]));
+      const restoredIds = new Set(snapshot.restoredIds ?? []);
+      const entries: PurgeSnapshotEntry[] = [];
+
+      for (const row of snapshot.bookmarks) {
+        // 快照是硬删除前的副本，条目可能被早先的恢复带回去，也可能因同网址冲突回不来；
+        // 这里照抄判定结果，不自己重算。
+        const decision = byId.get(row.id) ?? skip(row.id, row.title, '这条记录不在本次判定范围内');
+        entries.push({
+          id: row.id,
+          kind: 'bookmark',
+          title: row.title,
+          url: row.originalUrl,
+          host: domainOf(row.originalUrl),
+          // 一份快照可能横跨多次导入，取最近一条带目录的来源；待看与手动添加没有目录。
+          folder:
+            [...row.sources].reverse().find((entry) => entry.originalFolder)?.originalFolder?.trim() || null,
+          categoryName: row.categoryId ? categories.get(row.categoryId) ?? null : null,
+          trashed: Boolean(row.deletedAt),
+          restored: restoredIds.has(row.id),
+          action: decision.action,
+          reason: decision.reason,
+        });
+      }
+      for (const row of snapshot.readingItems) {
+        const decision = byId.get(row.id) ?? skip(row.id, row.title, '这条记录不在本次判定范围内');
+        entries.push({
+          id: row.id,
+          kind: 'reading',
+          title: row.title,
+          url: row.originalUrl,
+          host: domainOf(row.originalUrl),
+          folder: null,
+          categoryName: null,
+          trashed: false,
+          restored: restoredIds.has(row.id),
+          action: decision.action,
+          reason: decision.reason,
+        });
+      }
+
+      return {
+        snapshotId: snapshot.id,
+        entry: snapshot.entry,
+        scopeLabel: snapshot.scopeLabel,
+        createdAt: snapshot.createdAt,
+        totals: {
+          candidates: decisions.length,
+          restorable: decisions.filter((row) => row.action === 'restore').length,
+          skipped: decisions.filter((row) => row.action === 'skip').length,
+          conflicted: decisions.filter((row) => row.action === 'conflict').length,
+        },
+        entries,
+      };
+    }
+  );
+}
+
+/**
  * 只把这一份快照删掉的条目加回来。
  *
  * 与整库替换恢复相反：不清表、不覆盖、不触碰快照之外的记录；
  * 计划在事务内重算一遍，预览之后被改动过的条目按最新状态重新判定。
+ *
+ * 传 `ids` 时只处理勾选的那几条（「找回一部分」）：没勾的不动，也不写进已找回名单。
+ * 判定仍然逐条重算，所以勾了之后库里刚发生变化，照样会按最新状态跳过，而不是照单全收。
  */
 export async function restorePurgeSnapshot(
   db: ShiyeDB,
-  snapshotId: string
+  snapshotId: string,
+  ids?: string[]
 ): Promise<{ preview: PurgeRestorePreview; restored: number }> {
   return db.transaction(
     'rw',
@@ -289,13 +373,19 @@ export async function restorePurgeSnapshot(
       const snapshot = await db.purgeSnapshots.get(snapshotId);
       if (!snapshot) throw new AppError('NOT_FOUND', '这条清理快照已经不在了。');
 
-      const decisions = await planRestore(db, snapshot);
+      const wanted = ids ? new Set(ids) : null;
+      const all = await planRestore(db, snapshot);
+      const decisions = wanted ? all.filter((row) => wanted.has(row.id)) : all;
+      if (decisions.length === 0) {
+        throw new AppError('INVALID_INPUT', '没有勾选可找回的条目。');
+      }
       const preview = summarize(snapshot, decisions);
       const bookmarkById = new Map(snapshot.bookmarks.map((row) => [row.id, row]));
       const readingById = new Map(snapshot.readingItems.map((row) => [row.id, row]));
       const now = nowIso();
 
-      const restoredIds: string[] = [];
+      const restoredBookmarkIds: string[] = [];
+      const restoredReadingIds: string[] = [];
       let restored = 0;
 
       for (const decision of decisions) {
@@ -318,7 +408,7 @@ export async function restorePurgeSnapshot(
           };
           Object.assign(next, deriveIndexFields(next));
           await db.bookmarks.put(next);
-          restoredIds.push(next.id);
+          restoredBookmarkIds.push(next.id);
           restored += 1;
           continue;
         }
@@ -327,24 +417,29 @@ export async function restorePurgeSnapshot(
           // 待看同样要换版本：旧页面拿着的 localRevision 不能再用来转换或改写这条。
           const version = await allocateRestoredVersion(db, 'reading', reading);
           await db.readingItems.put({ ...reading, revision: version, localRevision: version });
+          restoredReadingIds.push(reading.id);
           restored += 1;
         }
       }
 
       // 恢复的条目要能再次导入：清掉同 ID 或同网址的删除标记。
-      if (restoredIds.length > 0) {
-        const restoredRows = snapshot.bookmarks.filter((row) => restoredIds.includes(row.id));
+      if (restoredBookmarkIds.length > 0) {
+        const restoredRows = snapshot.bookmarks.filter((row) => restoredBookmarkIds.includes(row.id));
         const urls = new Set(restoredRows.map((row) => row.canonicalUrl));
         const tombstones = await db.tombstones.toArray();
         const stale = tombstones.filter(
           (row) =>
             row.entityType === 'bookmark' &&
-            (restoredIds.includes(row.id) || (row.canonicalUrl ? urls.has(row.canonicalUrl) : false))
+            (restoredBookmarkIds.includes(row.id) || (row.canonicalUrl ? urls.has(row.canonicalUrl) : false))
         );
         await db.tombstones.bulkDelete(
           stale.map((row) => [String(row.entityType), String(row.id)] as [string, string])
         );
       }
+
+      // 已找回名单是累计的：同一份快照可能被分几次找回，界面靠它标出「这条已经回来了」。
+      const alreadyRestored = snapshot.restoredIds ?? [];
+      const restoredIds = [...new Set([...alreadyRestored, ...restoredBookmarkIds, ...restoredReadingIds])];
 
       await db.purgeSnapshots.put({
         ...snapshot,
@@ -354,6 +449,7 @@ export async function restorePurgeSnapshot(
           skipped: preview.skipped,
           conflicted: preview.conflicted,
         },
+        restoredIds,
       });
 
       return { preview, restored };

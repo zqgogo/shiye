@@ -8,10 +8,17 @@ function BookmarkList({
   items,
   mode,
   empty,
+  selectable,
+  selected,
+  onSelect,
 }: {
   items: Bookmark[];
   mode?: 'trash' | 'inbox' | 'normal' | undefined;
   empty: { title: string; description: string; actionLabel?: string; onAction?: () => void };
+  /** 批量选择模式：列表行前出现勾选框。 */
+  selectable?: boolean;
+  selected?: Set<string>;
+  onSelect?: (id: string, checked: boolean) => void;
 }) {
   const { data } = useWorkspace();
   if (items.length === 0) {
@@ -34,6 +41,9 @@ function BookmarkList({
           category={data.categories.find((category) => category.id === bookmark.categoryId)}
           tags={data.tags}
           mode={mode}
+          selectable={selectable}
+          selected={selected?.has(bookmark.id)}
+          onSelect={(checked) => onSelect?.(bookmark.id, checked)}
         />
       ))}
     </div>
@@ -188,6 +198,11 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
   const [trash, setTrash] = useState<Bookmark[] | null>(null);
   const [confirmPurge, setConfirmPurge] = useState(false);
   const [purgeCounts, setPurgeCounts] = useState<PurgeCounts | null>(null);
+  /** 批量选择：勾选若干条后一次性处理，不用一条条点。 */
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [bulkPending, setBulkPending] = useState<'trash' | 'purge' | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
   const category = categoryId ? data.categories.find((entry) => entry.id === categoryId) : undefined;
 
   useEffect(() => {
@@ -226,6 +241,67 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
     mode === 'category'
       ? [category?.name ?? '分类', category?.description || '这个分类下的收藏。']
       : LIST_TITLES[mode] ?? ['收藏', '当前列表'];
+
+  /**
+   * 批量选择只作用于当前列表。
+   *
+   * 换页、换筛选后上一页的勾选必须清空：数字还挂着、行却看不见时，
+   * 用户很容易按着「已选 12 条」去删另一页的数据。
+   */
+  useEffect(() => {
+    setSelectMode(false);
+    setSelected([]);
+    setBulkPending(null);
+  }, [mode, categoryId]);
+
+  useEffect(() => {
+    setSelected((current) => {
+      const alive = new Set(items.map((row) => row.id));
+      const next = current.filter((id) => alive.has(id));
+      // 内容没变就返回原数组，避免每次渲染都触发一次状态更新。
+      return next.length === current.length ? current : next;
+    });
+  }, [items]);
+
+  const toggleSelected = (id: string, checked: boolean) => {
+    setSelected((current) =>
+      checked ? [...new Set([...current, id])] : current.filter((row) => row !== id)
+    );
+  };
+
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+
+  /**
+   * 执行一次批量动作。
+   *
+   * 仓库只处理「状态还允许」的条目（比如已经在回收站的不会再删一次），
+   * 所以这里按真正处理掉的条数回报，而不是按勾选数假装全都成功。
+   */
+  const runBulk = async (action: 'trash' | 'purge' | 'restore') => {
+    if (selected.length === 0) return;
+    setBulkBusy(true);
+    const ids = [...selected];
+    const done = await run(() =>
+      action === 'trash'
+        ? service.trashBookmarks(ids)
+        : action === 'restore'
+          ? service.restoreBookmarks(ids)
+          : service.purgeBookmarks(ids)
+    );
+    setBulkBusy(false);
+    if (done === null) return;
+    setBulkPending(null);
+    setSelected([]);
+    const verb = action === 'trash' ? '移入回收站' : action === 'restore' ? '恢复' : '彻底删除';
+    if (done === ids.length) {
+      toast(`已${verb} ${done} 条。`, 'ok');
+    } else {
+      toast(
+        `已${verb} ${done} 条；${ids.length - done} 条的状态在勾选后变过，按最新状态跳过。`,
+        done === 0 ? 'error' : 'ok'
+      );
+    }
+  };
 
   /**
    * 彻底清空的作用范围。
@@ -371,6 +447,18 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
       <div className="toolbar">
         <span className="micro">共 {items.length} 条</span>
         <span className="spacer" />
+        {items.length > 0 ? (
+          <button
+            className="btn small"
+            onClick={() => {
+              setSelectMode(!selectMode);
+              setSelected([]);
+              setBulkPending(null);
+            }}
+          >
+            {selectMode ? '退出批量选择' : '批量选择'}
+          </button>
+        ) : null}
         {purge && (purgeCounts ? purgeCounts.active + purgeCounts.trashed > 0 : purge.count > 0) ? (
           <button className="btn small" onClick={() => setConfirmPurge(true)}>
             彻底清空…
@@ -384,9 +472,84 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
         ) : null}
       </div>
 
+      {selectMode ? (
+        <Notice>
+          <strong>
+            已选 {selected.length} / {items.length} 条
+          </strong>
+          <span>勾选只作用于当前列表；换页或换筛选会清空，避免按着旧数字处理另一批记录。</span>
+          <button
+            className="btn small"
+            onClick={() => setSelected(selected.length === items.length ? [] : items.map((row) => row.id))}
+          >
+            {selected.length === items.length ? '取消全选' : `全选这 ${items.length} 条`}
+          </button>
+          {mode === 'trash' ? (
+            <button
+              className="btn small"
+              disabled={selected.length === 0}
+              onClick={() => void runBulk('restore')}
+            >
+              恢复选中的 {selected.length} 条
+            </button>
+          ) : (
+            <button
+              className="btn small"
+              disabled={selected.length === 0}
+              onClick={() => setBulkPending('trash')}
+            >
+              移入回收站 {selected.length} 条
+            </button>
+          )}
+          <button
+            className="btn small danger"
+            disabled={selected.length === 0}
+            onClick={() => setBulkPending('purge')}
+          >
+            彻底删除 {selected.length} 条…
+          </button>
+        </Notice>
+      ) : null}
+
+      {bulkPending === 'trash' ? (
+        <Notice>
+          <strong>确认把这 {selected.length} 条移入回收站？</strong>
+          <span>回收站里可以逐条恢复，也可以勾选批量恢复；原分类与未读状态都会保留。</span>
+          <button
+            className="btn small primary"
+            disabled={bulkBusy}
+            onClick={() => void runBulk('trash')}
+          >
+            确认移入
+          </button>
+          <button className="btn small" onClick={() => setBulkPending(null)}>
+            取消
+          </button>
+        </Notice>
+      ) : null}
+
+      {bulkPending === 'purge' ? (
+        <Notice tone="danger">
+          <strong>确认彻底删除这 {selected.length} 条？</strong>
+          <span>连删除标记一起清掉，之后同一网址可以重新导入；不进回收站。</span>
+          <span>
+            本机「最近清理」会先留一份快照，可以只找回其中几条（只留最近 5 份、仅本机）。想长期留后路，请先导出完整 JSON。
+          </span>
+          <button className="btn small danger" disabled={bulkBusy} onClick={() => void runBulk('purge')}>
+            确认彻底删除
+          </button>
+          <button className="btn small" onClick={() => setBulkPending(null)}>
+            取消
+          </button>
+        </Notice>
+      ) : null}
+
       <BookmarkList
         items={items}
         mode={mode === 'inbox' ? 'inbox' : mode === 'trash' ? 'trash' : 'normal'}
+        selectable={selectMode}
+        selected={selectedSet}
+        onSelect={toggleSelected}
         empty={
           mode === 'trash'
             ? { title: '回收站是空的', description: '删除的收藏会先来到这里，可以随时恢复。' }
@@ -501,6 +664,10 @@ export function ReadingPage() {
   const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState('');
   const [confirmPurge, setConfirmPurge] = useState(false);
+  /** 批量勾选：待看没有回收站，勾选移除就是彻底删除，所以必须先留快照再动手。 */
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const pending = [...data.pendingReading].sort((a, b) => b.addedAt.localeCompare(a.addedAt));
   // 待看独立搜索：只查队列本身，不混入收藏库。
   const term = search.trim().toLowerCase();
@@ -515,6 +682,38 @@ export function ReadingPage() {
     const done = await run(() => service.completeReading(id), '已完成待看；已有收藏不受影响。');
     setBusy(false);
     if (done) setLastCompleted(id);
+  };
+
+  // 搜索一改就清空勾选：筛完之后「已选 8 条」里可能有一半已经不在屏幕上。
+  useEffect(() => {
+    setSelected([]);
+    setConfirmRemove(false);
+  }, [search]);
+
+  useEffect(() => {
+    setSelected((current) => {
+      const alive = new Set(items.map((row) => row.id));
+      const next = current.filter((id) => alive.has(id));
+      return next.length === current.length ? current : next;
+    });
+  }, [items]);
+
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+
+  const removeSelected = async () => {
+    if (selected.length === 0) return;
+    const ids = [...selected];
+    const removed = await run(() => service.removeReadingItems(ids));
+    if (removed === null) return;
+    setConfirmRemove(false);
+    setSelected([]);
+    // 待看没有回收站，说清楚去哪儿找回，别让人以为彻底没了。
+    toast(
+      removed === ids.length
+        ? `已移出 ${removed} 条待看；需要时可在「数据与备份 → 最近清理」里找回。`
+        : `已移出 ${removed} 条，${ids.length - removed} 条已经不在队列里。`,
+      removed === 0 ? 'error' : 'ok'
+    );
   };
 
   return (
@@ -582,6 +781,18 @@ export function ReadingPage() {
           {term ? `匹配 ${items.length} / 共 ${pending.length} 条` : `共 ${pending.length} 条`}
         </span>
         {pending.length ? (
+          <button
+            className="btn small"
+            onClick={() => {
+              setSelectMode(!selectMode);
+              setSelected([]);
+              setConfirmRemove(false);
+            }}
+          >
+            {selectMode ? '退出批量选择' : '批量选择'}
+          </button>
+        ) : null}
+        {pending.length ? (
           <button className="btn small" onClick={() => setConfirmPurge(true)}>
             清空待看…
           </button>
@@ -595,6 +806,42 @@ export function ReadingPage() {
           </>
         ) : null}
       </div>
+
+      {selectMode ? (
+        <Notice>
+          <strong>
+            已选 {selected.length} / {items.length} 条
+          </strong>
+          <span>待看没有回收站，移除即彻底删除；动作前会先留一份本机清理快照，可以只找回其中几条。</span>
+          <button
+            className="btn small"
+            onClick={() => setSelected(selected.length === items.length ? [] : items.map((row) => row.id))}
+          >
+            {selected.length === items.length ? '取消全选' : `全选这 ${items.length} 条`}
+          </button>
+          <button
+            className="btn small danger"
+            disabled={selected.length === 0}
+            onClick={() => setConfirmRemove(true)}
+          >
+            移出待看 {selected.length} 条…
+          </button>
+        </Notice>
+      ) : null}
+
+      {confirmRemove ? (
+        <Notice tone="danger">
+          <strong>确认移出这 {selected.length} 条待看？</strong>
+          <span>待看没有回收站，移除即彻底删除；已有收藏不受影响。</span>
+          <span>本机「最近清理」会先留一份快照，可以按次找回（只留最近 5 份、仅本机）。</span>
+          <button className="btn small danger" onClick={() => void removeSelected()}>
+            确认移出
+          </button>
+          <button className="btn small" onClick={() => setConfirmRemove(false)}>
+            取消
+          </button>
+        </Notice>
+      ) : null}
 
       <div className="listbox">
         <div className="listhead">
@@ -625,6 +872,13 @@ export function ReadingPage() {
                 key={item.id}
                 item={item}
                 linkedBookmark={linked}
+                selectable={selectMode}
+                selected={selectedSet.has(item.id)}
+                onSelect={(checked) =>
+                  setSelected((current) =>
+                    checked ? [...new Set([...current, item.id])] : current.filter((id) => id !== item.id)
+                  )
+                }
                 onOpen={() => {
                   // 与收藏列表同一套纵深防御：只放行 http / https。
                   if (!isHttpUrl(item.originalUrl)) {

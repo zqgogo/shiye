@@ -44,6 +44,7 @@ import {
   type PurgeCounts,
   type PurgeRestorePreview,
   type PurgeSnapshot,
+  type PurgeSnapshotDetail,
   type ReadingItem,
   type AppSettings,
   type Tag,
@@ -430,6 +431,26 @@ export class WorkspaceService {
     return this.repos.imports.cleanupBatch(token);
   }
 
+  /** 批量移入回收站：只对勾选里还在库的条目生效，返回真正移走的条数。 */
+  async trashBookmarks(ids: string[]): Promise<number> {
+    return this.repos.bookmarks.softDeleteMany(ids);
+  }
+
+  /** 批量从回收站恢复：分类没了就回未分类。 */
+  async restoreBookmarks(ids: string[]): Promise<number> {
+    return this.repos.bookmarks.restoreMany(ids);
+  }
+
+  /** 批量彻底删除收藏：先写清理快照，写不进去就一条都不删。 */
+  async purgeBookmarks(ids: string[]): Promise<number> {
+    return this.repos.bookmarks.purgeMany(ids);
+  }
+
+  /** 勾选移除待看：待看没有回收站，等同彻底删除，同样先写快照。 */
+  async removeReadingItems(ids: string[]): Promise<number> {
+    return this.repos.reading.purgeMany(ids);
+  }
+
   /** 彻底清空收藏库（含墓碑）：清空后同一网址可以重新导入。不可恢复。 */
   async purgeAllBookmarks(): Promise<number> {
     return this.repos.bookmarks.purgeAll();
@@ -463,9 +484,20 @@ export class WorkspaceService {
     return this.repos.purge.preview(snapshotId);
   }
 
-  /** 执行恢复：只加回该快照的条目，不覆盖当前数据。 */
-  async restorePurgeSnapshot(snapshotId: string): Promise<{ preview: PurgeRestorePreview; restored: number }> {
-    return this.repos.purge.restore(snapshotId);
+  /** 「看看能找回什么」背后的逐条明细：标题、站点、原目录与能否找回。 */
+  async readPurgeSnapshotDetail(snapshotId: string): Promise<PurgeSnapshotDetail> {
+    return this.repos.purge.detail(snapshotId);
+  }
+
+  /**
+   * 执行恢复：只加回该快照的条目，不覆盖当前数据。
+   * 传 ids 时只找回勾选的那几条，其余留在快照里等下次。
+   */
+  async restorePurgeSnapshot(
+    snapshotId: string,
+    ids?: string[]
+  ): Promise<{ preview: PurgeRestorePreview; restored: number }> {
+    return this.repos.purge.restore(snapshotId, ids);
   }
 
   async deletePurgeSnapshot(snapshotId: string): Promise<void> {

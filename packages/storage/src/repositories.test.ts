@@ -1299,3 +1299,101 @@ describe('批次字段迁移', () => {
     }
   });
 });
+
+describe('批量选择与快照明细', () => {
+  it('勾选批量移入回收站：只处理还在库里的条目，返回真正移走的条数', async () => {
+    const a = await repos.bookmarks.create({ originalUrl: 'https://example.com/bulk-a', title: 'A' });
+    const b = await repos.bookmarks.create({ originalUrl: 'https://example.com/bulk-b', title: 'B' });
+    const already = await repos.bookmarks.create({ originalUrl: 'https://example.com/bulk-c', title: 'C' });
+    await repos.bookmarks.softDelete(already.id);
+    const trashedAt = (await db.bookmarks.get(already.id))?.deletedAt;
+
+    const removed = await repos.bookmarks.softDeleteMany([a.id, b.id, already.id, 'not-exist']);
+    expect(removed).toBe(2);
+    // 已经在回收站的不会被再删一次，删除时间也不能被刷新。
+    expect((await db.bookmarks.get(already.id))?.deletedAt).toBe(trashedAt);
+    expect((await db.bookmarks.get(a.id))?.lifeState).toBe('deleted');
+    expect(await db.tombstones.where('entityType').equals('bookmark').count()).toBe(3);
+  });
+
+  it('勾选批量彻底删除留一份快照，可以只找回其中几条', async () => {
+    const a = await repos.bookmarks.create({ originalUrl: 'https://example.com/pick-a', title: '挑 A' });
+    const b = await repos.bookmarks.create({ originalUrl: 'https://example.com/pick-b', title: '挑 B' });
+    const keep = await repos.bookmarks.create({ originalUrl: 'https://example.com/pick-keep', title: '没勾' });
+
+    const removed = await repos.bookmarks.purgeMany([a.id, b.id]);
+    expect(removed).toBe(2);
+    expect(await db.bookmarks.get(keep.id)).toBeTruthy();
+
+    const [snapshot] = await repos.purge.list();
+    if (!snapshot) throw new Error('应当留下清理快照');
+    expect(snapshot.entry).toBe('selection');
+    expect(snapshot.scopeLabel).toBe('手动选择的 2 条收藏');
+    expect(snapshot.counts.bookmarks).toBe(2);
+
+    const detail = await repos.purge.detail(snapshot.id);
+    expect(detail.totals.restorable).toBe(2);
+    expect(detail.entries.map((row) => row.title).sort()).toEqual(['挑 A', '挑 B']);
+    expect(detail.entries.every((row) => row.host === 'example.com' && row.action === 'restore')).toBe(true);
+
+    // 只找回勾选的一条：另一条留在快照里，没被顺手带回来。
+    const first = await repos.purge.restore(snapshot.id, [a.id]);
+    expect(first.restored).toBe(1);
+    expect(first.preview.candidates).toBe(1);
+    expect(await db.bookmarks.get(a.id)).toBeTruthy();
+    expect(await db.bookmarks.get(b.id)).toBeUndefined();
+
+    const partial = await repos.purge.detail(snapshot.id);
+    expect(partial.entries.find((row) => row.id === a.id)?.restored).toBe(true);
+    expect(partial.entries.find((row) => row.id === b.id)?.restored).toBe(false);
+
+    // 第二次还能把剩下那条找回来：同一份快照可以分几次用。
+    const second = await repos.purge.restore(snapshot.id, [b.id]);
+    expect(second.restored).toBe(1);
+    expect(await db.bookmarks.get(b.id)).toBeTruthy();
+    const stored = await db.purgeSnapshots.get(snapshot.id);
+    expect([...(stored?.restoredIds ?? [])].sort()).toEqual([a.id, b.id].sort());
+  });
+
+  it('勾选移除待看即彻底删除，同样留快照并可只找回一条', async () => {
+    const one = await repos.reading.add({ originalUrl: 'https://example.com/read-1', title: '待看一' });
+    const two = await repos.reading.add({ originalUrl: 'https://example.com/read-2', title: '待看二' });
+    const left = await repos.reading.add({ originalUrl: 'https://example.com/read-3', title: '没勾' });
+
+    const removed = await repos.reading.purgeMany([one.item.id, two.item.id]);
+    expect(removed).toBe(2);
+    expect((await repos.reading.listPending()).map((row) => row.id)).toEqual([left.item.id]);
+
+    const [snapshot] = await repos.purge.list();
+    if (!snapshot) throw new Error('应当留下清理快照');
+    expect(snapshot.entry).toBe('selection');
+    expect(snapshot.scopeLabel).toBe('手动移除的 2 条待看');
+    const detail = await repos.purge.detail(snapshot.id);
+    expect(detail.entries.every((row) => row.kind === 'reading' && row.folder === null)).toBe(true);
+
+    const outcome = await repos.purge.restore(snapshot.id, [one.item.id]);
+    expect(outcome.restored).toBe(1);
+    expect((await repos.reading.listPending()).map((row) => row.title).sort()).toEqual(['待看一', '没勾']);
+  });
+
+  it('快照明细的计数与逐条判定一致，已找回的不再算可找回', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/detail-1', title: '明细一' });
+    await repos.bookmarks.create({ originalUrl: 'https://example.com/detail-2', title: '明细二' });
+    await repos.bookmarks.purgeAll();
+    const [snapshot] = await repos.purge.list();
+    if (!snapshot) throw new Error('应当留下清理快照');
+
+    const detail = await repos.purge.detail(snapshot.id);
+    expect(detail.totals.candidates).toBe(2);
+    expect(detail.entries).toHaveLength(2);
+    expect(detail.entries.filter((row) => row.action === 'restore')).toHaveLength(detail.totals.restorable);
+
+    const target = detail.entries[0];
+    if (!target) throw new Error('快照里应当有记录');
+    await repos.purge.restore(snapshot.id, [target.id]);
+
+    const after = await repos.purge.detail(snapshot.id);
+    expect(after.totals.restorable).toBe(1);
+    expect(after.entries.filter((row) => row.restored)).toHaveLength(1);
+  });
+});

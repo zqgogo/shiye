@@ -18,6 +18,7 @@ import type {
   PurgeCounts,
   PurgeRestorePreview,
   PurgeSnapshot,
+  PurgeSnapshotDetail,
   ImportDestination,
   ImportRow,
   ImportSource,
@@ -95,7 +96,16 @@ export interface BookmarkRepository {
     source: FieldSource
   ): Promise<Bookmark>;
   softDelete(id: string): Promise<Bookmark>;
+  /** 批量移入回收站：已在回收站的跳过，返回真正移走的条数。 */
+  softDeleteMany(ids: string[]): Promise<number>;
   restore(id: string): Promise<Bookmark>;
+  /** 批量从回收站恢复；分类已删除的落回未分类。 */
+  restoreMany(ids: string[]): Promise<number>;
+  /**
+   * 批量彻底删除（勾选后使用）：先写清理快照，再删记录与墓碑。
+   * 快照写不进去就一条都不删，写进去之后同一网址仍可重新导入。
+   */
+  purgeMany(ids: string[]): Promise<number>;
   /**
    * 彻底清空：删除记录**连同墓碑**，之后同一网址可以重新导入。
    *
@@ -141,6 +151,8 @@ export interface ReadingRepository {
   /** 清空整个待看队列（只处理 pending）；不涉及收藏。 */
   purgePending(): Promise<number>;
   purgeCompleted(): Promise<number>;
+  /** 勾选移除若干条待看：待看没有回收站，等同彻底删除，先写清理快照。 */
+  purgeMany(ids: string[]): Promise<number>;
   convertToBookmark(
     queueId: string,
     expectedLocalRevision: number,
@@ -397,7 +409,10 @@ export interface PurgeSnapshotRepository {
   list(): Promise<PurgeSnapshot[]>;
   /** 只读预览：算出可恢复 / 跳过 / 冲突的条数与逐条原因。 */
   preview(snapshotId: string): Promise<PurgeRestorePreview>;
-  restore(snapshotId: string): Promise<{ preview: PurgeRestorePreview; restored: number }>;
+  /** 逐条明细：能看到每条的标题、站点、原目录与能否找回。 */
+  detail(snapshotId: string): Promise<PurgeSnapshotDetail>;
+  /** 不传 ids 表示整份找回；传了就只处理勾选的那几条。 */
+  restore(snapshotId: string, ids?: string[]): Promise<{ preview: PurgeRestorePreview; restored: number }>;
   remove(snapshotId: string): Promise<void>;
 }
 

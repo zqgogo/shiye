@@ -1591,6 +1591,256 @@ async function main() {
     );
   });
 
+  // 批量选择与「只找回一部分」：一条条点之外最常用的清理方式，必须能撑住。
+  phase('P9.6 批量选择与只找回一部分', async () => {
+    await goto(page, 'capture', '一次收下多个链接');
+    await setReactInput(
+      page,
+      'textarea[aria-label="粘贴链接"]',
+      ['https://bulk.example.com/b1', 'https://bulk.example.com/b2', 'https://bulk.example.com/b3'].join('\n')
+    );
+    await clickIn(page, '.panel', '预览链接 →');
+    await waitPreview(page);
+    await page.select('select[aria-label="保存目标"]', 'library');
+    await sleep(700);
+    await clickIn(page, '.batchbar', '确认写入');
+    await waitForText(page, '导入完成', 40_000);
+    await sleep(800);
+
+    await goto(page, 'all', '全部收藏');
+    const beforeBulk = await page.evaluate(readMainLibrary);
+    const activeBeforeBulk = beforeBulk.bookmarks.filter((row) => row.lifeState === 'active').length;
+
+    await clickIn(page, '.toolbar', '批量选择');
+    await sleep(300);
+    const picked = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('.listbox .bookmark')].filter((row) =>
+        (row.innerText ?? '').includes('bulk.example.com')
+      );
+      for (const row of rows) row.querySelector('input[type="checkbox"]')?.click();
+      return rows.length;
+    });
+    await sleep(400);
+    const selectedCopy = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('已选')
+      );
+      return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    });
+    record(
+      'P9.6 批量选择能勾中同站点的三条，并显示已选数量',
+      picked === 3 && /已选 3 \//.test(selectedCopy),
+      `勾选=${picked}｜${selectedCopy.slice(0, 120)}`
+    );
+
+    await clickIn(page, '', '移入回收站 3 条');
+    await waitForText(page, '确认把这 3 条移入回收站', 10_000);
+    await clickIn(page, '', '确认移入');
+    await waitForText(page, '已移入回收站 3 条', 20_000);
+    await sleep(1000);
+    const afterBulkTrash = await page.evaluate(readMainLibrary);
+    const activeAfterBulkTrash = afterBulkTrash.bookmarks.filter((row) => row.lifeState === 'active').length;
+    record(
+      'P9.6 勾选移入回收站一次处理三条，在库数量准确减少',
+      activeBeforeBulk - activeAfterBulkTrash === 3,
+      `在库 ${activeBeforeBulk}→${activeAfterBulkTrash}`
+    );
+
+    // 回收站里同样支持勾选批量恢复。
+    await goto(page, 'trash', '回收站');
+    await sleep(800);
+    await clickIn(page, '.toolbar', '批量选择');
+    await sleep(300);
+    const pickedTrash = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('.listbox .bookmark')].filter((row) =>
+        (row.innerText ?? '').includes('bulk.example.com')
+      );
+      for (const row of rows) row.querySelector('input[type="checkbox"]')?.click();
+      return rows.length;
+    });
+    await clickIn(page, '', '恢复选中的 3 条');
+    await waitForText(page, '已恢复 3 条', 20_000);
+    await sleep(900);
+    const afterBulkRestore = await page.evaluate(readMainLibrary);
+    const activeAfterBulkRestore = afterBulkRestore.bookmarks.filter((row) => row.lifeState === 'active').length;
+    record(
+      'P9.6 回收站里勾选批量恢复，三条回到在库',
+      pickedTrash === 3 && activeAfterBulkRestore === activeBeforeBulk,
+      `回收站勾选=${pickedTrash}｜在库=${activeAfterBulkRestore}`
+    );
+
+    // 批量彻底删除：留一份「手动选择的」快照，再从明细里只找回一条。
+    await goto(page, 'all', '全部收藏');
+    await sleep(600);
+    await clickIn(page, '.toolbar', '批量选择');
+    await sleep(300);
+    await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('.listbox .bookmark')].filter((row) =>
+        (row.innerText ?? '').includes('bulk.example.com')
+      );
+      for (const row of rows) row.querySelector('input[type="checkbox"]')?.click();
+    });
+    await sleep(300);
+    await clickIn(page, '', '彻底删除 3 条');
+    await waitForText(page, '确认彻底删除这 3 条', 10_000);
+    const purgeCopy = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('确认彻底删除这 3 条')
+      );
+      return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    });
+    await clickIn(page, '', '确认彻底删除');
+    await waitForText(page, '已彻底删除 3 条', 20_000);
+    await sleep(1200);
+    record(
+      'P9.6 批量彻底删除的确认框点明「不进回收站、留快照可部分找回」',
+      /不进回收站/.test(purgeCopy) && /只找回其中几条/.test(purgeCopy),
+      purgeCopy.slice(0, 200)
+    );
+
+    await goto(page, 'data', '最近清理');
+    await sleep(600);
+    const bulkSnapshots = await readPurgeSnapshots(page);
+    record(
+      'P9.6 批量彻底删除留下「手动选择的 3 条收藏」快照',
+      /手动选择的 3 条收藏/.test(bulkSnapshots.rows[0] ?? ''),
+      `最新=${(bulkSnapshots.rows[0] ?? '').slice(0, 120)}`
+    );
+
+    // 打开明细：逐条列出、可搜索、可只勾一条找回。
+    await clickIn(page, '', '看看能找回什么');
+    await waitForText(page, '可找回 3 条', 20_000);
+    await sleep(600);
+    const detailCopy = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('可找回')
+      );
+      return {
+        text: (notice?.innerText ?? '').replace(/\s+/g, ' ').trim(),
+        rows: document.querySelectorAll('.snapentry').length,
+      };
+    });
+    record(
+      'P9.6 快照明细逐条列出三条，并提供搜索与筛选',
+      detailCopy.rows === 3 && /可找回 3 条/.test(detailCopy.text),
+      `明细行=${detailCopy.rows}｜${detailCopy.text.slice(0, 140)}`
+    );
+
+    await setReactInput(page, 'input[aria-label="搜索清理记录"]', 'b2');
+    await sleep(500);
+    const searched = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('.snapentry')].filter(
+        (node) => node.querySelector('input[type="checkbox"]')
+      );
+      return {
+        rows: rows.length,
+        text: (document.body.innerText ?? '').match(/匹配 \d+ 条，当前显示 \d+ 条/)?.[0] ?? '',
+      };
+    });
+    record(
+      'P9.6 快照明细支持按关键词筛到单条',
+      searched.rows === 1 && /匹配 1 条，当前显示 1 条/.test(searched.text),
+      `筛出=${searched.rows}｜${searched.text}`
+    );
+
+    await page.evaluate(() => {
+      document.querySelector('.snapentry input[type="checkbox"]')?.click();
+    });
+    await sleep(400);
+    const beforePickRestore = await page.evaluate(readMainLibrary);
+    const activeBeforePick = beforePickRestore.bookmarks.filter((row) => row.lifeState === 'active').length;
+    await clickIn(page, '', '恢复选中的 1 条');
+    await waitForText(page, '找回 1 条', 20_000);
+    await sleep(1200);
+    const afterPickRestore = await page.evaluate(readMainLibrary);
+    const activeAfterPick = afterPickRestore.bookmarks.filter((row) => row.lifeState === 'active').length;
+    const b2Back = afterPickRestore.bookmarks.some(
+      (row) => row.originalUrl === 'https://bulk.example.com/b2' && row.lifeState === 'active'
+    );
+    record(
+      'P9.6 只勾一条时只找回一条，另外两条留在快照里',
+      activeAfterPick - activeBeforePick === 1 && b2Back,
+      `在库 ${activeBeforePick}→${activeAfterPick}`
+    );
+
+    // 再打开同一份快照：已找回的标出来，剩下的还能继续找。
+    await clickIn(page, '', '看看能找回什么');
+    await waitForText(page, '可找回 2 条', 20_000);
+    await sleep(600);
+    const secondOpen = await page.evaluate(() =>
+      [...document.querySelectorAll('.snapentry')].map((node) =>
+        (node.innerText ?? '').replace(/\s+/g, ' ').trim()
+      )
+    );
+    record(
+      'P9.6 再次打开同一份快照：已找回的标为「已找回」，剩余仍可找',
+      secondOpen.some((row) => row.includes('已找回')) &&
+        secondOpen.filter((row) => row.includes('可找回')).length === 2,
+      `明细=${secondOpen.length} 行`
+    );
+
+    await clickIn(page, '', '全选可找回');
+    await sleep(300);
+    await clickIn(page, '', '恢复选中的 2 条');
+    await waitForText(page, '找回 2 条', 20_000);
+    await sleep(1200);
+    const finalRestore = await page.evaluate(readMainLibrary);
+    const bulkActive = finalRestore.bookmarks.filter(
+      (row) => row.originalUrl.startsWith('https://bulk.example.com/') && row.lifeState === 'active'
+    ).length;
+    record('P9.6 同一份快照可以分两次找回，最终三条都回来', bulkActive === 3, `bulk 在库=${bulkActive}`);
+
+    // 待看同样能勾选批量移除，并且会留快照。
+    await goto(page, 'capture', '一次收下多个链接');
+    await setReactInput(
+      page,
+      'textarea[aria-label="粘贴链接"]',
+      ['https://read.example.com/r1', 'https://read.example.com/r2'].join('\n')
+    );
+    await clickIn(page, '.panel', '预览链接 →');
+    await waitPreview(page);
+    await page.select('select[aria-label="保存目标"]', 'reading');
+    await sleep(700);
+    await clickIn(page, '.batchbar', '确认写入');
+    await waitForText(page, '导入完成', 40_000);
+    await sleep(800);
+
+    await goto(page, 'reading', '先留着，稍后再看。');
+    await sleep(600);
+    const beforeRemove = await page.evaluate(readMainLibrary);
+    const pendingBeforeRemove = beforeRemove.readings.filter((row) => row.status === 'pending').length;
+    await clickIn(page, '.toolbar', '批量选择');
+    await sleep(300);
+    const pickedReading = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('.listbox .bookmark')].filter((row) =>
+        (row.innerText ?? '').includes('read.example.com')
+      );
+      for (const row of rows) row.querySelector('input[type="checkbox"]')?.click();
+      return rows.length;
+    });
+    await clickIn(page, '', '移出待看 2 条');
+    await waitForText(page, '确认移出这 2 条待看', 10_000);
+    await clickIn(page, '', '确认移出');
+    await waitForText(page, '已移出 2 条待看', 20_000);
+    await sleep(1000);
+    const afterRemove = await page.evaluate(readMainLibrary);
+    const pendingAfterRemove = afterRemove.readings.filter((row) => row.status === 'pending').length;
+    record(
+      'P9.6 待看勾选批量移出，队列数量准确减少',
+      pickedReading === 2 && pendingBeforeRemove - pendingAfterRemove === 2,
+      `待看 ${pendingBeforeRemove}→${pendingAfterRemove}`
+    );
+
+    await goto(page, 'data', '最近清理');
+    await sleep(600);
+    const readingSnapshots = await readPurgeSnapshots(page);
+    record(
+      'P9.6 待看批量移出同样留快照，可在明细里找回',
+      /手动移除的 2 条待看/.test(readingSnapshots.rows[0] ?? ''),
+      `最新=${(readingSnapshots.rows[0] ?? '').slice(0, 120)}`
+    );
+  });
+
   // 每份快照都得先有一次真实的硬删除才会产生，所以这里连续做六轮「新建一条 → 彻底清空」。
   phase('P9.4 清理快照只保留最近 5 份', async () => {
     await goto(page, 'data', '最近清理');

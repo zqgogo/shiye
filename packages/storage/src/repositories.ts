@@ -34,6 +34,7 @@ import type {
   PurgeCounts,
   PurgeRestorePreview,
   PurgeSnapshot,
+  PurgeSnapshotDetail,
   ReadingItem,
   SourceInfo,
   Tag,
@@ -68,6 +69,7 @@ import {
   deletePurgeSnapshot,
   listPurgeSnapshots,
   previewPurgeRestore,
+  readPurgeSnapshotDetail,
   restorePurgeSnapshot,
   triggerDeleteHook,
   writePurgeSnapshot,
@@ -344,6 +346,118 @@ export class DexieBookmarkRepository implements BookmarkRepository {
       await this.db.tombstones.delete(['bookmark', id]);
       return next;
     });
+  }
+
+  /**
+   * 批量移入回收站（列表里勾选后使用）。
+   *
+   * 只处理还在库里的条目：已经在回收站的跳过，不会把删除时间刷新成第二次。
+   * 返回真正被移走的条数，界面按这个数报结果，而不是按勾选数。
+   */
+  async softDeleteMany(ids: string[]): Promise<number> {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) return 0;
+    return this.db.transaction('rw', this.db.bookmarks, this.db.tombstones, async () => {
+      let removed = 0;
+      const now = nowIso();
+      for (const id of unique) {
+        const current = await this.db.bookmarks.get(id);
+        if (!current || current.deletedAt) continue;
+        const next: Bookmark = {
+          ...current,
+          deletedAt: now,
+          revision: current.revision + 1,
+          localRevision: current.localRevision + 1,
+          updatedAt: now,
+        };
+        Object.assign(next, deriveIndexFields(next));
+        await this.db.bookmarks.put(next);
+        await this.db.tombstones.put({
+          entityType: 'bookmark',
+          id: current.id,
+          revision: next.revision,
+          changeVersion: null,
+          deletedAt: now,
+          privacyScope: current.privacy.localOnly ? 'local' : 'main',
+          canonicalUrl: current.canonicalUrl,
+          title: current.title,
+        });
+        removed += 1;
+      }
+      return removed;
+    });
+  }
+
+  /** 批量从回收站恢复；分类已被删掉的落回未分类。 */
+  async restoreMany(ids: string[]): Promise<number> {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) return 0;
+    return this.db.transaction(
+      'rw',
+      [this.db.bookmarks, this.db.tombstones, this.db.categories],
+      async () => {
+        let restored = 0;
+        for (const id of unique) {
+          const current = await this.db.bookmarks.get(id);
+          if (!current || !current.deletedAt) continue;
+          let categoryId = current.categoryId;
+          if (categoryId && !(await this.db.categories.get(categoryId))) categoryId = null;
+          const next: Bookmark = {
+            ...current,
+            deletedAt: null,
+            categoryId,
+            revision: current.revision + 1,
+            localRevision: current.localRevision + 1,
+            updatedAt: nowIso(),
+          };
+          Object.assign(next, deriveIndexFields(next));
+          await this.db.bookmarks.put(next);
+          await this.db.tombstones.delete(['bookmark', id]);
+          restored += 1;
+        }
+        return restored;
+      }
+    );
+  }
+
+  /**
+   * 批量彻底删除（列表里勾选后使用）。
+   *
+   * 与「清空」同一条规则：先写清理快照，再删记录与墓碑；快照写不进去就一条都不删。
+   * 这样「勾选 → 彻底删除」之后同一网址仍能重新导入，也能从「最近清理」按次找回一部分。
+   */
+  async purgeMany(ids: string[]): Promise<number> {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) return 0;
+    return this.db.transaction(
+      'rw',
+      [this.db.bookmarks, this.db.tombstones, this.db.settings, this.db.purgeSnapshots, this.db.meta],
+      async () => {
+        const wanted = new Set(unique);
+        const rows = (await this.db.bookmarks.toArray()).filter((row) => wanted.has(row.id));
+        if (rows.length === 0) return 0;
+        const ids = new Set(rows.map((row) => row.id));
+        const tombstones = (await this.db.tombstones.toArray()).filter(
+          (tombstone) => tombstone.entityType === 'bookmark' && ids.has(tombstone.id)
+        );
+        await writePurgeSnapshot(
+          this.db,
+          {
+            entry: 'selection',
+            scopeLabel: `手动选择的 ${rows.length} 条收藏`,
+            bookmarks: rows,
+            tombstones,
+          },
+          this.hooks
+        );
+        await triggerDeleteHook(this.hooks);
+        await this.db.bookmarks.bulkDelete(rows.map((row) => row.id));
+        await this.db.tombstones.bulkDelete(
+          tombstones.map((tombstone) => [tombstone.entityType, tombstone.id] as [string, string])
+        );
+        return rows.length;
+      }
+    );
   }
 
   /**
@@ -838,6 +952,37 @@ export class DexieReadingRepository implements ReadingRepository {
       await this.db.readingItems.put(next);
       return next;
     });
+  }
+
+  /**
+   * 批量移除待看（列表里勾选后使用）。
+   *
+   * 待看没有回收站，勾选移除就是彻底删除；先写清理快照，后悔了能从「最近清理」按次找回一部分。
+   */
+  async purgeMany(ids: string[]): Promise<number> {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) return 0;
+    return this.db.transaction(
+      'rw',
+      [this.db.readingItems, this.db.settings, this.db.purgeSnapshots, this.db.meta],
+      async () => {
+        const wanted = new Set(unique);
+        const rows = (await this.db.readingItems.toArray()).filter((row) => wanted.has(row.id));
+        if (rows.length === 0) return 0;
+        await writePurgeSnapshot(
+          this.db,
+          {
+            entry: 'selection',
+            scopeLabel: `手动移除的 ${rows.length} 条待看`,
+            readingItems: rows,
+          },
+          this.hooks
+        );
+        await triggerDeleteHook(this.hooks);
+        await this.db.readingItems.bulkDelete(rows.map((row) => row.id));
+        return rows.length;
+      }
+    );
   }
 
   /** 清空待看队列。待看没有墓碑，重新加入同一网址不会被挡住。 */
@@ -1601,8 +1746,15 @@ export class DexiePurgeRepository implements PurgeSnapshotRepository {
     return previewPurgeRestore(this.db, snapshotId);
   }
 
-  restore(snapshotId: string): Promise<{ preview: PurgeRestorePreview; restored: number }> {
-    return restorePurgeSnapshot(this.db, snapshotId);
+  detail(snapshotId: string): Promise<PurgeSnapshotDetail> {
+    return readPurgeSnapshotDetail(this.db, snapshotId);
+  }
+
+  restore(
+    snapshotId: string,
+    ids?: string[]
+  ): Promise<{ preview: PurgeRestorePreview; restored: number }> {
+    return restorePurgeSnapshot(this.db, snapshotId, ids);
   }
 
   remove(snapshotId: string): Promise<void> {

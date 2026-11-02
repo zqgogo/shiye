@@ -326,7 +326,9 @@ export type PurgeEntry =
   | 'uncategorized'
   | 'readingPending'
   | 'readingCompleted'
-  | 'importBatch';
+  | 'importBatch'
+  /** 列表里手动勾选后一次性彻底删除。 */
+  | 'selection';
 
 export interface PurgeSnapshotCounts {
   bookmarks: number;
@@ -359,6 +361,14 @@ export interface PurgeSnapshot {
   bytes: number;
   restoredAt: string | null;
   restoredCounts: PurgeRestoreCounts | null;
+  /**
+   * 已经从这里找回过的条目编号。
+   *
+   * 有了它才能支持「只找回一部分」：同一份快照可以被找回多次，
+   * 列表要能标出哪几条已经回来了，恢复过的也不能再算一次。
+   * 旧快照没有这个字段，按空数组处理。
+   */
+  restoredIds?: string[];
 }
 
 /** 单条恢复判定：`restore` 才写库，`skip` 与 `conflict` 都保持现状。 */
@@ -381,6 +391,44 @@ export interface PurgeRestorePreview {
   skipped: number;
   conflicted: number;
   decisions: PurgeRestoreDecision[];
+}
+
+/** 快照里的一条记录，供「看看能找回什么」逐条浏览与勾选。 */
+export interface PurgeSnapshotEntry {
+  id: string;
+  kind: 'bookmark' | 'reading';
+  title: string;
+  url: string;
+  host: string;
+  /** 导入时的原始目录；待看与手动添加的收藏为 null。 */
+  folder: string | null;
+  categoryName: string | null;
+  /** 清理时已经在回收站里（找回后会回到回收站，而不是直接出现）。 */
+  trashed: boolean;
+  /** 此前已经从这份快照找回过了。 */
+  restored: boolean;
+  action: PurgeRestoreAction;
+  reason: string;
+}
+
+/**
+ * 一份快照的逐条明细。
+ *
+ * 计数与 `PurgeRestorePreview` 同一套判定：这里多出来的只是「每条长什么样」，
+ * 不另算一套规则，免得界面说 3 条可找回、执行时只回来 2 条。
+ */
+export interface PurgeSnapshotDetail {
+  snapshotId: string;
+  entry: PurgeEntry;
+  scopeLabel: string;
+  createdAt: string;
+  totals: {
+    candidates: number;
+    restorable: number;
+    skipped: number;
+    conflicted: number;
+  };
+  entries: PurgeSnapshotEntry[];
 }
 
 export interface ImportParseWarning {

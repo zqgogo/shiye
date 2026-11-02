@@ -12,8 +12,8 @@ import {
   type BatchEntryState,
   type BatchEntryView,
   type ImportBatch,
-  type PurgeRestorePreview,
   type PurgeSnapshot,
+  type PurgeSnapshotDetail,
 } from '@shiye/core';
 import type { ImportBatchPage, ImportUndoPreview, ImportUndoResult } from '@shiye/application';
 import { KeptList, Notice, PageHeader } from './components.js';
@@ -98,8 +98,16 @@ export function DataPage() {
   const [batchSearch, setBatchSearch] = useState('');
   const [batchLimit, setBatchLimit] = useState(20);
   const [snapshots, setSnapshots] = useState<PurgeSnapshot[] | null>(null);
-  const [purgePreview, setPurgePreview] = useState<PurgeRestorePreview | null>(null);
-  const [purgeBusy, setPurgeBusy] = useState('');
+  /** 「看看能找回什么」：把这一份快照里删掉的条目逐条列出来，可按关键词 / 类型 / 状态 / 目录 / 站点筛。 */
+  const [snapshotDetail, setSnapshotDetail] = useState<PurgeSnapshotDetail | null>(null);
+  const [snapshotBusy, setSnapshotBusy] = useState('');
+  const [snapshotSearch, setSnapshotSearch] = useState('');
+  const [snapshotKind, setSnapshotKind] = useState<'' | 'bookmark' | 'reading'>('');
+  const [snapshotStatus, setSnapshotStatus] = useState<'' | 'restore' | 'skip' | 'conflict'>('');
+  const [snapshotFolder, setSnapshotFolder] = useState('');
+  const [snapshotHost, setSnapshotHost] = useState('');
+  const [snapshotSelected, setSnapshotSelected] = useState<string[]>([]);
+  const [snapshotLimit, setSnapshotLimit] = useState(DETAIL_PAGE);
   const [undoing, setUndoing] = useState('');
   /** 待确认的撤回：先预演，把「会删几条、留几条」直接摆在确认按钮旁边。 */
   const [pendingUndo, setPendingUndo] = useState<ImportUndoPreview | null>(null);
@@ -131,34 +139,45 @@ export function DataPage() {
     }
   };
 
-  /** 只读预览：算出这一次删掉的东西里哪些能找回、哪些会跳过或冲突。 */
-  const previewPurgeRestore = async (snapshotId: string) => {
-    setPurgeBusy(snapshotId);
+  /** 打开一份快照的明细：筛选与勾选都要跟着重置，不能把上一份快照的条件带过来。 */
+  const openSnapshotDetail = async (snapshotId: string) => {
+    setSnapshotBusy(snapshotId);
     try {
-      setPurgePreview(await service.previewPurgeRestore(snapshotId));
+      setSnapshotDetail(await service.readPurgeSnapshotDetail(snapshotId));
+      setSnapshotSearch('');
+      setSnapshotKind('');
+      setSnapshotStatus('');
+      setSnapshotFolder('');
+      setSnapshotHost('');
+      setSnapshotSelected([]);
+      setSnapshotLimit(DETAIL_PAGE);
     } catch (error) {
       toast(toUserMessage(error), 'error');
     } finally {
-      setPurgeBusy('');
+      setSnapshotBusy('');
     }
   };
 
-  /** 只加回这份快照的条目；冲突一律跳过，不覆盖当前数据。 */
-  const runPurgeRestore = async () => {
-    if (!purgePreview) return;
-    setPurgeBusy(purgePreview.snapshotId);
+  /**
+   * 只找回传进来的这几条：界面要么传勾选的，要么传当前筛选里可找回的。
+   * 判定在事务内重算，预览之后刚被重新导入或刚被删掉的条目会按最新状态跳过。
+   */
+  const runPurgeRestore = async (ids: string[]) => {
+    if (!snapshotDetail || ids.length === 0) return;
+    setSnapshotBusy(snapshotDetail.snapshotId);
     try {
-      const outcome = await service.restorePurgeSnapshot(purgePreview.snapshotId);
+      const outcome = await service.restorePurgeSnapshot(snapshotDetail.snapshotId, ids);
       toast(
         `找回 ${outcome.restored} 条；跳过 ${outcome.preview.skipped} 条、冲突 ${outcome.preview.conflicted} 条。`,
         'ok'
       );
-      setPurgePreview(null);
+      setSnapshotDetail(null);
+      setSnapshotSelected([]);
       await reload();
     } catch (error) {
       toast(toUserMessage(error), 'error');
     } finally {
-      setPurgeBusy('');
+      setSnapshotBusy('');
     }
   };
 
@@ -411,6 +430,36 @@ export function DataPage() {
   const hiddenRows = detailRows.length - displayedRows.length;
   // 彻底删除是范围最宽的动作，它都处理不了的就是真的不在这里动（已转收藏 / 已完成 / 已不存在）。
   const outOfScopeRows = detailRows.length - deletableRows.length;
+
+  /* ---------- 「看看能找回什么」的逐条明细 ---------- */
+
+  const snapshotEntries = snapshotDetail?.entries ?? [];
+  const snapshotTerm = snapshotSearch.trim().toLowerCase();
+  const snapshotFolders = [...new Set(snapshotEntries.map((row) => row.folder).filter(Boolean))] as string[];
+  const snapshotHosts = [...new Set(snapshotEntries.map((row) => row.host))].sort((a, b) => a.localeCompare(b));
+  const filteredSnapshotEntries = snapshotEntries.filter((row) => {
+    if (snapshotKind && row.kind !== snapshotKind) return false;
+    // 「已找回」在状态筛选里当作单独一档：它已经不在可找回的范围里了，但仍值得标出来。
+    if (snapshotStatus === 'restore' && (row.action !== 'restore' || row.restored)) return false;
+    if (snapshotStatus === 'skip' && row.action !== 'skip') return false;
+    if (snapshotStatus === 'conflict' && row.action !== 'conflict') return false;
+    if (snapshotFolder && (snapshotFolder === NO_FOLDER ? Boolean(row.folder) : row.folder !== snapshotFolder)) {
+      return false;
+    }
+    if (snapshotHost && row.host !== snapshotHost) return false;
+    if (snapshotTerm) {
+      const haystack = `${row.title} ${row.url} ${row.folder ?? ''} ${row.categoryName ?? ''}`.toLowerCase();
+      if (!haystack.includes(snapshotTerm)) return false;
+    }
+    return true;
+  });
+  const snapshotPageRows = filteredSnapshotEntries.slice(0, snapshotLimit);
+  const snapshotHidden = filteredSnapshotEntries.length - snapshotPageRows.length;
+  // 勾选只对「还能回来且还没回来」的条目开放：勾了也回不来的条目不该给出选项。
+  const restorableSnapshotEntries = filteredSnapshotEntries.filter((row) => row.action === 'restore' && !row.restored);
+  const selectedSnapshotIds = new Set(snapshotSelected);
+  // 勾选只来自「可找回」的行，所以勾选数就是这一次要恢复的条数。
+  const selectedRestorable = snapshotSelected.length;
 
   return (
     <>
@@ -921,7 +970,8 @@ export function DataPage() {
                     <span>{formatDateTime(snapshot.createdAt)}</span>
                     {snapshot.restoredAt ? (
                       <span>
-                        · 已恢复 {snapshot.restoredCounts?.restored ?? 0} 条（{formatDateTime(snapshot.restoredAt)}）
+                        · 已找回 {snapshot.restoredIds?.length ?? snapshot.restoredCounts?.restored ?? 0} 条（
+                        {formatDateTime(snapshot.restoredAt)}）
                       </span>
                     ) : null}
                   </div>
@@ -929,42 +979,188 @@ export function DataPage() {
                 <div className="rowactions">
                   <button
                     className="btn small"
-                    disabled={purgeBusy === snapshot.id}
-                    onClick={() => void previewPurgeRestore(snapshot.id)}
+                    disabled={snapshotBusy === snapshot.id}
+                    onClick={() => void openSnapshotDetail(snapshot.id)}
                   >
-                    {purgeBusy === snapshot.id ? '读取中…' : '看看能找回什么'}
+                    {snapshotBusy === snapshot.id ? '读取中…' : '看看能找回什么'}
                   </button>
                 </div>
               </article>
             ))}
           </div>
         )}
-        {purgePreview ? (
-          <Notice>
-            <strong>
-              这次清理共 {purgePreview.candidates} 条：可找回 {purgePreview.restorable} 条，跳过{' '}
-              {purgePreview.skipped} 条，冲突 {purgePreview.conflicted} 条。
-            </strong>
-            <span>只加回这份快照里的条目；冲突表示同网址已经在库里，恢复不会覆盖它。</span>
-            {purgePreview.decisions
-              .filter((row) => row.action !== 'restore')
-              .slice(0, 8)
-              .map((row) => (
-                <span key={row.id} className="micro">
-                  · {row.title}：{row.reason}
-                </span>
-              ))}
-            <button
-              className="btn small primary"
-              disabled={purgeBusy !== '' || purgePreview.restorable === 0}
-              onClick={() => void runPurgeRestore()}
-            >
-              恢复这 {purgePreview.restorable} 条
-            </button>
-            <button className="btn small" onClick={() => setPurgePreview(null)}>
-              取消
-            </button>
-          </Notice>
+        {snapshotDetail ? (
+          <div className="snapshotview">
+            <Notice>
+              <strong>
+                这次清理共 {snapshotDetail.totals.candidates} 条：可找回 {snapshotDetail.totals.restorable} 条，跳过{' '}
+                {snapshotDetail.totals.skipped} 条，冲突 {snapshotDetail.totals.conflicted} 条。
+              </strong>
+              <span>
+                {snapshotDetail.scopeLabel} · {formatDateTime(snapshotDetail.createdAt)}。
+                可以按关键词、类型、状态、原目录或站点先筛，再勾选要找回的那几条；没勾的留在快照里等下次。
+              </span>
+              <span>
+                冲突表示同网址已经在库里，找回不会覆盖它；在回收站里的条目会回到回收站，不会直接冒出来。
+              </span>
+              <div className="actions" style={{ justifyContent: 'flex-start' }}>
+                <button
+                  className="btn small primary"
+                  disabled={
+                    snapshotBusy !== '' ||
+                    (selectedRestorable === 0 && restorableSnapshotEntries.length === 0)
+                  }
+                  onClick={() =>
+                    void runPurgeRestore(
+                      selectedRestorable > 0
+                        ? snapshotSelected
+                        : restorableSnapshotEntries.map((row) => row.id)
+                    )
+                  }
+                >
+                  {selectedRestorable > 0
+                    ? `恢复选中的 ${selectedRestorable} 条`
+                    : `恢复这 ${restorableSnapshotEntries.length} 条`}
+                </button>
+                <button
+                  className="btn small"
+                  onClick={() => {
+                    setSnapshotDetail(null);
+                    setSnapshotSelected([]);
+                  }}
+                >
+                  关闭
+                </button>
+              </div>
+            </Notice>
+
+            <div className="toolbar">
+              <input
+                aria-label="搜索清理记录"
+                placeholder="搜索标题或网址…"
+                value={snapshotSearch}
+                onChange={(event) => {
+                  setSnapshotSearch(event.target.value);
+                  setSnapshotLimit(DETAIL_PAGE);
+                }}
+              />
+              <select
+                aria-label="清理记录类型"
+                value={snapshotKind}
+                onChange={(event) => setSnapshotKind(event.target.value as typeof snapshotKind)}
+              >
+                <option value="">全部类型</option>
+                <option value="bookmark">收藏</option>
+                <option value="reading">待看</option>
+              </select>
+              <select
+                aria-label="清理记录状态"
+                value={snapshotStatus}
+                onChange={(event) => setSnapshotStatus(event.target.value as typeof snapshotStatus)}
+              >
+                <option value="">全部状态</option>
+                <option value="restore">可找回</option>
+                <option value="skip">跳过</option>
+                <option value="conflict">冲突</option>
+              </select>
+              <select
+                aria-label="清理记录目录"
+                value={snapshotFolder}
+                onChange={(event) => setSnapshotFolder(event.target.value)}
+              >
+                <option value="">全部目录</option>
+                {snapshotFolders.map((folder) => (
+                  <option key={folder} value={folder}>
+                    {folder}
+                  </option>
+                ))}
+                <option value={NO_FOLDER}>（无目录）</option>
+              </select>
+              <select
+                aria-label="清理记录站点"
+                value={snapshotHost}
+                onChange={(event) => setSnapshotHost(event.target.value)}
+              >
+                <option value="">全部站点</option>
+                {snapshotHosts.map((host) => (
+                  <option key={host} value={host}>
+                    {host}
+                  </option>
+                ))}
+              </select>
+              <span className="micro">
+                匹配 {filteredSnapshotEntries.length} 条，当前显示 {snapshotPageRows.length} 条
+                {snapshotHidden > 0 ? `，还有 ${snapshotHidden} 条未列出` : ''}
+              </span>
+            </div>
+
+            <ul className="snapentries">
+              {snapshotPageRows.map((row) => {
+                const selectable = row.action === 'restore' && !row.restored;
+                return (
+                  <li className="snapentry" key={`${row.kind}:${row.id}`}>
+                    <input
+                      type="checkbox"
+                      aria-label={`选择 ${row.title}`}
+                      checked={selectable && selectedSnapshotIds.has(row.id)}
+                      disabled={!selectable}
+                      onChange={(event) =>
+                        setSnapshotSelected((current) =>
+                          event.target.checked
+                            ? [...current, row.id]
+                            : current.filter((id) => id !== row.id)
+                        )
+                      }
+                    />
+                    <div className="snapentrybody">
+                      <strong>{row.title}</strong>
+                      <span className="micro">
+                        {row.kind === 'reading' ? '待看' : row.folder ? `目录：${row.folder}` : '无原始目录'}
+                        {row.kind === 'bookmark' ? ` · ${row.categoryName ?? '未分类'}` : ''} · {row.host}
+                        {row.trashed ? ' · 清理时在回收站' : ''}
+                      </span>
+                      {row.action !== 'restore' ? <span className="micro">· {row.reason}</span> : null}
+                    </div>
+                    <span className={`tag ${row.action}`}>
+                      {row.restored ? '已找回' : row.action === 'restore' ? '可找回' : row.action === 'skip' ? '跳过' : '冲突'}
+                    </span>
+                  </li>
+                );
+              })}
+              {snapshotPageRows.length === 0 ? (
+                <li className="snapentry">
+                  <span className="micro">当前筛选没有命中任何记录。</span>
+                </li>
+              ) : null}
+            </ul>
+
+            <div className="actions" style={{ justifyContent: 'flex-start' }}>
+              <button
+                className="btn small"
+                disabled={restorableSnapshotEntries.length === 0}
+                onClick={() =>
+                  setSnapshotSelected((current) => [
+                    ...new Set([...current, ...restorableSnapshotEntries.map((row) => row.id)]),
+                  ])
+                }
+              >
+                全选可找回（{restorableSnapshotEntries.length}）
+              </button>
+              <button
+                className="btn small"
+                disabled={snapshotSelected.length === 0}
+                onClick={() => setSnapshotSelected([])}
+              >
+                清空勾选
+              </button>
+              {snapshotHidden > 0 ? (
+                <button className="btn small" onClick={() => setSnapshotLimit(snapshotLimit + DETAIL_PAGE)}>
+                  再显示 {Math.min(DETAIL_PAGE, snapshotHidden)} 条（还有 {snapshotHidden} 条）
+                </button>
+              ) : null}
+              <span className="micro">已勾选 {snapshotSelected.length} 条</span>
+            </div>
+          </div>
         ) : null}
       </div>
 
