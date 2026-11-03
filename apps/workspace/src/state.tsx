@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import { toUserMessage } from '@shiye/core';
+import type { CleanupScope } from '@shiye/core';
 import type { WorkspaceService, WorkspaceSnapshot } from '@shiye/application';
 import { notifyDataChanged, subscribeDataChanged } from '@shiye/application';
 
@@ -19,6 +20,8 @@ export type ModalState =
   | { kind: 'convert-reading'; readingId: string }
   | { kind: 'delete-bookmark'; bookmarkId: string }
   | { kind: 'category-editor'; categoryId?: string }
+  /** 按条件清理：范围由入口带入（分类页 / 未分类 / 待看页），弹窗里也可以改。 */
+  | { kind: 'cleanup'; scope: CleanupScope }
   /** 抽屉里有未保存的修改，离开前要求用户明确选择。 */
   | { kind: 'discard-edits' }
   | null;

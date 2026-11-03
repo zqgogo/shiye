@@ -1,7 +1,26 @@
 import { useEffect, useState } from 'react';
-import type { Bookmark, Category, ImportUndoItem, ImportUndoReason } from '@shiye/core';
+import type { BatchEntryState, Bookmark, Category, ImportUndoItem, ImportUndoReason } from '@shiye/core';
 import { domainOf, formatDateTime, isHttpUrl } from '@shiye/core';
 import { useWorkspace } from './state.js';
+
+/**
+ * 下拉里表示「没有原始目录」的那一项：空串已经被「全部目录」占了。
+ * 批次面板与按条件清理面板共用，避免两处各写一个哨兵、某个下拉先改坏。
+ */
+export const NO_FOLDER = '__none__';
+
+/**
+ * 记录现状的标签：与撤回判据一致——先看在不在，再看变成了什么，最后才是改没改过。
+ * 批次面板与按条件清理面板共用同一份文案。
+ */
+export const BATCH_STATE_LABEL: Record<BatchEntryState, string> = {
+  untouched: '未改动',
+  modified: '已改动',
+  trashed: '已删除',
+  converted: '已转收藏',
+  completed: '已完成',
+  missing: '已不存在',
+};
 
 export const ICONS = {
   home: '⌂',

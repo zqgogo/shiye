@@ -226,7 +226,8 @@ export async function previewBatchCleanup(
   });
 }
 
-async function softDeleteBookmark(db: ShiyeDB, row: Bookmark, now: string): Promise<void> {
+/** 软删除单条并补墓碑。批次清理与按条件清理共用，免得两处各写一份、墓碑字段慢慢分叉。 */
+export async function softDeleteBookmark(db: ShiyeDB, row: Bookmark, now: string): Promise<void> {
   const next: Bookmark = {
     ...row,
     deletedAt: now,

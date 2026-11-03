@@ -1397,3 +1397,205 @@ describe('批量选择与快照明细', () => {
     expect(after.entries.filter((row) => row.restored)).toHaveLength(1);
   });
 });
+
+describe('按条件清理（分类 / 未分类 / 待看）', () => {
+  const base = (over: Partial<import('@shiye/core').CleanupCriteria> = {}) => ({
+    scope: { kind: 'uncategorized' as const },
+    presence: 'active' as const,
+    modification: 'any' as const,
+    folders: [] as string[],
+    sites: [] as string[],
+    mode: 'trash' as const,
+    ...over,
+  });
+
+  it('分类范围只清这个分类，别的分类与未分类都不动', async () => {
+    const work = await repos.categories.create('工作');
+    const life = await repos.categories.create('生活');
+    const a1 = await repos.bookmarks.create({
+      originalUrl: 'https://a.example.com/1',
+      title: 'A1',
+      categoryId: work.id,
+    });
+    const a2 = await repos.bookmarks.create({
+      originalUrl: 'https://a.example.com/2',
+      title: 'A2',
+      categoryId: work.id,
+    });
+    const b1 = await repos.bookmarks.create({
+      originalUrl: 'https://b.example.com/1',
+      title: 'B1',
+      categoryId: life.id,
+    });
+    const n1 = await repos.bookmarks.create({ originalUrl: 'https://c.example.com/1', title: 'N1' });
+
+    const view = await repos.cleanup.scope({ kind: 'category', categoryId: work.id });
+    expect(view.label).toBe('分类：工作');
+    expect(view.total).toBe(2);
+    expect(view.rows.map((row) => row.title).sort()).toEqual(['A1', 'A2']);
+
+    const preview = await repos.cleanup.preview(
+      base({ scope: { kind: 'category', categoryId: work.id } })
+    );
+    expect(preview.matched).toBe(2);
+    expect(preview.actionable).toBe(2);
+    // 范围描述要能直接进清理快照：只写「分类：工作」，不能带上一堆无关信息。
+    expect(preview.token.label).toBe('分类：工作');
+
+    const outcome = await repos.cleanup.run(preview.token);
+    expect(outcome.removed).toBe(2);
+    // 移入回收站是可撤销动作，不写快照。
+    expect(outcome.snapshotId).toBeNull();
+    expect((await db.bookmarks.get(a1.id))?.deletedAt).toBeTruthy();
+    expect((await db.bookmarks.get(a2.id))?.deletedAt).toBeTruthy();
+    expect((await db.bookmarks.get(b1.id))?.deletedAt).toBeNull();
+    expect((await db.bookmarks.get(n1.id))?.deletedAt).toBeNull();
+  });
+
+  it('未分类 + 站点筛选后彻底删除：留快照，可按条找回', async () => {
+    const x1 = await repos.bookmarks.create({ originalUrl: 'https://same.example.com/x1', title: 'X1' });
+    await repos.bookmarks.create({ originalUrl: 'https://same.example.com/x2', title: 'X2' });
+    const other = await repos.bookmarks.create({ originalUrl: 'https://other.example.com/y', title: 'Y' });
+
+    const view = await repos.cleanup.scope({ kind: 'uncategorized' });
+    expect(view.total).toBe(3);
+    expect(view.sites).toEqual(['other.example.com', 'same.example.com']);
+
+    const preview = await repos.cleanup.preview(base({ sites: ['same.example.com'], mode: 'delete' }));
+    expect(preview.matched).toBe(2);
+    expect(preview.actionable).toBe(2);
+
+    const outcome = await repos.cleanup.run(preview.token);
+    expect(outcome.removed).toBe(2);
+    expect(outcome.snapshotId).toBeTruthy();
+
+    const [snapshot] = await repos.purge.list();
+    expect(snapshot?.entry).toBe('uncategorized');
+    expect(snapshot?.scopeLabel).toBe('未分类 · 站点：same.example.com · 彻底删除');
+    expect(await db.bookmarks.get(other.id)).toBeTruthy();
+
+    if (!outcome.snapshotId) throw new Error('硬删除应当留下快照');
+    const detail = await repos.purge.detail(outcome.snapshotId);
+    expect(detail.entries).toHaveLength(2);
+    // 只勾一条就只回来一条：按条件清掉的东西也能挑着找回。
+    const back = await repos.purge.restore(outcome.snapshotId, [x1.id]);
+    expect(back.restored).toBe(1);
+    expect((await db.bookmarks.get(x1.id))?.deletedAt).toBeNull();
+  });
+
+  it('待看范围只处理未读完的，已完成与已转收藏不动', async () => {
+    const p1 = await repos.reading.add({ originalUrl: 'https://r.example.com/1', title: '待看一' });
+    await repos.reading.add({ originalUrl: 'https://r.example.com/2', title: '待看二' });
+    const done = await repos.reading.add({ originalUrl: 'https://r.example.com/3', title: '已完成' });
+    await repos.reading.complete(done.item.id);
+    const source = await repos.bookmarks.create({ originalUrl: 'https://r.example.com/4', title: '母收藏' });
+    const converted = await repos.reading.add({
+      originalUrl: 'https://r.example.com/4',
+      title: '已转收藏',
+      relatedBookmarkId: source.id,
+    });
+
+    const view = await repos.cleanup.scope({ kind: 'reading' });
+    expect(view.label).toBe('待看');
+    expect(view.total).toBe(2);
+    expect(view.rows.every((row) => row.kind === 'reading')).toBe(true);
+
+    const preview = await repos.cleanup.preview(
+      base({ scope: { kind: 'reading' }, mode: 'delete' })
+    );
+    expect(preview.actionable).toBe(2);
+
+    const outcome = await repos.cleanup.run(preview.token);
+    expect(outcome.removed).toBe(2);
+    expect(await db.readingItems.get(p1.item.id)).toBeUndefined();
+    expect(await db.readingItems.get(done.item.id)).toBeTruthy();
+    expect(await db.readingItems.get(converted.item.id)).toBeTruthy();
+
+    const [snapshot] = await repos.purge.list();
+    expect(snapshot?.entry).toBe('readingPending');
+    expect(snapshot?.counts.readingItems).toBe(2);
+  });
+
+  it('预览后改动过的跳过并报原因，预览后新增的不会被卷进来', async () => {
+    const one = await repos.bookmarks.create({ originalUrl: 'https://f.example.com/1', title: '冻结一' });
+    await repos.bookmarks.create({ originalUrl: 'https://f.example.com/2', title: '冻结二' });
+
+    const preview = await repos.cleanup.preview(base({ mode: 'delete' }));
+    expect(preview.actionable).toBe(2);
+
+    // 另一个页面在这个窗口里改了标题、又新建了一条同样落在条件里的记录。
+    await repos.bookmarks.update(one.id, 1, { title: '改过的标题' }, 'human');
+    const fresh = await repos.bookmarks.create({ originalUrl: 'https://f.example.com/3', title: '预览后新增' });
+
+    const outcome = await repos.cleanup.run(preview.token);
+    expect(outcome.removed).toBe(1);
+    expect(outcome.skipped).toHaveLength(1);
+    expect(outcome.skipped[0]?.reason).toBe('预览后被修改，已保留');
+    expect(await db.bookmarks.get(one.id)).toBeTruthy();
+    // 条件还成立，但它不在冻结清单里，不能被顺手删掉。
+    expect(await db.bookmarks.get(fresh.id)).toBeTruthy();
+  });
+
+  it('三态：只看回收站时移入没有可处理项，彻底删除才行', async () => {
+    await repos.bookmarks.create({ originalUrl: 'https://s.example.com/a', title: '在库' });
+    const trashed = await repos.bookmarks.create({ originalUrl: 'https://s.example.com/b', title: '回收站' });
+    await repos.bookmarks.softDelete(trashed.id);
+
+    const asTrash = await repos.cleanup.preview(base({ presence: 'trashed', mode: 'trash' }));
+    expect(asTrash.actionable).toBe(0);
+    const asDelete = await repos.cleanup.preview(base({ presence: 'trashed', mode: 'delete' }));
+    expect(asDelete.actionable).toBe(1);
+    const both = await repos.cleanup.preview(base({ presence: 'both', mode: 'delete' }));
+    expect(both.actionable).toBe(2);
+    // 快照范围必须写明「动了回收站里的记录」，事后才分得清删的是哪一段。
+    expect(both.token.label).toContain('含回收站 1 条');
+  });
+});
+
+describe('按条件清理的筛选组合', () => {
+  const base = (over: Partial<import('@shiye/core').CleanupCriteria> = {}) => ({
+    scope: { kind: 'all' as const },
+    presence: 'active' as const,
+    modification: 'any' as const,
+    folders: [] as string[],
+    sites: [] as string[],
+    mode: 'trash' as const,
+    ...over,
+  });
+
+  it('目录筛选与「只看没改过的」叠加时，命中数是真的交集', async () => {
+    const a1 = await repos.bookmarks.create({
+      originalUrl: 'https://folder.example.com/1',
+      title: '工作一',
+      sourceFolder: '工作',
+    });
+    await repos.bookmarks.create({
+      originalUrl: 'https://folder.example.com/2',
+      title: '工作二',
+      sourceFolder: '工作',
+    });
+    await repos.bookmarks.create({
+      originalUrl: 'https://folder.example.com/3',
+      title: '生活一',
+      sourceFolder: '生活',
+    });
+    // 导入后改过一条：目录仍是「工作」，但不再算「没改过」。
+    await repos.bookmarks.update(a1.id, 1, { title: '工作一（改过）' }, 'human');
+
+    const view = await repos.cleanup.scope({ kind: 'all' });
+    expect(view.folders).toEqual(['工作', '生活']);
+
+    const workUntouched = await repos.cleanup.preview(
+      base({ folders: ['工作'], modification: 'untouched' })
+    );
+    expect(workUntouched.matched).toBe(1);
+    expect(workUntouched.token.label).toBe('全部收藏 · 目录：工作');
+    expect(workUntouched.sample[0]?.title).toBe('工作二');
+
+    const workModified = await repos.cleanup.preview(
+      base({ folders: ['工作'], modification: 'modified' })
+    );
+    expect(workModified.matched).toBe(1);
+    expect(workModified.sample[0]?.title).toBe('工作一（改过）');
+  });
+});

@@ -7,6 +7,7 @@ export * from './repositories.js';
 export * from './backup.js';
 export * from './purge.js';
 export * from './batch-cleanup.js';
+export * from './cleanup.js';
 
 export interface ShiyeStore {
   db: ShiyeDB;

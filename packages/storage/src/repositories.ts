@@ -22,6 +22,12 @@ import type {
   Bookmark,
   BookmarkPatch,
   Category,
+  CleanupCriteria,
+  CleanupPreview,
+  CleanupResult,
+  CleanupScope,
+  CleanupScopeView,
+  CleanupToken,
   HandoffBatch,
   HandoffBatchStatus,
   HandoffItem,
@@ -45,6 +51,7 @@ import type {
   BackupRepository,
   BookmarkRepository,
   CategoryRepository,
+  CleanupRepository,
   CommitImportParams,
   CommitImportResult,
   ConvertReadingParams,
@@ -80,6 +87,11 @@ import {
   listBatchEntries as readBatchView,
   previewBatchCleanup as previewBatchView,
 } from './batch-cleanup.js';
+import {
+  previewCleanup as previewScopeCleanup,
+  readCleanupScope as readScope,
+  runCleanup as runScopeCleanup,
+} from './cleanup.js';
 
 function assertNotDeleted(bookmark: Bookmark): void {
   if (bookmark.deletedAt) {
@@ -1762,6 +1774,23 @@ export class DexiePurgeRepository implements PurgeSnapshotRepository {
   }
 }
 
+export class DexieCleanupRepository implements CleanupRepository {
+  constructor(private readonly db: ShiyeDB, private readonly hooks?: PurgeHooks) {}
+
+  /** 只读：范围内的记录、可选目录 / 站点、各状态条数。 */
+  scope(scope: CleanupScope): Promise<CleanupScopeView> {
+    return readScope(this.db, scope);
+  }
+
+  preview(criteria: CleanupCriteria): Promise<CleanupPreview> {
+    return previewScopeCleanup(this.db, criteria);
+  }
+
+  run(token: CleanupToken): Promise<CleanupResult> {
+    return runScopeCleanup(this.db, token, this.hooks);
+  }
+}
+
 export function createRepositories(
   db: ShiyeDB,
   backup?: BackupRepository,
@@ -1774,6 +1803,7 @@ export function createRepositories(
     tags: new DexieTagRepository(db),
     settings: new DexieSettingsRepository(db),
     imports: new DexieImportRepository(db, hooks),
+    cleanup: new DexieCleanupRepository(db, hooks),
     handoff: new DexieHandoffRepository(db),
     backup: backup ?? createBackupRepository(db),
     purge: new DexiePurgeRepository(db),

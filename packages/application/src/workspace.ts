@@ -34,6 +34,12 @@ import {
   type Bookmark,
   type BookmarkPatch,
   type Category,
+  type CleanupCriteria,
+  type CleanupPreview,
+  type CleanupResult,
+  type CleanupScope,
+  type CleanupScopeView,
+  type CleanupToken,
   type ImportDestination,
   type ImportBatch,
   type ImportParseResult,
@@ -446,6 +452,21 @@ export class WorkspaceService {
   /** 执行批量清理：动作随令牌冻结；收藏默认进回收站，彻底删除先写清理快照。 */
   async cleanupBatch(token: BatchCleanupToken): Promise<BatchCleanupResult> {
     return this.repos.imports.cleanupBatch(token);
+  }
+
+  /** 按条件清理：只读列出分类 / 未分类 / 待看范围内的记录与可选目录、站点。 */
+  async readCleanupScope(scope: CleanupScope): Promise<CleanupScopeView> {
+    return this.repos.cleanup.scope(scope);
+  }
+
+  /** 冻结按条件清理的范围（命中、可处理、待处理 id / 类型 / 版本）。 */
+  async previewCleanup(criteria: CleanupCriteria): Promise<CleanupPreview> {
+    return this.repos.cleanup.preview(criteria);
+  }
+
+  /** 执行按条件清理：只认冻结清单，硬删除先写本机清理快照。 */
+  async cleanupScope(token: CleanupToken): Promise<CleanupResult> {
+    return this.repos.cleanup.run(token);
   }
 
   /** 批量移入回收站：只对勾选里还在库的条目生效，返回真正移走的条数。 */

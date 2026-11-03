@@ -1,6 +1,8 @@
 import type {
   BatchCleanupMode,
   BatchEntryState,
+  CleanupCriteria,
+  CleanupEntryRow,
   ImportDestination,
 } from './types.js';
 
@@ -33,4 +35,22 @@ export function isBatchCleanupActionable(
   }
   if (state === 'trashed') return mode === 'delete';
   return state === 'untouched' || state === 'modified';
+}
+
+/**
+ * 按条件清理的命中判定。
+ *
+ * **界面计数、预览冻结、执行复核都从这里推导**，所以不会出现「面板写 30 条、实际处理 33 条」。
+ * 三态只看收藏：待看没有回收站，这一项对它没有意义，直接忽略。
+ */
+export function matchesCleanupCriteria(row: CleanupEntryRow, criteria: CleanupCriteria): boolean {
+  if (row.kind === 'bookmark') {
+    if (criteria.presence === 'active' && row.state === 'trashed') return false;
+    if (criteria.presence === 'trashed' && row.state !== 'trashed') return false;
+  }
+  if (criteria.folders.length > 0 && !criteria.folders.includes(row.folder)) return false;
+  if (criteria.sites.length > 0 && !criteria.sites.includes(row.site)) return false;
+  if (criteria.modification === 'untouched' && row.state !== 'untouched') return false;
+  if (criteria.modification === 'modified' && row.state !== 'modified') return false;
+  return true;
 }

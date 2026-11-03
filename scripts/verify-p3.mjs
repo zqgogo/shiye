@@ -1921,6 +1921,193 @@ async function main() {
     );
   });
 
+  phase('P9.3 从分类 / 未分类 / 待看页带入范围', async () => {
+    // 先清空，保证这一阶段的数字只由它自己造出来，不受前面阶段残留影响。
+    // 清空同时清墓碑，后面重新建同网址不会被「已删除」挡住。
+    await goto(page, 'all', '全部收藏');
+    const canPurgeAll = await page.evaluate(() =>
+      [...document.querySelectorAll('.toolbar button')].some((node) =>
+        (node.textContent ?? '').includes('彻底清空')
+      )
+    );
+    if (canPurgeAll) {
+      await clickIn(page, '.toolbar', '彻底清空…');
+      await waitForText(page, '确认彻底清空', 10_000);
+      await clickIn(page, '', '确认清空');
+      await sleep(1200);
+    }
+
+    const scopeCat = await ensureCategory(page, '清理范围');
+    if (!scopeCat) throw new Error('分类创建失败，按条件清理无法验证');
+
+    await goto(page, 'all', '全部收藏');
+    await createBookmark(page, { url: 'https://scope.example.com/a1', title: '范围 A1' });
+    await createBookmark(page, { url: 'https://scope.example.com/a2', title: '范围 A2' });
+    await createBookmark(page, { url: 'https://scope.example.com/b1', title: '范围 B1' });
+
+    // 归入分类这一步走库：抽屉里点分类要额外处理未保存草稿，和这条断言无关。
+    // 写完必须整页重载，否则 React 手里还是旧快照，分类页会显示 0 条。
+    const movedIntoCategory = await page.evaluate(
+      async ({ catId }) => {
+        const db = await new Promise((resolve, reject) => {
+          const request = indexedDB.open('shiye');
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => resolve(request.result);
+        });
+        const rows = await new Promise((resolve, reject) => {
+          const tx = db.transaction('bookmarks', 'readonly');
+          const req = tx.objectStore('bookmarks').getAll();
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+        const targets = rows.filter((row) => row.originalUrl.startsWith('https://scope.example.com/a'));
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction('bookmarks', 'readwrite');
+          for (const row of targets) {
+            row.categoryId = catId;
+            row.categoryKey = catId;
+            tx.objectStore('bookmarks').put(row);
+          }
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+        db.close();
+        return targets.length;
+      },
+      { catId: scopeCat }
+    );
+    record(
+      'P9.3 预置：两条收藏归入「清理范围」，另一条留在未分类',
+      movedIntoCategory === 2,
+      `归入分类=${movedIntoCategory}`
+    );
+
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await waitForSelectorReady(page, '.brand-mark', 25_000);
+    await sleep(600);
+
+    // 待看两条：待看页的范围是另一条独立路径，不能拿收藏的结论套。
+    await goto(page, 'reading', '待看');
+    for (const [url, title] of [
+      ['https://scope.example.com/r1', '待看 R1'],
+      ['https://scope.example.com/r2', '待看 R2'],
+    ]) {
+      await clickIn(page, '.heading', '添加待看');
+      await waitForSelectorReady(page, '.modal input[placeholder="https://"]', 10_000);
+      await setReactInput(page, '.modal input[placeholder="https://"]', url);
+      await setReactInput(page, '.modal input[placeholder="给它一个容易想起的名字"]', title);
+      await clickIn(page, '.modal', '加入待看');
+      await waitForSelectorGone(page, '.modal input[placeholder="https://"]', 20_000);
+      await sleep(500);
+    }
+
+    const readCleanupPanel = () =>
+      page.evaluate(() => {
+        const modal = document.querySelector('.modal.wide');
+        return {
+          scope: document.querySelector('select[aria-label="清理范围"]')?.value ?? '',
+          hasPresence: Boolean(document.querySelector('select[aria-label="清理范围的三态"]')),
+          text: (modal?.innerText ?? '').replace(/\s+/g, ' ').trim(),
+        };
+      });
+
+    // ① 分类页：范围自动带入，命中数就是该分类的条数。
+    await goto(page, `cat:${scopeCat}`, '清理范围');
+    await clickIn(page, '.toolbar', '按条件清理…');
+    await waitForSelectorReady(page, 'select[aria-label="清理范围"]', 10_000);
+    await sleep(600);
+    const fromCategory = await readCleanupPanel();
+    record(
+      'P9.3 分类页把自身范围带进清理面板，命中数与该分类一致',
+      fromCategory.scope === `cat:${scopeCat}` &&
+        /分类：清理范围共 2 条/.test(fromCategory.text) &&
+        /可移入回收站 2 条/.test(fromCategory.text),
+      `${fromCategory.scope}｜${fromCategory.text.slice(0, 180)}`
+    );
+
+    // ② 面板里改范围：切到未分类，命中数跟着变，而不是沿用上一段的数字。
+    await page.select('select[aria-label="清理范围"]', 'uncategorized');
+    await sleep(800);
+    const fromUncategorized = await readCleanupPanel();
+    record(
+      'P9.3 面板里可以直接改范围，切到未分类后命中数跟着变',
+      /未分类共 1 条/.test(fromUncategorized.text) &&
+        /可移入回收站 1 条/.test(fromUncategorized.text),
+      fromUncategorized.text.slice(0, 180)
+    );
+
+    // ③ 切回分类并彻底删除：留快照，范围写得清「哪个分类、什么动作」。
+    await page.select('select[aria-label="清理范围"]', `cat:${scopeCat}`);
+    await sleep(800);
+    await clickIn(page, '.modal.wide', '彻底删除 2 条');
+    await waitForText(page, '确认处理 2 条', 10_000);
+    await sleep(300);
+    const scopeConfirm = await page.evaluate(() =>
+      (document.querySelector('.modal.wide')?.innerText ?? '').replace(/\s+/g, ' ').trim()
+    );
+    record(
+      'P9.3 分类范围彻底删除的确认框写明动作与快照',
+      /分类：清理范围 · 彻底删除/.test(scopeConfirm) && /清理快照/.test(scopeConfirm),
+      scopeConfirm.slice(0, 200)
+    );
+    await clickIn(page, '.modal.wide', '确认处理 2 条');
+    await waitForText(page, '已处理 2 条', 20_000);
+    await sleep(900);
+    await clickIn(page, '.modal.wide', '完成');
+    await sleep(500);
+
+    await goto(page, 'data', '最近清理');
+    await sleep(900);
+    const scopeSnapshots = await readPurgeSnapshots(page);
+    record(
+      'P9.3 清理快照记下「分类：清理范围 · 彻底删除」',
+      /分类：清理范围 · 彻底删除/.test(scopeSnapshots.rows[0] ?? ''),
+      `最新=${(scopeSnapshots.rows[0] ?? '').slice(0, 120)}`
+    );
+
+    // ④ 待看页：同一条路径、不同的范围；待看没有回收站，不该出现三态选择。
+    await goto(page, 'reading', '待看');
+    await sleep(600);
+    await clickIn(page, '.toolbar', '按条件清理…');
+    await waitForSelectorReady(page, 'select[aria-label="清理范围"]', 10_000);
+    await sleep(600);
+    const fromReading = await readCleanupPanel();
+    record(
+      'P9.3 待看页带入待看范围，没有回收站三态，动作是「从待看移除」',
+      fromReading.scope === 'reading' &&
+        !fromReading.hasPresence &&
+        /待看共 2 条/.test(fromReading.text) &&
+        /从待看移除 2 条/.test(fromReading.text),
+      `${fromReading.scope}｜三态=${fromReading.hasPresence}｜${fromReading.text.slice(0, 180)}`
+    );
+
+    await clickIn(page, '.modal.wide', '从待看移除 2 条');
+    await waitForText(page, '确认处理 2 条', 10_000);
+    await clickIn(page, '.modal.wide', '确认处理 2 条');
+    await waitForText(page, '已处理 2 条', 20_000);
+    await sleep(900);
+    await clickIn(page, '.modal.wide', '完成');
+    await sleep(600);
+    const afterScopeReading = await page.evaluate(readMainLibrary);
+    record(
+      'P9.3 待看按条件移除后队列准确减少，收藏不受影响',
+      afterScopeReading.readings.filter((row) => row.status === 'pending').length === 0 &&
+        afterScopeReading.bookmarks.filter((row) => row.lifeState === 'active').length === 1,
+      `待看=${
+        afterScopeReading.readings.filter((row) => row.status === 'pending').length
+      }｜在库=${afterScopeReading.bookmarks.filter((row) => row.lifeState === 'active').length}`
+    );
+
+    await goto(page, 'data', '最近清理');
+    await sleep(800);
+    const readingSnapshots = await readPurgeSnapshots(page);
+    record(
+      'P9.3 待看按条件移除同样留快照，范围写成「待看 · 彻底删除」',
+      /待看 · 彻底删除/.test(readingSnapshots.rows[0] ?? ''),
+      `最新=${(readingSnapshots.rows[0] ?? '').slice(0, 120)}`
+    );
+  });
+
   phase('P9.4 清理快照只保留最近 5 份', async () => {
     await goto(page, 'data', '最近清理');
     await waitForText(page, '看看能找回什么', 15_000);

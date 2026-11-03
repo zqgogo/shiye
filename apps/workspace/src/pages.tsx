@@ -489,6 +489,22 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
             {selectMode ? '退出批量选择' : '批量选择'}
           </button>
         ) : null}
+        {mode === 'all' || mode === 'uncategorized' || mode === 'category' ? (
+          <button
+            className="btn small"
+            onClick={() =>
+              openModal({
+                kind: 'cleanup',
+                scope:
+                  mode === 'category'
+                    ? { kind: 'category', categoryId: categoryId ?? '' }
+                    : { kind: mode },
+              })
+            }
+          >
+            按条件清理…
+          </button>
+        ) : null}
         {purge && (purgeCounts ? purgeCounts.active + purgeCounts.trashed > 0 : purge.count > 0) ? (
           <button className="btn small" onClick={() => setConfirmPurge(true)}>
             彻底清空…
@@ -839,6 +855,14 @@ export function ReadingPage() {
             }}
           >
             {selectMode ? '退出批量选择' : '批量选择'}
+          </button>
+        ) : null}
+        {pending.length ? (
+          <button
+            className="btn small"
+            onClick={() => openModal({ kind: 'cleanup', scope: { kind: 'reading' } })}
+          >
+            按条件清理…
           </button>
         ) : null}
         {pending.length ? (

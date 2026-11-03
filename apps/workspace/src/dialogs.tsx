@@ -5,14 +5,26 @@ import {
   domainOf,
   formatDateTime,
   isAppError,
+  isBatchCleanupActionable,
   isHttpUrl,
+  matchesCleanupCriteria,
   toUserMessage,
   type Bookmark,
   type Category,
+  type CleanupCriteria,
+  type CleanupModification,
+  type CleanupPresence,
+  type CleanupPreview,
+  type CleanupResult,
+  type CleanupScope,
+  type CleanupScopeKind,
+  type CleanupScopeView,
+  type BatchCleanupMode,
+  type BatchEntryState,
 } from '@shiye/core';
 import { notifyDataChanged } from '@shiye/application';
 import { useWorkspace } from './state.js';
-import { ICONS } from './components.js';
+import { BATCH_STATE_LABEL, ICONS, NO_FOLDER } from './components.js';
 
 function CategoryPicker({
   value,
@@ -1095,6 +1107,411 @@ export function DiscardEditsModal() {
   );
 }
 
+/** 一条都处理不了时说清是哪一种情况，而不是笼统地让人以为条件选错了。 */
+function cleanupHint(preview: CleanupPreview): string {
+  if (preview.matched === 0) return '当前条件下没有命中任何记录，换个范围或筛选再试。';
+  if (preview.byState.trashed > 0 && preview.mode === 'trash') {
+    return '命中的记录都在回收站里：移入回收站对它们没有意义，只能彻底删除。';
+  }
+  return '命中的记录都不在这个动作的处理范围里（已转收藏、已完成或已不存在）。';
+}
+
+/**
+ * 按条件清理。
+ *
+ * 从分类页 / 未分类 / 待看页进来时范围已经带好，也可以在这里改成别的范围——
+ * 但改范围等于改「这次要清哪一段」，所以一改就清空筛选与已冻结的预览，不让旧数字留着。
+ */
+export function CleanupModal({ scope: initialScope }: { scope: CleanupScope }) {
+  const { data, service, closeModal, run, toast } = useWorkspace();
+  const [scopeKind, setScopeKind] = useState<CleanupScopeKind>(initialScope.kind);
+  const [categoryId, setCategoryId] = useState(initialScope.categoryId ?? '');
+  const [presence, setPresence] = useState<CleanupPresence>('active');
+  const [modification, setModification] = useState<CleanupModification>('any');
+  const [folder, setFolder] = useState('');
+  const [site, setSite] = useState('');
+  const [view, setView] = useState<CleanupScopeView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [preview, setPreview] = useState<CleanupPreview | null>(null);
+  const [result, setResult] = useState<CleanupResult | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const scope: CleanupScope =
+    scopeKind === 'category' ? { kind: 'category', categoryId } : { kind: scopeKind };
+
+  useEffect(() => {
+    let alive = true;
+    const next: CleanupScope =
+      scopeKind === 'category' ? { kind: 'category', categoryId } : { kind: scopeKind };
+    setLoading(true);
+    service
+      .readCleanupScope(next)
+      .then((value) => {
+        if (alive) setView(value);
+      })
+      .catch((error) => toast(toUserMessage(error), 'error'))
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+    // 只随范围回库；目录 / 站点 / 改动筛选都在本地算，数字与预览用同一个判定。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeKind, categoryId, service]);
+
+  // 换范围不能留着上一段的筛选与冻结结果——那会让「确认 3 条」指向另一批记录。
+  useEffect(() => {
+    setFolder('');
+    setSite('');
+    setPreview(null);
+    setResult(null);
+  }, [scopeKind, categoryId]);
+
+  const rows = view?.rows ?? [];
+  const criteria: CleanupCriteria = {
+    scope,
+    // 待看没有回收站，三态对它没有意义；预览与执行都按 active 处理，避免出现「只看回收站」的空结果。
+    presence: scopeKind === 'reading' ? 'active' : presence,
+    modification,
+    folders: folder ? [folder === NO_FOLDER ? '' : folder] : [],
+    sites: site ? [site] : [],
+    mode: 'trash',
+  };
+  const matched = rows.filter((row) => matchesCleanupCriteria(row, criteria));
+  const destination = scopeKind === 'reading' ? 'reading' : 'library';
+  const trashable = matched.filter((row) => isBatchCleanupActionable(row.state, destination, 'trash'));
+  const deletable = matched.filter((row) => isBatchCleanupActionable(row.state, destination, 'delete'));
+  const modifiedCount = matched.filter((row) => row.state === 'modified').length;
+  const trashedCount = matched.filter((row) => row.state === 'trashed').length;
+  // 彻底删除是范围最宽的动作：连它都不处理的，才真的不在这里动。
+  const outOfScope = matched.length - deletable.length;
+
+  const start = async (mode: BatchCleanupMode) => {
+    setBusy(true);
+    setResult(null);
+    try {
+      const next = await service.previewCleanup({ ...criteria, mode });
+      if (next.actionable === 0) {
+        toast(cleanupHint(next), 'error');
+        return;
+      }
+      setPreview(next);
+    } catch (error) {
+      toast(toUserMessage(error), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirm = async () => {
+    if (!preview) return;
+    setBusy(true);
+    // run 会刷新主库快照并通知其它标签页：删完必须让列表跟着变，不能只改这个弹窗。
+    const outcome = await run(() => service.cleanupScope(preview.token));
+    setBusy(false);
+    if (!outcome) return;
+    setResult(outcome);
+    setPreview(null);
+    try {
+      setView(await service.readCleanupScope(scope));
+    } catch {
+      // 读不回来就保留旧视图：结果面板已经写明删了多少，不必为此再弹一个错。
+    }
+  };
+
+  return (
+    <div className="modalshade" role="presentation">
+      <div className="modal wide" role="dialog" aria-modal="true" aria-labelledby="cleanup-title">
+        <div className="modalheader">
+          <h2 id="cleanup-title">按条件清理</h2>
+          <button className="iconbtn" onClick={closeModal} aria-label="关闭">
+            ×
+          </button>
+        </div>
+
+        {result ? (
+          <div className="notice">
+            <strong>已处理 {result.removed} 条。</strong>
+            {result.skipped.length > 0 ? (
+              <span>
+                跳过 {result.skipped.length} 条：
+                {result.skipped
+                  .slice(0, 6)
+                  .map((row) => `${row.title || row.entityId}（${row.reason}）`)
+                  .join('；')}
+                {result.skipped.length > 6 ? ' 等' : ''}。
+              </span>
+            ) : null}
+            <span>
+              {result.snapshotId
+                ? '已留下清理快照，可在「数据与备份 → 最近清理」里按次找回。'
+                : '这些记录在回收站里，需要时可以单独恢复。'}
+            </span>
+            <div className="actions">
+              <button className="btn small" onClick={() => setResult(null)}>
+                再清一次
+              </button>
+              <button className="btn small primary" onClick={closeModal}>
+                完成
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <p className="micro">
+              范围从你进来的那一页带过来，也可以在这里改。清理前会先算清「命中多少、这个动作能处理多少」，
+              数字和真正执行的清单是同一份。
+            </p>
+
+            <div className="field">
+              <span>范围</span>
+              <select
+                aria-label="清理范围"
+                value={scopeKind === 'category' ? `cat:${categoryId}` : scopeKind}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  if (next.startsWith('cat:')) {
+                    setScopeKind('category');
+                    setCategoryId(next.slice(4));
+                  } else {
+                    setScopeKind(next as CleanupScopeKind);
+                    setCategoryId('');
+                  }
+                }}
+              >
+                <option value="all">全部收藏</option>
+                <option value="uncategorized">未分类</option>
+                <option value="reading">待看（未读完）</option>
+                {data.categories.map((category) => (
+                  <option key={category.id} value={`cat:${category.id}`}>
+                    分类：{category.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {scopeKind !== 'reading' ? (
+              <div className="field">
+                <span>包含</span>
+                <select
+                  aria-label="清理范围的三态"
+                  value={presence}
+                  onChange={(event) => {
+                    setPresence(event.target.value as CleanupPresence);
+                    setPreview(null);
+                  }}
+                >
+                  <option value="active">只看正常（不含回收站）</option>
+                  <option value="both">正常 + 回收站</option>
+                  <option value="trashed">只看回收站</option>
+                </select>
+              </div>
+            ) : null}
+
+            <div className="field">
+              <span>改动</span>
+              <select
+                aria-label="清理改动筛选"
+                value={modification}
+                onChange={(event) => {
+                  setModification(event.target.value as CleanupModification);
+                  setPreview(null);
+                }}
+              >
+                <option value="any">全部（含改过的）</option>
+                <option value="untouched">只看没改过的</option>
+                <option value="modified">只看改过的</option>
+              </select>
+            </div>
+
+            {scopeKind !== 'reading' && (view?.folders.length ?? 0) > 0 ? (
+              <div className="field">
+                <span>原始目录</span>
+                <select
+                  aria-label="清理原始目录"
+                  value={folder}
+                  onChange={(event) => {
+                    setFolder(event.target.value);
+                    setPreview(null);
+                  }}
+                >
+                  <option value="">全部目录</option>
+                  {view?.folders.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                  {rows.some((row) => !row.folder) ? (
+                    <option value={NO_FOLDER}>（无目录）</option>
+                  ) : null}
+                </select>
+              </div>
+            ) : null}
+
+            {(view?.sites.length ?? 0) > 0 ? (
+              <div className="field">
+                <span>站点</span>
+                <select
+                  aria-label="清理站点"
+                  value={site}
+                  onChange={(event) => {
+                    setSite(event.target.value);
+                    setPreview(null);
+                  }}
+                >
+                  <option value="">全部站点</option>
+                  {view?.sites.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+
+            {loading ? (
+              <p className="micro">正在读取这一范围的记录…</p>
+            ) : (
+              <>
+                <span>
+                  {view?.label ?? '当前范围'}共 {view?.total ?? 0} 条；当前条件命中 {matched.length} 条
+                  {scopeKind === 'reading' ? (
+                    <>，可从待看移除 {deletable.length} 条</>
+                  ) : (
+                    <>
+                      ，可移入回收站 {trashable.length} 条，可彻底删除 {deletable.length} 条
+                    </>
+                  )}
+                  {modifiedCount > 0 ? `（其中已改动 ${modifiedCount} 条）` : ''}
+                  {trashedCount > 0 ? `，含回收站 ${trashedCount} 条` : ''}
+                  {outOfScope > 0 ? `；另有 ${outOfScope} 条不在这里处理` : ''}。
+                </span>
+
+                {presence === 'trashed' && scopeKind !== 'reading' ? (
+                  <span className="micro">
+                    回收站里的记录只能彻底删除：移入回收站对它们没有意义。彻底删除会连删除标记一起清，
+                    之后同一网址可以重新导入；动手前会先留一份清理快照。
+                  </span>
+                ) : null}
+                {modification === 'modified' ? (
+                  <span className="micro">
+                    只处理导入或新建之后改过的记录；确认前会冻结版本，冻结之后又被改的仍会跳过并报出来。
+                  </span>
+                ) : null}
+
+                {matched.length > 0 ? (
+                  <div className="listbox">
+                    <div className="listhead">
+                      <span>命中的记录</span>
+                      <span>状态 · 站点 · 目录</span>
+                    </div>
+                    {matched.slice(0, 8).map((row) => (
+                      <article className="bookmark" key={`${row.kind}:${row.entityId}`}>
+                        <div className="favicon" aria-hidden="true">
+                          {row.folder ? row.folder.slice(0, 1) : '—'}
+                        </div>
+                        <div className="rowbody" role="group">
+                          <h3>{row.title || '（无标题）'}</h3>
+                          <div className="rowmeta">
+                            <span>{BATCH_STATE_LABEL[row.state]}</span>
+                            {row.site ? (
+                              <>
+                                <span>·</span>
+                                <span>{row.site}</span>
+                              </>
+                            ) : null}
+                            {row.folder ? (
+                              <>
+                                <span>·</span>
+                                <span>{row.folder}</span>
+                              </>
+                            ) : null}
+                            {row.categoryName ? (
+                              <>
+                                <span>·</span>
+                                <span>{row.categoryName}</span>
+                              </>
+                            ) : null}
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                    {matched.length > 8 ? (
+                      <p className="micro">只列前 8 条示例；处理范围按全部命中，不是这 8 条。</p>
+                    ) : null}
+                  </div>
+                ) : null}
+              </>
+            )}
+
+            {preview ? (
+              <div className="notice">
+                <strong>确认处理 {preview.actionable} 条？</strong>
+                <span>
+                  范围：{preview.token.label}；命中 {preview.matched} 条
+                  {preview.actionableByState.modified > 0
+                    ? `，其中 ${preview.actionableByState.modified} 条改过，会按当前内容一起处理`
+                    : ''}
+                  {preview.protectedCount > 0
+                    ? `；另有 ${preview.protectedCount} 条不在这个动作的处理范围里`
+                    : ''}
+                  。
+                </span>
+                <span>
+                  {preview.mode === 'delete' || scopeKind === 'reading'
+                    ? `彻底删除：连删除标记一起清${
+                        preview.actionableByState.trashed > 0
+                          ? `（含 ${preview.actionableByState.trashed} 条已在回收站里的）`
+                          : ''
+                      }，之后可以重新导入；动手前会先写一份本机清理快照，写不进去就一条都不删。`
+                    : '移入回收站：可以撤销，需要时在回收站里单独恢复；已经在回收站里的记录不在这次范围里。'}
+                </span>
+                <span className="micro">
+                  范围冻结于 {formatDateTime(preview.frozenAt)}。此后新增的命中不会纳入这次处理；
+                  预览后又被改动或挪进回收站的条目会自动跳过并报出来。
+                </span>
+                <div className="actions">
+                  <button className="btn small danger" disabled={busy} onClick={() => void confirm()}>
+                    {busy ? '处理中…' : `确认处理 ${preview.actionable} 条`}
+                  </button>
+                  <button className="btn small" onClick={() => setPreview(null)}>
+                    取消
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="actions">
+                {scopeKind !== 'reading' ? (
+                  <button
+                    className="btn danger"
+                    disabled={busy || trashable.length === 0}
+                    onClick={() => void start('trash')}
+                  >
+                    移入回收站 {trashable.length} 条
+                  </button>
+                ) : null}
+                <button
+                  className={`btn ${scopeKind === 'reading' ? 'danger' : ''}`}
+                  disabled={busy || deletable.length === 0}
+                  onClick={() => void start('delete')}
+                >
+                  {scopeKind === 'reading'
+                    ? `从待看移除 ${deletable.length} 条…`
+                    : `彻底删除 ${deletable.length} 条…`}
+                </button>
+                <button className="btn" onClick={closeModal}>
+                  关闭
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function ModalHost() {
   const { modal } = useWorkspace();
   if (!modal) return null;
@@ -1109,6 +1526,8 @@ export function ModalHost() {
       return <DeleteBookmarkModal bookmarkId={modal.bookmarkId} />;
     case 'categories':
       return <CategoriesModal />;
+    case 'cleanup':
+      return <CleanupModal scope={modal.scope} />;
     case 'discard-edits':
       return <DiscardEditsModal />;
     default:

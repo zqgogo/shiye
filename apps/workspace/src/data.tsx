@@ -16,7 +16,7 @@ import {
   type PurgeSnapshotDetail,
 } from '@shiye/core';
 import type { ImportBatchPage, ImportUndoPreview, ImportUndoResult } from '@shiye/application';
-import { KeptList, Notice, PageHeader } from './components.js';
+import { KeptList, Notice, PageHeader, NO_FOLDER, BATCH_STATE_LABEL } from './components.js';
 import { useWorkspace } from './state.js';
 
 function download(name: string, text: string, mime: string): void {
@@ -30,19 +30,6 @@ function download(name: string, text: string, mime: string): void {
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
-
-/** 「查看本批」的状态标签：与撤回判据一致，顺序也是先看在不在、再看变成了什么、最后才是改没改过。 */
-const BATCH_STATE_LABEL: Record<BatchEntryState, string> = {
-  untouched: '未改动',
-  modified: '已改动',
-  trashed: '已删除',
-  converted: '已转收藏',
-  completed: '已完成',
-  missing: '已不存在',
-};
-
-/** 下拉里表示「没有原始目录」的那一项：空串已经被「全部目录」占了。 */
-const NO_FOLDER = '__none__';
 
 /** 明细分页步长：默认列这么多，剩下的点按钮再列，避免一次把几千条塞进 DOM。 */
 const DETAIL_PAGE = 50;

@@ -11,6 +11,12 @@ import type {
   Bookmark,
   BookmarkPatch,
   Category,
+  CleanupCriteria,
+  CleanupPreview,
+  CleanupResult,
+  CleanupScope,
+  CleanupScopeView,
+  CleanupToken,
   HandoffBatch,
   HandoffItem,
   HandoffBatchStatus,
@@ -416,6 +422,21 @@ export interface PurgeSnapshotRepository {
   remove(snapshotId: string): Promise<void>;
 }
 
+/**
+ * 按条件清理：范围来自分类页 / 未分类 / 待看页，「清理这个分类」「清理未分类」这类请求走这里。
+ *
+ * 与 `ImportRepository.cleanupBatch` 的关系：判定规则、冻结方式、快照与复核完全一样，
+ * 区别只在范围怎么来——一个来自某次导入的编号映射，一个来自分类 / 站点 / 状态条件。
+ */
+export interface CleanupRepository {
+  /** 只读：范围内的记录、可选目录与站点、各状态条数。 */
+  scope(scope: CleanupScope): Promise<CleanupScopeView>;
+  /** 冻结范围：命中多少、这个动作能处理多少、要处理哪些 id、类型与版本。 */
+  preview(criteria: CleanupCriteria): Promise<CleanupPreview>;
+  /** 执行：只认冻结清单，事务内复核，硬删除先写本机清理快照。 */
+  run(token: CleanupToken): Promise<CleanupResult>;
+}
+
 export interface Repositories {
   bookmarks: BookmarkRepository;
   reading: ReadingRepository;
@@ -423,6 +444,7 @@ export interface Repositories {
   tags: TagRepository;
   settings: SettingsRepository;
   imports: ImportRepository;
+  cleanup: CleanupRepository;
   handoff: HandoffRepository;
   backup: BackupRepository;
   purge: PurgeSnapshotRepository;

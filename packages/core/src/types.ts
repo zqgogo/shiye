@@ -289,6 +289,99 @@ export interface BatchCleanupResult {
   snapshotId: string | null;
 }
 
+/* ------------------------------------------------------------------ *
+ * 按条件清理（P9.3）：范围来自分类页 / 未分类 / 待看页等入口，不再绑定某一次导入。
+ * ------------------------------------------------------------------ */
+
+/** 范围从哪个入口进来；决定候选表（收藏 / 待看）与范围文案。 */
+export type CleanupScopeKind = 'all' | 'category' | 'uncategorized' | 'reading';
+
+export interface CleanupScope {
+  kind: CleanupScopeKind;
+  /** `kind === 'category'` 时必填；其余情况忽略。 */
+  categoryId?: Id | null;
+}
+
+/**
+ * 收藏在范围里的三态：只看正常、正常与回收站都算、只看回收站。
+ * 用三态而不是「是否包含回收站」的布尔：布尔表达不了「我现在就想清回收站里的这批」。
+ * 待看没有回收站，这一项对 `reading` 范围无意义。
+ */
+export type CleanupPresence = 'active' | 'both' | 'trashed';
+
+/** 是否只处理没改过的记录。默认 `any`：清一个分类时用户要的是整段，不是「只清导入后没动过的」。 */
+export type CleanupModification = 'any' | 'untouched' | 'modified';
+
+export interface CleanupCriteria {
+  scope: CleanupScope;
+  presence: CleanupPresence;
+  modification: CleanupModification;
+  /** 原始目录（收藏的导入目录）；留空不限。待看没有目录，恒按空处理。 */
+  folders: string[];
+  sites: string[];
+  /** 动作与筛选一起给：彻底删除会收回收站里的记录，范围比移入回收站大。 */
+  mode: BatchCleanupMode;
+}
+
+export interface CleanupEntryRow {
+  entityId: Id;
+  kind: 'bookmark' | 'reading';
+  title: string;
+  originalUrl: string;
+  site: string;
+  folder: string;
+  categoryId: Id | null;
+  categoryName: string | null;
+  state: BatchEntryState;
+  localRevision: number;
+}
+
+export interface CleanupScopeView {
+  scope: CleanupScope;
+  /** 「分类：工作」「未分类」「全部收藏」「待看」。 */
+  label: string;
+  rows: CleanupEntryRow[];
+  folders: string[];
+  sites: string[];
+  counts: Record<BatchEntryState, number>;
+  /** 范围内全部条数（未套目录 / 站点 / 改动筛选）。 */
+  total: number;
+}
+
+/**
+ * 冻结后的处理范围。与 `BatchCleanupToken` 同构，区别只是范围来自条件而不是某一批，
+ * 所以每条还要记 `kind`——收藏和待看可能同时出现在一次清理里。
+ */
+export interface CleanupToken {
+  scope: CleanupScope;
+  mode: BatchCleanupMode;
+  frozenAt: ISODateTime;
+  /** 写进清理快照的范围描述。 */
+  label: string;
+  items: { entityId: Id; kind: 'bookmark' | 'reading'; localRevision: number; state: BatchEntryState }[];
+}
+
+export interface CleanupPreview {
+  scope: CleanupScope;
+  mode: BatchCleanupMode;
+  total: number;
+  matched: number;
+  actionable: number;
+  protectedCount: number;
+  byState: Record<BatchEntryState, number>;
+  actionableByState: Record<BatchEntryState, number>;
+  sample: CleanupEntryRow[];
+  token: CleanupToken;
+  frozenAt: ISODateTime;
+}
+
+export interface CleanupResult {
+  mode: BatchCleanupMode;
+  removed: number;
+  skipped: { entityId: Id; title: string; reason: string }[];
+  snapshotId: string | null;
+}
+
 export type ImportRowStatus = 'new' | 'duplicate' | 'invalid' | 'suspected';
 
 export interface ImportRow {
