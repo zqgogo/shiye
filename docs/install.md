@@ -91,10 +91,10 @@ npm run build
 ## 7. 验证自己装得对不对
 
 ```bash
-npm run verify        # typecheck + 134 项单测 + build
+npm run verify        # typecheck + 140 项单测 + build
 npm run verify:p6     # 备份、恢复与手机快照
 npm run verify:a11y   # 键盘、焦点、小屏
-npm run verify:all    # 单测 134 + 浏览器九段共 362 项断言，约 10 分钟
+npm run verify:all    # 单测 140 + 浏览器九段共 351 项断言，约 10 分钟
 ```
 
 脚本用本机已装的 Chrome / Edge（通过 `puppeteer-core`，不额外下载浏览器），跑在独立 profile 里，**不会碰你日常用的那份数据**。报告写到 `.verify/reports/`。

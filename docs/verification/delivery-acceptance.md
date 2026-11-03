@@ -14,7 +14,7 @@
   - **阻塞**：外部条件不具备，代码也没做，不在本轮范围。
 - 所有断言名都能在 `.verify/reports/*.json` 的 `steps[].step` 里搜到；单测名在 `npm test` 的 verbose 输出里。
 
-最近一次执行（2026-11-02，回收站入口与清空后的找回入口之后）：`npm test` **134 项通过**、`typecheck`、`build` 通过；Chrome 156.0.8078.49（无头，`errors=[]`）下 **P3 99 项全通过**（含 P9.6 批量选择与快照逐条找回 12 条、P9.7 回收站与找回入口 4 条），其余分项同轮复跑全绿：p0 双浏览器各 19、import 42、P1 16、P2 37、P4 46、P5 37、P6 31、a11y 16，均无外部网络请求。人工部分（右键菜单、划词、真机快照、B2d / B2e 清理与找回流程）仍待按 [人工测试手册](../manual-test.md) 走查，不能算作已完成。
+最近一次执行（2026-11-03，按条件清理之后）：`npm test` **140 项通过**、`typecheck`、`build` 通过；Chrome 156.0.8078.49（无头，`errors=[]`）下 **P3 107 项全通过**（含 P9.6 批量选择与快照逐条找回 12 条、P9.7 回收站与找回入口 4 条、P9.3 按条件清理 8 条），其余分项同轮复跑全绿：p0 19（本轮只跑 Chrome；本机未装 Edge，双浏览器那条沿用上一轮记录）、import 42、P1 16、P2 37、P4 46、P5 37、P6 31、a11y 16，均无外部网络请求。人工部分（右键菜单、划词、真机快照、B2d / B2e / B2f 清理与找回流程）仍待按 [人工测试手册](../manual-test.md) 走查，不能算作已完成。
 
 ## 逐条对照
 
@@ -64,7 +64,7 @@
 ```bash
 npm install
 npm run verify        # typecheck + 79 项单测 + build
-npm run verify:all    # 加上 9 个浏览器回归脚本，共 362 项
+npm run verify:all    # 加上 9 个浏览器回归脚本，共 351 项
 ```
 
 单跑某一阶段用 `npm run verify:p4` 这类；报告统一写到 `.verify/reports/`，不进版本库。浏览器验证依赖本机 Chrome 或 Edge，`SHIYE_CHROME` / `SHIYE_EDGE` 可指定可执行文件，`P0_BROWSER=edge` 可换浏览器。
