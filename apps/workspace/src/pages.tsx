@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  DEFAULT_PAGE_SIZE,
   LIMITS,
+  MAX_PAGE_SIZE,
+  MIN_PAGE_SIZE,
+  PAGE_SIZE_OPTIONS,
   TRASH_RETENTION_DAYS,
   formatDateTime,
   isHttpUrl,
@@ -207,7 +209,7 @@ const LIST_TITLES: Record<string, [string, string]> = {
 };
 
 export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES | 'category'; categoryId?: string }) {
-  const { data, navigate, openModal, run, service, toast } = useWorkspace();
+  const { data, navigate, openModal, run, service, toast, setPageSize: applyPageSize } = useWorkspace();
   const [sort, setSort] = useState<'recent' | 'title'>('recent');
   const [trash, setTrash] = useState<Bookmark[] | null>(null);
   const [confirmPurge, setConfirmPurge] = useState(false);
@@ -226,10 +228,10 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
   const [purged, setPurged] = useState<{ removed: number; label: string } | null>(null);
   /**
    * 分页：列表一长就滚不到底，也说不清「我现在看到第几条」。
-   * 一页 50 条起，可以改成 20 或 100；换列表会回到第一页。
+   * 一页多少条来自全局设置（20–50），设置页与分页条改的是同一份；换列表会回到第一页。
    */
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  const pageSize = data.settings.pageSize;
   const listTopRef = useRef<HTMLDivElement | null>(null);
   const category = categoryId ? data.categories.find((entry) => entry.id === categoryId) : undefined;
 
@@ -285,7 +287,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
   };
 
   const changePageSize = (next: number) => {
-    setPageSize(normalizePageSize(next));
+    void applyPageSize(normalizePageSize(next));
     // 一页 50 → 20 之后原来的第 4 页已经不存在了，统一从第一页看起。
     setPage(1);
   };
@@ -704,14 +706,14 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
 }
 
 export function SearchPage() {
-  const { query, service, data, toast } = useWorkspace();
+  const { query, service, data, toast, setPageSize: applyPageSize } = useWorkspace();
   const [hits, setHits] = useState<{ bookmarkId: string; score: number }[] | null>(null);
   const [error, setError] = useState('');
   const [scope, setScope] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
-  /** 搜索结果也可能是几百条，同样按页看。 */
+  /** 搜索结果也可能是几百条，同样按页看；每页条数跟全局设置走。 */
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  const pageSize = data.settings.pageSize;
   const listTopRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -820,7 +822,7 @@ export function SearchPage() {
               listTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
             }}
             onPageSize={(next) => {
-              setPageSize(normalizePageSize(next));
+              void applyPageSize(normalizePageSize(next));
               setPage(1);
             }}
           />
@@ -831,7 +833,7 @@ export function SearchPage() {
 }
 
 export function ReadingPage() {
-  const { data, service, run, openModal, openBookmark, navigate, toast } = useWorkspace();
+  const { data, service, run, openModal, openBookmark, navigate, toast, setPageSize: applyPageSize } = useWorkspace();
   const [lastCompleted, setLastCompleted] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState('');
@@ -842,9 +844,9 @@ export function ReadingPage() {
   const [confirmRemove, setConfirmRemove] = useState(false);
   /** 刚清空 / 批量移出之后的回收提示：待看没有回收站，只能去「最近清理」找回。 */
   const [purged, setPurged] = useState<number | null>(null);
-  /** 待看同样分页：队列攒到上百条时，翻页比一直滚更好找位置。 */
+  /** 待看同样分页：队列攒到上百条时，翻页比一直滚更好找位置；每页条数跟全局设置走。 */
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  const pageSize = data.settings.pageSize;
   const listTopRef = useRef<HTMLDivElement | null>(null);
   const pending = [...data.pendingReading].sort((a, b) => b.addedAt.localeCompare(a.addedAt));
   // 待看独立搜索：只查队列本身，不混入收藏库。
@@ -867,7 +869,7 @@ export function ReadingPage() {
   };
 
   const changePageSize = (next: number) => {
-    setPageSize(normalizePageSize(next));
+    void applyPageSize(normalizePageSize(next));
     setPage(1);
   };
 
@@ -1164,7 +1166,7 @@ export function ReadingPage() {
 }
 
 export function ReadingHistoryPage() {
-  const { data, service, run, navigate, toast } = useWorkspace();
+  const { data, service, run, navigate, toast, setPageSize: applyPageSize } = useWorkspace();
   const [confirming, setConfirming] = useState(false);
   /** 刚清理掉的条数：同样是硬删除，给一个直达「最近清理」的入口。 */
   const [purged, setPurged] = useState<number | null>(null);
@@ -1172,7 +1174,7 @@ export function ReadingHistoryPage() {
     (b.completedAt ?? '').localeCompare(a.completedAt ?? '')
   );
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  const pageSize = data.settings.pageSize;
   const listTopRef = useRef<HTMLDivElement | null>(null);
   const view = useMemo(() => paginate(items, page, pageSize), [items, page, pageSize]);
 
@@ -1288,7 +1290,7 @@ export function ReadingHistoryPage() {
         to={view.to}
         onPage={goPage}
         onPageSize={(next) => {
-          setPageSize(normalizePageSize(next));
+          void applyPageSize(normalizePageSize(next));
           setPage(1);
         }}
       />
@@ -1302,7 +1304,21 @@ export function ReadingHistoryPage() {
 }
 
 export function SettingsPage() {
-  const { navigate } = useWorkspace();
+  const { navigate, data, setPageSize } = useWorkspace();
+  const [sizeDraft, setSizeDraft] = useState(String(data.settings.pageSize));
+
+  // 设置可能在别处被改（分页条上的「每页」下拉），这里跟着快照回填，
+  // 否则离开设置页再回来，输入框还停在上一次手输的数字上。
+  useEffect(() => {
+    setSizeDraft(String(data.settings.pageSize));
+  }, [data.settings.pageSize]);
+
+  const commitPageSize = (value: string) => {
+    const next = normalizePageSize(value);
+    setSizeDraft(String(next));
+    if (next !== data.settings.pageSize) void setPageSize(next);
+  };
+
   const card = (icon: string, title: string, description: string, route: string) => (
     <button className="hubcard" onClick={() => navigate(route)}>
       <span className="hubicon">{icon}</span>
@@ -1322,6 +1338,49 @@ export function SettingsPage() {
         {card('♧', '回收站', '查看或恢复已删除收藏', 'trash')}
         {card(ICONS.ai, 'AI 助手', '手动交接整理与提问；内置 AI 默认关闭', 'ai')}
       </div>
+      <div className="panel" style={{ marginTop: 16 }}>
+        <h2>列表显示</h2>
+        <p>
+          每页条数只在这里设一次，所有列表共用：收藏、待看、回收站、搜索结果、导入批次、
+          清理快照与逐条明细。列表底部的「每页」下拉改的也是这一份。
+        </p>
+        <div className="field">
+          <span>每页条数</span>
+          <input
+            type="number"
+            min={MIN_PAGE_SIZE}
+            max={MAX_PAGE_SIZE}
+            step={1}
+            aria-label="每页条数设置"
+            value={sizeDraft}
+            onChange={(event) => setSizeDraft(event.target.value)}
+            onBlur={(event) => commitPageSize(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') commitPageSize((event.target as HTMLInputElement).value);
+            }}
+            style={{ maxWidth: 110 }}
+          />
+          <span className="micro">
+            条（{MIN_PAGE_SIZE}–{MAX_PAGE_SIZE}，回车或离开输入框生效）
+          </span>
+        </div>
+        <div className="actions" style={{ justifyContent: 'flex-start' }}>
+          {PAGE_SIZE_OPTIONS.map((size) => (
+            <button
+              key={size}
+              className={`btn small ${size === data.settings.pageSize ? 'primary' : ''}`}
+              aria-pressed={size === data.settings.pageSize}
+              onClick={() => commitPageSize(String(size))}
+            >
+              {size} 条
+            </button>
+          ))}
+        </div>
+        <p className="micro" style={{ marginTop: 10 }}>
+          条数越少翻页越勤、单页越清爽；越多越少翻页，但需要往下滚。
+        </p>
+      </div>
+
       <div className="panel" style={{ marginTop: 16 }}>
         <h2>本地主库</h2>
         <p>

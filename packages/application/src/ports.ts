@@ -181,7 +181,7 @@ export interface TagRepository {
 export interface SettingsRepository {
   getApp(): Promise<AppSettings>;
   updateApp(patch: Partial<Pick<AppSettings,
-    'pinnedCategoryIds' | 'includeNoteInSnapshot' | 'includeTextInSnapshot'
+    'pinnedCategoryIds' | 'includeNoteInSnapshot' | 'includeTextInSnapshot' | 'pageSize'
   >>): Promise<AppSettings>;
   getPolicy(): Promise<Policy>;
   updatePolicy(instruction: string): Promise<Policy>;

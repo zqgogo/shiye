@@ -359,8 +359,11 @@ export function Notice({ children, tone }: { children: React.ReactNode; tone?: '
  * 列表分页条。
  *
  * 只做「取哪一页」和「一页几条」两件事，切片由 `paginate()` 负责；页码钳制、
- * 空列表边界都在纯函数里算好，这里不再重复判断。条数不超过最小页大小时
- * 整条隐藏——二十条以内翻页只是噪音。
+ * 空列表边界都在纯函数里算好，这里不再重复判断。只有一页时整条隐藏——
+ * 一页装得下就不用增加翻页操作。
+ *
+ * 「每页」下拉改的是全局设置（所有列表共用），不是这一页的局部状态；
+ * 当前值不在快捷档位里（比如设置成 33）时，额外补一项，避免下拉显示成空白。
  */
 export function Pager({
   page,
@@ -381,9 +384,11 @@ export function Pager({
   onPage: (page: number) => void;
   onPageSize: (pageSize: number) => void;
 }) {
-  const smallest = PAGE_SIZE_OPTIONS[0];
-  if (total <= smallest) return null;
+  if (pageCount <= 1) return null;
   const go = (next: number) => onPage(Math.min(Math.max(1, next), pageCount));
+  const sizes = PAGE_SIZE_OPTIONS.includes(pageSize as (typeof PAGE_SIZE_OPTIONS)[number])
+    ? [...PAGE_SIZE_OPTIONS]
+    : [...PAGE_SIZE_OPTIONS, pageSize].sort((a, b) => a - b);
 
   return (
     <div className="pager">
@@ -398,7 +403,7 @@ export function Pager({
           value={pageSize}
           onChange={(event) => onPageSize(Number(event.target.value))}
         >
-          {PAGE_SIZE_OPTIONS.map((size) => (
+          {sizes.map((size) => (
             <option key={size} value={size}>
               {size} 条
             </option>

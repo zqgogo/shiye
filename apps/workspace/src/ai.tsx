@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  DEFAULT_PAGE_SIZE,
   LIMITS,
   codePointLength,
   domainOf,
@@ -542,6 +541,7 @@ function MaterialPicker({
   onClose: () => void;
 }) {
   const [search, setSearch] = useState('');
+  const { data, setPageSize: applyPageSize } = useWorkspace();
   const [category, setCategory] = useState('');
 
   const visible = useMemo(() => {
@@ -572,9 +572,10 @@ function MaterialPicker({
   /**
    * 资料选择器同样分页：一次全渲染 480 行会让模态卡住。
    * 「全选匹配集」仍作用于全部匹配，不受当前页限制——勾选是跨页的。
+   * 每页条数跟全局设置走，和其他列表保持一致。
    */
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  const pageSize = data.settings.pageSize;
   const view = useMemo(() => paginate(visible, page, pageSize), [visible, page, pageSize]);
 
   useEffect(() => {
@@ -673,7 +674,7 @@ function MaterialPicker({
           to={view.to}
           onPage={goPage}
           onPageSize={(next) => {
-            setPageSize(normalizePageSize(next));
+            void applyPageSize(normalizePageSize(next));
             setPage(1);
           }}
         />

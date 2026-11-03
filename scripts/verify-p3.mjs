@@ -1276,14 +1276,24 @@ async function main() {
     });
     report.counts.batchDetail = detailText.slice(0, 220);
     record(
-      'P9.2 查看本批列出这一批新建的记录，并写明「匹配 60 条、当前显示 50 条、还有 10 条未列出」',
-      /本批明细/.test(detailText) && /匹配 60 条，当前显示 50 条，还有 10 条未列出/.test(detailText),
+      'P9.2 查看本批列出这一批新建的记录，并写明「匹配 60 条、第 1 / 2 页（1–50）」',
+      /本批明细/.test(detailText) &&
+        /匹配 60 条，当前第 1 \/ 2 页（1–50）/.test(detailText),
       detailText.slice(0, 160)
     );
 
-    // 列表默认只列 50 条，剩下 10 条要能点出来：截断在展示上，不能变成看不到。
-    await clickIn(page, '', '再显示 10 条');
-    await sleep(400);
+    // 一页 50 条，剩下 10 条在第二页：截断在展示上，不能变成看不到。
+    await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('本批明细')
+      );
+      const next = [...(notice?.querySelectorAll('button') ?? [])].find((node) =>
+        (node.textContent ?? '').includes('下一页')
+      );
+      if (!next) throw new Error('本批明细里没有下一页按钮');
+      next.click();
+    });
+    await sleep(500);
     const expanded = await page.evaluate(() => {
       const notice = [...document.querySelectorAll('.notice')].find((node) =>
         (node.innerText ?? '').includes('本批明细')
@@ -1294,15 +1304,13 @@ async function main() {
       };
     });
     record(
-      'P9.2 明细「再显示」把剩下 10 条补出来，总数与命中一致',
-      /匹配 60 条，当前显示 60 条/.test(expanded.text) &&
-        !/未列出/.test(expanded.text) &&
-        expanded.rows === 60,
-      `列出=${expanded.rows}`
+      'P9.2 明细翻到第二页补齐剩下 10 条，总数与命中一致',
+      /匹配 60 条，当前第 2 \/ 2 页（51–60）/.test(expanded.text) && expanded.rows === 10,
+      `列出=${expanded.rows}｜${expanded.text.slice(0, 120)}`
     );
 
     await page.select('select[aria-label="本批站点"]', 'work.example.com');
-    await sleep(500);
+    await sleep(600);
     const siteFiltered = await page.evaluate(() => {
       const notice = [...document.querySelectorAll('.notice')].find((node) =>
         (node.innerText ?? '').includes('本批明细')
@@ -1310,8 +1318,8 @@ async function main() {
       return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
     });
     record(
-      'P9.2 按站点筛选后命中数与可处理数同步收敛',
-      /匹配 30 条，当前显示 30 条/.test(siteFiltered) && /可移入回收站 30 条/.test(siteFiltered),
+      'P9.2 按站点筛选后命中数与可处理数同步收敛，页码回到第一页',
+      /匹配 30 条/.test(siteFiltered) && /可移入回收站 30 条/.test(siteFiltered),
       siteFiltered.slice(0, 160)
     );
 
@@ -1732,14 +1740,14 @@ async function main() {
       const rows = [...document.querySelectorAll('.snapentry')].filter(
         (node) => node.querySelector('input[type="checkbox"]')
       );
-      return {
-        rows: rows.length,
-        text: (document.body.innerText ?? '').match(/匹配 \d+ 条，当前显示 \d+ 条/)?.[0] ?? '',
-      };
+      const toolbarText = [...document.querySelectorAll('.toolbar .micro')]
+        .map((node) => (node.innerText ?? '').replace(/\s+/g, ' ').trim())
+        .join(' ');
+      return { rows: rows.length, text: toolbarText };
     });
     record(
       'P9.6 快照明细支持按关键词筛到单条',
-      searched.rows === 1 && /匹配 1 条，当前显示 1 条/.test(searched.text),
+      searched.rows === 1 && /匹配 1 条/.test(searched.text),
       `筛出=${searched.rows}｜${searched.text}`
     );
 
@@ -1855,6 +1863,31 @@ async function main() {
     await waitForText(page, '导入完成', 60_000);
     await sleep(1000);
 
+    // 批次明细也是列表：一批 60 条时同样按页看，而不是「再显示 20 条」。
+    await goto(page, 'data', '数据在手里');
+    await waitForText(page, '查看本批', 15_000);
+    await clickIn(page, '', '查看本批');
+    await sleep(900);
+    const batchDetail = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('本批明细')
+      );
+      const rows = notice ? notice.querySelectorAll('.listbox .bookmark').length : 0;
+      const pager = notice?.querySelector('.pager');
+      return {
+        rows,
+        text: pager ? (pager.innerText ?? '').replace(/\s+/g, ' ').trim() : '',
+        summary: notice ? (notice.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 160) : '',
+      };
+    });
+    record(
+      'P9.8 批次明细同样分页：60 条只渲染一页，不再「再显示 20 条」',
+      batchDetail.rows === 50 &&
+        /第 1 \/ 2 页/.test(batchDetail.text) &&
+        /1–50 \/ 共 60 条/.test(batchDetail.text),
+      `${batchDetail.rows} 行｜${batchDetail.text || batchDetail.summary}`
+    );
+
     await goto(page, 'all', '全部收藏');
     await sleep(900);
 
@@ -1960,14 +1993,31 @@ async function main() {
     await sleep(800);
     const trashPager = await page.evaluate(() => {
       const node = document.querySelector('.pager');
-      const rows = document.querySelectorAll('.listbox .bookmark').length;
-      return { text: node ? (node.innerText ?? '').replace(/\s+/g, ' ').trim() : '', rows };
+      const countLine = [...document.querySelectorAll('.toolbar .micro')]
+        .map((item) => (item.innerText ?? '').replace(/\s+/g, ' ').trim())
+        .join(' ');
+      const match = /共 (\d+) 条/.exec(countLine);
+      return {
+        text: node ? (node.innerText ?? '').replace(/\s+/g, ' ').trim() : '',
+        total: match ? Number(match[1]) : 0,
+        rows: document.querySelectorAll('.listbox .bookmark').length,
+      };
     });
+    // 回收站会随前面的恢复动作变空；规则是「超过一页才出现分页条」，两种情形都认。
+    const trashPages = Math.max(1, Math.ceil(trashPager.total / 20));
     record(
-      'P9.8 回收站列表同样分页，不是一次性全渲染',
-      trashPager.rows <= 50 && /\/ 共 \d+ 条/.test(trashPager.text),
-      `${trashPager.rows} 行｜${trashPager.text}`
+      'P9.8 回收站列表同样分页：超过一页才出现分页条，单页不渲染多余控件',
+      trashPager.rows === Math.min(20, trashPager.total) &&
+        (trashPager.total > 20
+          ? /第 1 \/ \d+ 页/.test(trashPager.text)
+          : trashPager.text === ''),
+      `${trashPager.rows} 行 / 共 ${trashPager.total} 条 / ${trashPages} 页｜${trashPager.text || '无分页条'}`
     );
+
+    // 每页条数已经改成 20，后面的阶段沿用原来的行数预期，这里恢复默认 50。
+    await goto(page, 'settings', '设置与管理');
+    await clickIn(page, '', '50 条');
+    await sleep(800);
   });
 
   phase('P9.7 回收站入口与清空后的找回入口', async () => {
@@ -2047,6 +2097,83 @@ async function main() {
         cleanupFocus.snapshots > 0,
       JSON.stringify(cleanupFocus)
     );
+  });
+
+  phase('P9.9 最近清理的明细也分页 + 每页条数设置', async () => {
+    // P9.7 刚把整库清空，最新一份快照就是那 60 条，正好用来验证明细分页。
+    await goto(page, 'data:cleanup', '数据在手里');
+    await waitForText(page, '看看能找回什么', 15_000);
+    await clickIn(page, '', '看看能找回什么');
+    await waitForText(page, '这次清理共', 15_000);
+    await sleep(700);
+
+    const readDetail = () =>
+      page.evaluate(() => {
+        const view = document.querySelector('#recent-cleanup .snapshotview');
+        const notice = view?.querySelector('.notice');
+        const match = /共 (\d+) 条/.exec(notice?.innerText ?? '');
+        const pager = view?.querySelector('.pager');
+        return {
+          rows: view ? view.querySelectorAll('.snapentry').length : 0,
+          total: match ? Number(match[1]) : 0,
+          text: pager ? (pager.innerText ?? '').replace(/\s+/g, ' ').trim() : '',
+        };
+      });
+
+    const firstPage = await readDetail();
+    record(
+      'P9.9 清理快照明细同样分页：60 条只渲染第一页，不再「再显示」',
+      firstPage.total > 50 &&
+        firstPage.rows === 50 &&
+        /第 1 \/ \d+ 页/.test(firstPage.text) &&
+        new RegExp(`1–50 / 共 ${firstPage.total} 条`).test(firstPage.text),
+      `${firstPage.rows} 行 / 共 ${firstPage.total}｜${firstPage.text}`
+    );
+
+    await clickIn(page, '#recent-cleanup .snapshotview', '下一页');
+    await sleep(600);
+    const secondPage = await readDetail();
+    record(
+      'P9.9 清理明细可翻到第二页，序号接得上',
+      secondPage.rows === Math.min(50, firstPage.total - 50) &&
+        new RegExp(`51–${Math.min(100, firstPage.total)} / 共 ${firstPage.total} 条`).test(
+          secondPage.text
+        ),
+      `${secondPage.rows} 行｜${secondPage.text}`
+    );
+
+    // 设置里手输 27：不是 20/50 的档位也要生效，证明是自由输入而不是写死的选项。
+    await goto(page, 'settings', '设置与管理');
+    await waitForText(page, '列表显示', 10_000);
+    await page.evaluate(() => {
+      const input = document.querySelector('input[aria-label="每页条数设置"]');
+      if (!(input instanceof HTMLInputElement)) throw new Error('缺少每页条数输入框');
+      // 先聚焦再 blur：未聚焦的元素调用 blur() 不触发 React 的 onBlur，值就不会提交。
+      input.focus();
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, '27');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.blur();
+    });
+    await sleep(1200);
+
+    await goto(page, 'data:cleanup', '数据在手里');
+    await waitForText(page, '看看能找回什么', 15_000);
+    await clickIn(page, '', '看看能找回什么');
+    await waitForText(page, '这次清理共', 15_000);
+    await sleep(700);
+    const customPage = await readDetail();
+    record(
+      'P9.9 设置里的每页条数对所有列表生效（改成 27 条后明细分页跟着变）',
+      customPage.rows === 27 &&
+        new RegExp(`1–27 / 共 ${customPage.total} 条`).test(customPage.text),
+      `${customPage.rows} 行｜${customPage.text}`
+    );
+
+    // 收尾恢复默认，后面的阶段仍按 50 条一页的预期走。
+    await goto(page, 'settings', '设置与管理');
+    await clickIn(page, '', '50 条');
+    await sleep(800);
   });
 
   phase('P9.3 从分类 / 未分类 / 待看页带入范围', async () => {

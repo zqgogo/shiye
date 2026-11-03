@@ -113,6 +113,13 @@ export interface AppSettings {
   pinnedCategoryIds: Id[];
   includeNoteInSnapshot: boolean;
   includeTextInSnapshot: boolean;
+  /**
+   * 列表每页条数，20–50。
+   *
+   * 放在设置里而不是各页各存一份：用户在设置页改一次，所有列表（含清理快照与
+   * 批次明细）都跟着变；分页条上的「每页」下拉改的也是同一个值。
+   */
+  pageSize: number;
   createdAt: ISODateTime;
   updatedAt: ISODateTime;
 }

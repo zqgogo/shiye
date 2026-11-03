@@ -47,6 +47,8 @@ interface WorkspaceContextValue {
   closeModal: () => void;
   toast: (text: string, kind?: 'ok' | 'error') => void;
   run: <T>(task: () => Promise<T>, success?: string) => Promise<T | null>;
+  /** 每页条数：写进设置，所有列表共用，改完刷新整份快照让各页同步。 */
+  setPageSize: (size: number) => Promise<void>;
   /** 详情抽屉上报「有未保存修改」，离开前据此拦截。 */
   setDrawerDirty: (dirty: boolean) => void;
   /** 未保存提醒的选择结果：true 放弃修改继续离开，false 留在当前页。 */
@@ -113,6 +115,13 @@ export function WorkspaceProvider({
       }
     },
     [reload, toast]
+  );
+
+  const applyPageSize = useCallback(
+    async (size: number) => {
+      await run(() => service.setPageSize(size));
+    },
+    [run, service]
   );
 
   const navigate = useCallback(
@@ -249,6 +258,7 @@ export function WorkspaceProvider({
       closeModal: () => setModal(null),
       toast,
       run,
+      setPageSize: applyPageSize,
       setDrawerDirty,
       resolveDiscard,
     }),
@@ -264,6 +274,7 @@ export function WorkspaceProvider({
       setQuery,
       toast,
       run,
+      applyPageSize,
       closeDrawer,
       setDrawerDirty,
       resolveDiscard,

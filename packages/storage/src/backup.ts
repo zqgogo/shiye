@@ -4,6 +4,7 @@ import {
   clampForStorage,
   LIMITS,
   newId,
+  normalizePageSize,
   nowIso,
   toIso,
   toIsoOrNull,
@@ -778,6 +779,8 @@ async function performRestore(
         pinnedCategoryIds: arr(base['pinnedCategoryIds']).filter(
           (value): value is string => typeof value === 'string'
         ),
+        // 旧备份没有 pageSize，或带的是旧版本的 100：恢复后也要落回 20–50。
+        pageSize: normalizePageSize(base['pageSize']),
       },
     });
   }

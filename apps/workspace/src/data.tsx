@@ -3,6 +3,8 @@ import {
   backupFileName,
   formatDateTime,
   isBatchCleanupActionable,
+  normalizePageSize,
+  paginate,
   parseBackup,
   toUserMessage,
   type BackupDocument,
@@ -16,7 +18,7 @@ import {
   type PurgeSnapshotDetail,
 } from '@shiye/core';
 import type { ImportBatchPage, ImportUndoPreview, ImportUndoResult } from '@shiye/application';
-import { KeptList, Notice, PageHeader, NO_FOLDER, BATCH_STATE_LABEL } from './components.js';
+import { KeptList, Notice, PageHeader, Pager, NO_FOLDER, BATCH_STATE_LABEL } from './components.js';
 import { useWorkspace } from './state.js';
 
 function download(name: string, text: string, mime: string): void {
@@ -30,9 +32,6 @@ function download(name: string, text: string, mime: string): void {
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
-
-/** 明细分页步长：默认列这么多，剩下的点按钮再列，避免一次把几千条塞进 DOM。 */
-const DETAIL_PAGE = 50;
 
 /** 一条都处理不了时说清是哪一种情况，而不是笼统地让人以为条件选错了。 */
 function emptyCleanupHint(preview: BatchCleanupPreview): string {
@@ -54,7 +53,9 @@ function emptyCleanupHint(preview: BatchCleanupPreview): string {
  * 「最近清理」，不用让用户自己在长页面里找。
  */
 export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
-  const { data, service, run, reload, toast } = useWorkspace();
+  const { data, service, run, reload, toast, setPageSize: applyPageSize } = useWorkspace();
+  /** 所有列表共用一页多少条；设置页或任意分页条改的都是它。 */
+  const pageSize = data.settings.pageSize;
   const [includeLocalOnly, setIncludeLocalOnly] = useState(false);
   const [includeNote, setIncludeNote] = useState(true);
   const [includeText, setIncludeText] = useState(false);
@@ -89,7 +90,8 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
   /** 导入批次历史：支持搜索与分页，撤销入口要靠它找回「那一份文件」，而不是只给最近几批。 */
   const [batches, setBatches] = useState<ImportBatchPage | null>(null);
   const [batchSearch, setBatchSearch] = useState('');
-  const [batchLimit, setBatchLimit] = useState(20);
+  /** 批次列表在仓库里按 offset 取，页码变了就重新查，不在前端一次读全量。 */
+  const [batchPage, setBatchPage] = useState(1);
   const [snapshots, setSnapshots] = useState<PurgeSnapshot[] | null>(null);
   /** 「看看能找回什么」：把这一份快照里删掉的条目逐条列出来，可按关键词 / 类型 / 状态 / 目录 / 站点筛。 */
   const [snapshotDetail, setSnapshotDetail] = useState<PurgeSnapshotDetail | null>(null);
@@ -100,7 +102,10 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
   const [snapshotFolder, setSnapshotFolder] = useState('');
   const [snapshotHost, setSnapshotHost] = useState('');
   const [snapshotSelected, setSnapshotSelected] = useState<string[]>([]);
-  const [snapshotLimit, setSnapshotLimit] = useState(DETAIL_PAGE);
+  /** 快照明细的当前页；筛选一改就回第一页，勾选跨页保留。 */
+  const [snapshotPage, setSnapshotPage] = useState(1);
+  /** 「最近清理」的快照列表本身也分页：保留 5 份时用不上，但规则要一致。 */
+  const [snapshotListPage, setSnapshotListPage] = useState(1);
   const [undoing, setUndoing] = useState('');
   /** 待确认的撤回：先预演，把「会删几条、留几条」直接摆在确认按钮旁边。 */
   const [pendingUndo, setPendingUndo] = useState<ImportUndoPreview | null>(null);
@@ -119,14 +124,17 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
   const [cleanupMode, setCleanupMode] = useState<BatchCleanupMode | null>(null);
   const [cleanupResult, setCleanupResult] = useState<BatchCleanupResult | null>(null);
   const [cleanupBusy, setCleanupBusy] = useState('');
-  /** 明细一次列多少条：大批次一次铺满 DOM 会卡，但又不能只给前 50 条不给后路。 */
-  const [detailLimit, setDetailLimit] = useState(DETAIL_PAGE);
+  /** 明细当前页：条数由设置决定，页码越界会被 paginate 钳回来。 */
+  const [detailPage, setDetailPage] = useState(1);
 
-  const reloadBatches = async (options?: { search?: string; limit?: number }) => {
+  const reloadBatches = async (options?: { search?: string; page?: number }) => {
     const search = options?.search ?? batchSearch;
-    const limit = options?.limit ?? batchLimit;
+    const page = options?.page ?? batchPage;
     try {
-      setBatches(await service.listImportBatches({ search, limit }));
+      // 批次可能上百条：交给仓库按 offset 取这一页，别把全量塞进内存再切。
+      setBatches(
+        await service.listImportBatches({ search, limit: pageSize, offset: (page - 1) * pageSize })
+      );
     } catch {
       setBatches({ rows: [], total: 0, hasMore: false });
     }
@@ -143,7 +151,7 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
       setSnapshotFolder('');
       setSnapshotHost('');
       setSnapshotSelected([]);
-      setSnapshotLimit(DETAIL_PAGE);
+      setSnapshotPage(1);
     } catch (error) {
       toast(toUserMessage(error), 'error');
     } finally {
@@ -176,13 +184,33 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
 
   useEffect(() => {
     void reloadBatches();
+    // 主库变化（导入、撤销、清理、恢复）、换搜索词、翻页或改每页条数都要重查。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    service,
+    batchSearch,
+    batchPage,
+    pageSize,
+    data.bookmarks.length,
+    data.pendingReading.length,
+    data.completedReading.length,
+  ]);
+
+  useEffect(() => {
     void service
       .listPurgeSnapshots()
       .then(setSnapshots)
       .catch(() => setSnapshots([]));
-    // 主库变化（导入、撤销、清理、恢复）后批次与清理快照都要跟着变。
+    // 清理、找回、导入都会改动快照；和批次一样跟主库长度一起刷新。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [service, data.bookmarks.length, data.pendingReading.length, data.completedReading.length]);
+
+  // 批次被删（撤回 / 新清理）之后总数会缩水，页码要跟到最后一页，别停在空页上。
+  useEffect(() => {
+    if (!batches) return;
+    const pageCount = Math.max(1, Math.ceil(batches.total / pageSize));
+    if (batchPage > pageCount) setBatchPage(pageCount);
+  }, [batches, batchPage, pageSize]);
 
   // 从「清空完成」的提示进来时，直接把「最近清理」滚到视野里。
   // 上面的「最近导入」和快照列表都是异步加载的，内容一到位就把面板往下推；
@@ -362,7 +390,7 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
       setSiteFilter('');
       // 默认只看没动过的：这类才可能被处理，也不会一上来就把已加工的混进计数。
       setStateFilter('untouched');
-      setDetailLimit(DETAIL_PAGE);
+      setDetailPage(1);
       setCleanupPreview(null);
       setCleanupMode(null);
       setCleanupResult(null);
@@ -435,8 +463,14 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
     isBatchCleanupActionable(row.state, destination, 'delete')
   );
   const modifiedRows = detailRows.filter((row) => row.state === 'modified');
-  const displayedRows = detailRows.slice(0, detailLimit);
-  const hiddenRows = detailRows.length - displayedRows.length;
+  const detailView = paginate(detailRows, detailPage, pageSize);
+  const displayedRows = detailView.rows;
+  // 批次是仓库分页（offset），这里只算页码与序号范围给分页条用。
+  const batchTotal = batches?.total ?? 0;
+  const batchPageCount = Math.max(1, Math.ceil(batchTotal / pageSize));
+  const batchSafePage = Math.min(Math.max(1, batchPage), batchPageCount);
+  const batchFrom = batchTotal === 0 ? 0 : (batchSafePage - 1) * pageSize + 1;
+  const batchTo = Math.min(batchSafePage * pageSize, batchTotal);
   // 彻底删除是范围最宽的动作，它都处理不了的就是真的不在这里动（已转收藏 / 已完成 / 已不存在）。
   const outOfScopeRows = detailRows.length - deletableRows.length;
 
@@ -462,8 +496,9 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
     }
     return true;
   });
-  const snapshotPageRows = filteredSnapshotEntries.slice(0, snapshotLimit);
-  const snapshotHidden = filteredSnapshotEntries.length - snapshotPageRows.length;
+  const snapshotView = paginate(filteredSnapshotEntries, snapshotPage, pageSize);
+  const snapshotPageRows = snapshotView.rows;
+  const snapshotListView = paginate(snapshots ?? [], snapshotListPage, pageSize);
   // 勾选只对「还能回来且还没回来」的条目开放：勾了也回不来的条目不该给出选项。
   const restorableSnapshotEntries = filteredSnapshotEntries.filter((row) => row.action === 'restore' && !row.restored);
   const selectedSnapshotIds = new Set(snapshotSelected);
@@ -539,9 +574,9 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
             placeholder="按文件名搜索，例如 bookmarks.html"
             value={batchSearch}
             onChange={(event) => {
-              const next = event.target.value;
-              setBatchSearch(next);
-              void reloadBatches({ search: next });
+              setBatchSearch(event.target.value);
+              // 搜索词一换就回第一页；真正的重查交给上面的 effect，避免一次输入两次请求。
+              setBatchPage(1);
             }}
           />
         </div>
@@ -668,23 +703,19 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
         )}
 
         {batches && batches.total > 0 ? (
-          <div className="undolist">
-            <p className="micro">
-              共 {batches.total} 批，当前显示 {batches.rows.length} 批。
-            </p>
-            {batches.hasMore ? (
-              <button
-                className="btn small"
-                onClick={() => {
-                  const next = batchLimit + 20;
-                  setBatchLimit(next);
-                  void reloadBatches({ limit: next });
-                }}
-              >
-                再加载 20 批
-              </button>
-            ) : null}
-          </div>
+          <Pager
+            page={batchSafePage}
+            pageCount={batchPageCount}
+            pageSize={pageSize}
+            total={batchTotal}
+            from={batchFrom}
+            to={batchTo}
+            onPage={(next) => setBatchPage(next)}
+            onPageSize={(next) => {
+              void applyPageSize(normalizePageSize(next));
+              setBatchPage(1);
+            }}
+          />
         ) : null}
 
         {detail ? (
@@ -705,6 +736,7 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
                     onChange={(event) => {
                       setFolderFilter(event.target.value);
                       setCleanupPreview(null);
+                      setDetailPage(1);
                     }}
                   >
                     <option value="">全部目录</option>
@@ -726,6 +758,7 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
                     onChange={(event) => {
                       setSiteFilter(event.target.value);
                       setCleanupPreview(null);
+                      setDetailPage(1);
                     }}
                   >
                     <option value="">全部站点</option>
@@ -744,6 +777,7 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
                     onChange={(event) => {
                       setStateFilter(event.target.value as 'all' | BatchEntryState);
                       setCleanupPreview(null);
+                      setDetailPage(1);
                     }}
                   >
                     <option value="untouched">未改动</option>
@@ -757,8 +791,11 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
                 </div>
 
                 <span>
-                  匹配 {detailRows.length} 条，当前显示 {displayedRows.length} 条
-                  {hiddenRows > 0 ? `，还有 ${hiddenRows} 条未列出` : ''}；
+                  匹配 {detailRows.length} 条
+                  {detailView.pageCount > 1
+                    ? `，当前第 ${detailView.page} / ${detailView.pageCount} 页（${detailView.from}–${detailView.to}）`
+                    : ''}
+                  ；
                   {detail.batch.destination === 'library' ? (
                     <>
                       可移入回收站 {trashableRows.length} 条，可彻底删除 {deletableRows.length} 条
@@ -816,17 +853,19 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
                   ))}
                 </div>
 
-                {hiddenRows > 0 ? (
-                  <div className="actions" style={{ justifyContent: 'flex-start' }}>
-                    <button
-                      className="btn small"
-                      onClick={() => setDetailLimit((current) => current + DETAIL_PAGE)}
-                    >
-                      再显示 {Math.min(DETAIL_PAGE, hiddenRows)} 条
-                      {hiddenRows > DETAIL_PAGE ? `（还有 ${hiddenRows} 条未列出）` : ''}
-                    </button>
-                  </div>
-                ) : null}
+                <Pager
+                  page={detailView.page}
+                  pageCount={detailView.pageCount}
+                  pageSize={detailView.pageSize}
+                  total={detailView.total}
+                  from={detailView.from}
+                  to={detailView.to}
+                  onPage={(next) => setDetailPage(next)}
+                  onPageSize={(next) => {
+                    void applyPageSize(normalizePageSize(next));
+                    setDetailPage(1);
+                  }}
+                />
 
                 {detail.batch.destination === 'library' ? (
                   <div className="actions" style={{ justifyContent: 'flex-start' }}>
@@ -857,7 +896,8 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
                   </div>
                 )}
                 <span className="micro">
-                  按的是「全部匹配」，不是上面列出的这些条数——列表一页 {DETAIL_PAGE} 条，够不够看都不影响处理范围。
+                  按的是「全部匹配」，不是上面列出的这些条数——列表一页 {pageSize} 条（可在设置里改），
+                  够不够看都不影响处理范围。
                   彻底删除会连删除标记一起清（含回收站里的），
                   所以之后能重新导入；待看没有回收站，移除即彻底删除。两种硬删除都会先留一份清理快照。
                 </span>
@@ -962,7 +1002,7 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
               <span>清理范围</span>
               <span>条数 · 时间</span>
             </div>
-            {snapshots.map((snapshot) => (
+            {snapshotListView.rows.map((snapshot) => (
               <article className="bookmark" key={snapshot.id}>
                 <div className="favicon" aria-hidden="true">
                   清
@@ -998,6 +1038,19 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
             ))}
           </div>
         )}
+        <Pager
+          page={snapshotListView.page}
+          pageCount={snapshotListView.pageCount}
+          pageSize={snapshotListView.pageSize}
+          total={snapshotListView.total}
+          from={snapshotListView.from}
+          to={snapshotListView.to}
+          onPage={(next) => setSnapshotListPage(next)}
+          onPageSize={(next) => {
+            void applyPageSize(normalizePageSize(next));
+            setSnapshotListPage(1);
+          }}
+        />
         {snapshotDetail ? (
           <div className="snapshotview">
             <Notice>
@@ -1050,13 +1103,17 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
                 value={snapshotSearch}
                 onChange={(event) => {
                   setSnapshotSearch(event.target.value);
-                  setSnapshotLimit(DETAIL_PAGE);
+                  // 换了筛选条件就回第一页：第 3 页在筛完只剩几条时已经不存在了。
+                  setSnapshotPage(1);
                 }}
               />
               <select
                 aria-label="清理记录类型"
                 value={snapshotKind}
-                onChange={(event) => setSnapshotKind(event.target.value as typeof snapshotKind)}
+                onChange={(event) => {
+                  setSnapshotKind(event.target.value as typeof snapshotKind);
+                  setSnapshotPage(1);
+                }}
               >
                 <option value="">全部类型</option>
                 <option value="bookmark">收藏</option>
@@ -1065,7 +1122,10 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
               <select
                 aria-label="清理记录状态"
                 value={snapshotStatus}
-                onChange={(event) => setSnapshotStatus(event.target.value as typeof snapshotStatus)}
+                onChange={(event) => {
+                  setSnapshotStatus(event.target.value as typeof snapshotStatus);
+                  setSnapshotPage(1);
+                }}
               >
                 <option value="">全部状态</option>
                 <option value="restore">可找回</option>
@@ -1075,7 +1135,10 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
               <select
                 aria-label="清理记录目录"
                 value={snapshotFolder}
-                onChange={(event) => setSnapshotFolder(event.target.value)}
+                onChange={(event) => {
+                  setSnapshotFolder(event.target.value);
+                  setSnapshotPage(1);
+                }}
               >
                 <option value="">全部目录</option>
                 {snapshotFolders.map((folder) => (
@@ -1088,7 +1151,10 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
               <select
                 aria-label="清理记录站点"
                 value={snapshotHost}
-                onChange={(event) => setSnapshotHost(event.target.value)}
+                onChange={(event) => {
+                  setSnapshotHost(event.target.value);
+                  setSnapshotPage(1);
+                }}
               >
                 <option value="">全部站点</option>
                 {snapshotHosts.map((host) => (
@@ -1098,8 +1164,10 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
                 ))}
               </select>
               <span className="micro">
-                匹配 {filteredSnapshotEntries.length} 条，当前显示 {snapshotPageRows.length} 条
-                {snapshotHidden > 0 ? `，还有 ${snapshotHidden} 条未列出` : ''}
+                匹配 {filteredSnapshotEntries.length} 条
+                {snapshotView.pageCount > 1
+                  ? `，当前第 ${snapshotView.page} / ${snapshotView.pageCount} 页（${snapshotView.from}–${snapshotView.to}）`
+                  : ''}
               </span>
             </div>
 
@@ -1143,6 +1211,20 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
               ) : null}
             </ul>
 
+            <Pager
+              page={snapshotView.page}
+              pageCount={snapshotView.pageCount}
+              pageSize={snapshotView.pageSize}
+              total={snapshotView.total}
+              from={snapshotView.from}
+              to={snapshotView.to}
+              onPage={(next) => setSnapshotPage(next)}
+              onPageSize={(next) => {
+                void applyPageSize(normalizePageSize(next));
+                setSnapshotPage(1);
+              }}
+            />
+
             <div className="actions" style={{ justifyContent: 'flex-start' }}>
               <button
                 className="btn small"
@@ -1162,12 +1244,7 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
               >
                 清空勾选
               </button>
-              {snapshotHidden > 0 ? (
-                <button className="btn small" onClick={() => setSnapshotLimit(snapshotLimit + DETAIL_PAGE)}>
-                  再显示 {Math.min(DETAIL_PAGE, snapshotHidden)} 条（还有 {snapshotHidden} 条）
-                </button>
-              ) : null}
-              <span className="micro">已勾选 {snapshotSelected.length} 条</span>
+              <span className="micro">已勾选 {snapshotSelected.length} 条{snapshotView.pageCount > 1 ? '（跨页保留）' : ''}</span>
             </div>
           </div>
         ) : null}

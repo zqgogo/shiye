@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_PAGE_SIZE,
+  MAX_PAGE_SIZE,
+  MIN_PAGE_SIZE,
   PAGE_SIZE_OPTIONS,
   normalizePageSize,
   paginate,
@@ -9,9 +11,10 @@ import {
 const rows = (count: number) => Array.from({ length: count }, (_, index) => index + 1);
 
 describe('列表分页', () => {
-  it('默认一页 50 条，可选 20 / 50 / 100', () => {
+  it('默认一页 50 条，可选 20 到 50 之间的档位', () => {
     expect(DEFAULT_PAGE_SIZE).toBe(50);
-    expect([...PAGE_SIZE_OPTIONS]).toEqual([20, 50, 100]);
+    expect([MIN_PAGE_SIZE, MAX_PAGE_SIZE]).toEqual([20, 50]);
+    expect([...PAGE_SIZE_OPTIONS]).toEqual([20, 25, 30, 35, 40, 45, 50]);
   });
 
   it('第一页交出前 50 条，并写明序号范围', () => {
@@ -54,17 +57,20 @@ describe('列表分页', () => {
     expect(paginate(rows(180), Number.NaN, 50).page).toBe(1);
   });
 
-  it('页大小不合法时回落到默认值，避免整页变空', () => {
-    expect(normalizePageSize(30)).toBe(DEFAULT_PAGE_SIZE);
-    expect(normalizePageSize('50')).toBe(50);
-    expect(normalizePageSize(100)).toBe(100);
-    expect(normalizePageSize(0)).toBe(DEFAULT_PAGE_SIZE);
-    expect(normalizePageSize(-10)).toBe(DEFAULT_PAGE_SIZE);
+  it('页大小超出 20–50 时收敛到边界，非法值回落默认值', () => {
+    expect(normalizePageSize(30)).toBe(30);
+    expect(normalizePageSize('47')).toBe(47);
+    expect(normalizePageSize(19)).toBe(MIN_PAGE_SIZE);
+    expect(normalizePageSize(0)).toBe(MIN_PAGE_SIZE);
+    expect(normalizePageSize(-10)).toBe(MIN_PAGE_SIZE);
+    expect(normalizePageSize(100)).toBe(MAX_PAGE_SIZE);
+    expect(normalizePageSize(30.4)).toBe(30);
     expect(normalizePageSize(Number.NaN)).toBe(DEFAULT_PAGE_SIZE);
     expect(normalizePageSize('abc')).toBe(DEFAULT_PAGE_SIZE);
+    expect(normalizePageSize(undefined)).toBe(DEFAULT_PAGE_SIZE);
 
     const view = paginate(rows(10), 1, 7);
-    expect(view.pageSize).toBe(DEFAULT_PAGE_SIZE);
+    expect(view.pageSize).toBe(MIN_PAGE_SIZE);
     expect(view.rows).toHaveLength(10);
   });
 

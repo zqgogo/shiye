@@ -340,6 +340,14 @@ export class WorkspaceService {
     return this.repos.tags.create(name);
   }
 
+  /**
+   * 每页条数是全局显示设置：设置页和每个列表的分页条改的都是这一份。
+   * 仓库层会把值收敛到 20–50，这里只负责透传，避免两处各写一套边界。
+   */
+  async setPageSize(size: number): Promise<AppSettings> {
+    return this.repos.settings.updateApp({ pageSize: size });
+  }
+
   async updatePolicy(instruction: string): Promise<Policy> {
     return this.repos.settings.updatePolicy(instruction);
   }

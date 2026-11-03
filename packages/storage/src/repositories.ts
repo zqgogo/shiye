@@ -6,6 +6,7 @@ import {
   canonicalizeUrl,
   fallbackTitle,
   newId,
+  normalizePageSize,
   nowIso,
   optionalText,
   requireText,
@@ -1232,13 +1233,17 @@ export class DexieSettingsRepository implements SettingsRepository {
 
   async getApp() {
     const existing = await this.readValue<ReturnType<typeof DEFAULT_SETTINGS>>('app');
-    if (existing) return existing;
+    if (existing) {
+      // 旧库里的设置没有 pageSize（或在旧版本里存过 100）：读的时候收敛到 20–50，
+      // 界面拿到的永远是一个能直接切片的整数。
+      return { ...existing, pageSize: normalizePageSize(existing.pageSize) };
+    }
     const created = DEFAULT_SETTINGS(newId());
     await this.db.settings.put({ key: 'app', value: created });
     return created;
   }
 
-  async updateApp(patch: Partial<{ pinnedCategoryIds: string[]; includeNoteInSnapshot: boolean; includeTextInSnapshot: boolean }>) {
+  async updateApp(patch: Partial<{ pinnedCategoryIds: string[]; includeNoteInSnapshot: boolean; includeTextInSnapshot: boolean; pageSize: number }>) {
     return this.db.transaction('rw', this.db.settings, this.db.categories, async () => {
       const current = await this.getApp();
       let pinnedCategoryIds = current.pinnedCategoryIds;
@@ -1255,6 +1260,7 @@ export class DexieSettingsRepository implements SettingsRepository {
         pinnedCategoryIds,
         includeNoteInSnapshot: patch.includeNoteInSnapshot ?? current.includeNoteInSnapshot,
         includeTextInSnapshot: patch.includeTextInSnapshot ?? current.includeTextInSnapshot,
+        pageSize: patch.pageSize === undefined ? current.pageSize : normalizePageSize(patch.pageSize),
         updatedAt: nowIso(),
       };
       await this.db.settings.put({ key: 'app', value: next });

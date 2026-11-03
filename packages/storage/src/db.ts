@@ -1,5 +1,5 @@
 import Dexie, { type Table, type Transaction } from 'dexie';
-import { canonicalizeUrl, toIso, toIsoOrNull, nowIso, SCHEMA_VERSION } from '@shiye/core';
+import { canonicalizeUrl, toIso, toIsoOrNull, nowIso, DEFAULT_PAGE_SIZE, SCHEMA_VERSION } from '@shiye/core';
 import type {
   AiTask,
   AppliedChange,
@@ -292,6 +292,7 @@ export const DEFAULT_SETTINGS = (libraryId: string): AppSettings => {
     pinnedCategoryIds: [],
     includeNoteInSnapshot: true,
     includeTextInSnapshot: false,
+    pageSize: DEFAULT_PAGE_SIZE,
     createdAt: now,
     updatedAt: now,
   };

@@ -1,6 +1,6 @@
 import Dexie from 'dexie';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AppError, newId, nowIso, type ImportRow } from '@shiye/core';
+import { AppError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, MIN_PAGE_SIZE, newId, nowIso, type ImportRow } from '@shiye/core';
 import { ShiyeDB } from '@shiye/storage';
 import { createRepositories } from '@shiye/storage';
 import { createWorkspaceService, type WorkspaceService } from './workspace.js';
@@ -181,6 +181,17 @@ describe('分类置顶与引用迁移', () => {
     const settings = await service.setPinnedCategories([...ids.slice(0, 3), ids[0] as string, 'unknown-id']);
     expect(settings.pinnedCategoryIds).toHaveLength(3);
     expect(settings.pinnedCategoryIds).not.toContain('unknown-id');
+  });
+
+  it('每页条数存进设置、刷新后仍在，并收敛到 20–50', async () => {
+    expect((await service.snapshot()).settings.pageSize).toBe(DEFAULT_PAGE_SIZE);
+
+    expect((await service.setPageSize(33)).pageSize).toBe(33);
+    expect((await service.snapshot()).settings.pageSize).toBe(33);
+
+    // 手输 100 或 5 不该把列表变成空白或一页一条：仓库层收敛到边界。
+    expect((await service.setPageSize(100)).pageSize).toBe(MAX_PAGE_SIZE);
+    expect((await service.setPageSize(5)).pageSize).toBe(MIN_PAGE_SIZE);
   });
 
   it('删除分类只迁移引用，不删除收藏', async () => {
