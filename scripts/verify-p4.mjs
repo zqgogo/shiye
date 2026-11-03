@@ -1089,6 +1089,13 @@ async function main() {
       `匹配=${bulk?.matched}｜渲染行=${bulk?.visible}`
     );
 
+    // 匹配几百条时不能一次铺满 DOM：选择器也走分页，但「全选匹配集」仍作用于全部匹配。
+    record(
+      'P9.8 资料选择器同样分页：渲染行不超过 50，全选仍覆盖整个匹配集',
+      (bulk?.visible ?? 0) <= 50 && (bulk?.matched ?? 0) > 50,
+      `匹配=${bulk?.matched}｜渲染行=${bulk?.visible}`
+    );
+
     await clickIn(page, '.modal.wide', '全选匹配集');
     await sleep(1500);
     const bulkChosen = await pickerState(page);

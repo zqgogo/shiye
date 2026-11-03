@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  DEFAULT_PAGE_SIZE,
   LIMITS,
   codePointLength,
   domainOf,
   isAiEligible,
+  normalizePageSize,
+  paginate,
   toUserMessage,
   type Bookmark,
 } from '@shiye/core';
-import { Notice, PageHeader } from './components.js';
+import { Notice, PageHeader, Pager } from './components.js';
 import { useWorkspace } from './state.js';
 
 interface ApplyItem {
@@ -566,6 +569,32 @@ function MaterialPicker({
     onChange(next);
   };
 
+  /**
+   * 资料选择器同样分页：一次全渲染 480 行会让模态卡住。
+   * 「全选匹配集」仍作用于全部匹配，不受当前页限制——勾选是跨页的。
+   */
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  const view = useMemo(() => paginate(visible, page, pageSize), [visible, page, pageSize]);
+
+  useEffect(() => {
+    if (page !== view.page) setPage(view.page);
+  }, [page, view.page]);
+
+  // 换搜索或换分类就回第一页：新条件下的第 3 页往往已经不存在。
+  useEffect(() => {
+    setPage(1);
+  }, [search, category]);
+
+  const pageSelectedCount = view.rows.filter((bookmark) => selected.has(bookmark.id)).length;
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  const goPage = (next: number) => {
+    setPage(next);
+    // 模态里是一个独立滚动容器，换页要把容器本身滚回顶部（不动外层页面）。
+    if (listRef.current) listRef.current.scrollTop = 0;
+  };
+
   return (
     <div className="modalshade" role="presentation">
       <div className="modal wide" role="dialog" aria-modal="true" aria-labelledby="picker-title">
@@ -596,7 +625,10 @@ function MaterialPicker({
           </select>
         </div>
         <div className="toolbar">
-          <span className="micro">匹配 {visible.length} 条</span>
+          <span className="micro">
+            匹配 {visible.length} 条
+            {view.pageCount > 1 ? ` · 第 ${view.page} 页（${view.from}–${view.to}）` : ''}
+          </span>
           <span className="spacer" />
           <button className="btn small" onClick={selectAllVisible}>
             全选匹配集
@@ -608,9 +640,9 @@ function MaterialPicker({
             清空已选
           </button>
         </div>
-        <div style={{ maxHeight: '48vh', overflow: 'auto' }}>
+        <div ref={listRef} style={{ maxHeight: '48vh', overflow: 'auto' }}>
           {visible.length === 0 ? <p className="micro">没有匹配资料，试试其他分类或关键词。</p> : null}
-          {visible.map((bookmark) => (
+          {view.rows.map((bookmark) => (
             <label className="checkline" key={bookmark.id} style={{ padding: '9px 0', borderBottom: '1px solid var(--line)' }}>
               <input
                 type="checkbox"
@@ -632,8 +664,27 @@ function MaterialPicker({
             </label>
           ))}
         </div>
+        <Pager
+          page={view.page}
+          pageCount={view.pageCount}
+          pageSize={view.pageSize}
+          total={view.total}
+          from={view.from}
+          to={view.to}
+          onPage={goPage}
+          onPageSize={(next) => {
+            setPageSize(normalizePageSize(next));
+            setPage(1);
+          }}
+        />
         <div className="actions">
-          <span className="micro">已选 {selected.size} 条 · 选择不等于授权发送</span>
+          <span className="micro">
+            已选 {selected.size} 条
+            {view.pageCount > 1 && pageSelectedCount < selected.size
+              ? `（本页 ${pageSelectedCount} 条）`
+              : ''}
+            {' · '}选择不等于授权发送
+          </span>
           <button className="btn primary" onClick={onClose}>
             完成选择
           </button>

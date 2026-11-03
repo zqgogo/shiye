@@ -7,6 +7,7 @@ export * from './types.js';
 export * from './url.js';
 export * from './privacy.js';
 export * from './batch-cleanup.js';
+export * from './paging.js';
 export * from './schemas.js';
 export * from './import/html.js';
 export * from './import/paste.js';

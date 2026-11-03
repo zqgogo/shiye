@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { BatchEntryState, Bookmark, Category, ImportUndoItem, ImportUndoReason } from '@shiye/core';
-import { domainOf, formatDateTime, isHttpUrl } from '@shiye/core';
+import { PAGE_SIZE_OPTIONS, domainOf, formatDateTime, isHttpUrl } from '@shiye/core';
 import { useWorkspace } from './state.js';
 
 /**
@@ -353,6 +353,81 @@ export function BookmarkRow({
 
 export function Notice({ children, tone }: { children: React.ReactNode; tone?: 'danger' | 'ok' }) {
   return <div className={`notice ${tone ?? ''}`}>{children}</div>;
+}
+
+/**
+ * 列表分页条。
+ *
+ * 只做「取哪一页」和「一页几条」两件事，切片由 `paginate()` 负责；页码钳制、
+ * 空列表边界都在纯函数里算好，这里不再重复判断。条数不超过最小页大小时
+ * 整条隐藏——二十条以内翻页只是噪音。
+ */
+export function Pager({
+  page,
+  pageCount,
+  pageSize,
+  total,
+  from,
+  to,
+  onPage,
+  onPageSize,
+}: {
+  page: number;
+  pageCount: number;
+  pageSize: number;
+  total: number;
+  from: number;
+  to: number;
+  onPage: (page: number) => void;
+  onPageSize: (pageSize: number) => void;
+}) {
+  const smallest = PAGE_SIZE_OPTIONS[0];
+  if (total <= smallest) return null;
+  const go = (next: number) => onPage(Math.min(Math.max(1, next), pageCount));
+
+  return (
+    <div className="pager">
+      <span className="micro">
+        第 {page} / {pageCount} 页 · {from}–{to} / 共 {total} 条
+      </span>
+      <span className="spacer" />
+      <label className="micro pagersize">
+        每页
+        <select
+          aria-label="每页条数"
+          value={pageSize}
+          onChange={(event) => onPageSize(Number(event.target.value))}
+        >
+          {PAGE_SIZE_OPTIONS.map((size) => (
+            <option key={size} value={size}>
+              {size} 条
+            </option>
+          ))}
+        </select>
+      </label>
+      {pageCount > 1 ? (
+        <>
+          <button className="btn small" disabled={page <= 1} onClick={() => go(1)} aria-label="第一页">
+            «
+          </button>
+          <button className="btn small" disabled={page <= 1} onClick={() => go(page - 1)}>
+            ‹ 上一页
+          </button>
+          <button className="btn small" disabled={page >= pageCount} onClick={() => go(page + 1)}>
+            下一页 ›
+          </button>
+          <button
+            className="btn small"
+            disabled={page >= pageCount}
+            onClick={() => go(pageCount)}
+            aria-label="最后一页"
+          >
+            »
+          </button>
+        </>
+      ) : null}
+    </div>
+  );
 }
 
 const UNDO_REASON_LABEL: Record<ImportUndoReason, string> = {

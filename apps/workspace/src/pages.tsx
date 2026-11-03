@@ -1,6 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
-import { LIMITS, TRASH_RETENTION_DAYS, formatDateTime, isHttpUrl, toUserMessage, type Bookmark, type PurgeCounts } from '@shiye/core';
-import { BookmarkRow, EmptyState, ICONS, Notice, PageHeader, ReadingRow } from './components.js';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  DEFAULT_PAGE_SIZE,
+  LIMITS,
+  TRASH_RETENTION_DAYS,
+  formatDateTime,
+  isHttpUrl,
+  normalizePageSize,
+  paginate,
+  toUserMessage,
+  type Bookmark,
+  type PurgeCounts,
+} from '@shiye/core';
+import { BookmarkRow, EmptyState, ICONS, Notice, PageHeader, Pager, ReadingRow } from './components.js';
 import { useWorkspace } from './state.js';
 import { setPendingPaste } from './capture.js';
 
@@ -11,6 +22,7 @@ function BookmarkList({
   selectable,
   selected,
   onSelect,
+  summary,
 }: {
   items: Bookmark[];
   mode?: 'trash' | 'inbox' | 'normal' | undefined;
@@ -19,6 +31,8 @@ function BookmarkList({
   selectable?: boolean;
   selected?: Set<string>;
   onSelect?: (id: string, checked: boolean) => void;
+  /** 列表头右侧的统计文案：分页后要写清「第几页、本页第几条到第几条」。 */
+  summary?: string | undefined;
 }) {
   const { data } = useWorkspace();
   if (items.length === 0) {
@@ -32,7 +46,7 @@ function BookmarkList({
     <div className="listbox">
       <div className="listhead">
         <span>收藏与用途</span>
-        <span>{items.length} 条 · 分类 · 标签 · 来源</span>
+        <span>{summary ?? `${items.length} 条 · 分类 · 标签 · 来源`}</span>
       </div>
       {items.map((bookmark) => (
         <BookmarkRow
@@ -210,6 +224,13 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
    * 用户找不到「去哪儿找回」。这里留一张卡片，直接给一个跳到「最近清理」的按钮。
    */
   const [purged, setPurged] = useState<{ removed: number; label: string } | null>(null);
+  /**
+   * 分页：列表一长就滚不到底，也说不清「我现在看到第几条」。
+   * 一页 50 条起，可以改成 20 或 100；换列表会回到第一页。
+   */
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  const listTopRef = useRef<HTMLDivElement | null>(null);
   const category = categoryId ? data.categories.find((entry) => entry.id === categoryId) : undefined;
 
   useEffect(() => {
@@ -244,6 +265,31 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
       : rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }, [base, mode, categoryId, sort]);
 
+  // 切片交给纯函数：页码越界会被钳回来，删到最后一页空了也不会显示一片空白。
+  const view = useMemo(() => paginate(items, page, pageSize), [items, page, pageSize]);
+
+  /**
+   * 内容变少之后把页码跟上去。
+   *
+   * 第 3 页删光后 state 里仍是 3，`view.page` 已经钳到 2；不写回去的话，
+   * 「下一页」按钮会按旧页码算，点一下看起来没反应。
+   */
+  useEffect(() => {
+    if (page !== view.page) setPage(view.page);
+  }, [page, view.page]);
+
+  const goPage = (next: number) => {
+    setPage(next);
+    // 换页后停在列表顶部，否则第 2 页的第一条还藏在屏幕上方。
+    listTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  const changePageSize = (next: number) => {
+    setPageSize(normalizePageSize(next));
+    // 一页 50 → 20 之后原来的第 4 页已经不存在了，统一从第一页看起。
+    setPage(1);
+  };
+
   const [title, description] =
     mode === 'category'
       ? [category?.name ?? '分类', category?.description || '这个分类下的收藏。']
@@ -261,6 +307,11 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
     setBulkPending(null);
   }, [mode, categoryId]);
 
+  // 换列表、换排序都从第一页看起；排序不改变集合，所以勾选留着。
+  useEffect(() => {
+    setPage(1);
+  }, [mode, categoryId, sort]);
+
   useEffect(() => {
     setSelected((current) => {
       const alive = new Set(items.map((row) => row.id));
@@ -277,6 +328,18 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
   };
 
   const selectedSet = useMemo(() => new Set(selected), [selected]);
+
+  /**
+   * 分页之后的勾选状态。
+   *
+   * 勾选跨页保留（翻页只是看同一份列表的另一段），但要在提示里点明「有几条
+   * 不在这一页」，否则用户会以为只处理屏幕上看到的这些。
+   */
+  const pageIds = view.rows.map((row) => row.id);
+  const pageSelectedCount = pageIds.filter((id) => selectedSet.has(id)).length;
+  const offPageSelected = selected.length - pageSelectedCount;
+  const allSelected = items.length > 0 && selected.length === items.length;
+  const pageAllSelected = view.rows.length > 0 && pageSelectedCount === view.rows.length;
 
   /**
    * 执行一次批量动作。
@@ -474,7 +537,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
         </Notice>
       ) : null}
 
-      <div className="toolbar">
+      <div className="toolbar" ref={listTopRef}>
         <span className="micro">共 {items.length} 条</span>
         <span className="spacer" />
         {items.length > 0 ? (
@@ -522,14 +585,31 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
         <Notice>
           <strong>
             已选 {selected.length} / {items.length} 条
+            {offPageSelected > 0 ? `（其中 ${offPageSelected} 条在别的页）` : ''}
           </strong>
-          <span>勾选只作用于当前列表；换页或换筛选会清空，避免按着旧数字处理另一批记录。</span>
+          <span>
+            勾选只作用于当前列表；同一列表内翻页会保留勾选，换列表或退出批量选择才清空。
+          </span>
           <button
             className="btn small"
-            onClick={() => setSelected(selected.length === items.length ? [] : items.map((row) => row.id))}
+            onClick={() => setSelected(allSelected ? [] : items.map((row) => row.id))}
           >
-            {selected.length === items.length ? '取消全选' : `全选这 ${items.length} 条`}
+            {allSelected ? '取消全选' : `全选${view.pageCount > 1 ? '全部 ' : '这 '}${items.length} 条`}
           </button>
+          {view.pageCount > 1 ? (
+            <button
+              className="btn small"
+              onClick={() =>
+                setSelected(
+                  pageAllSelected
+                    ? selected.filter((id) => !pageIds.includes(id))
+                    : [...new Set([...selected, ...pageIds])]
+                )
+              }
+            >
+              {pageAllSelected ? '取消本页选择' : `只选本页 ${view.rows.length} 条`}
+            </button>
+          ) : null}
           {mode === 'trash' ? (
             <button
               className="btn small"
@@ -591,7 +671,12 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
       ) : null}
 
       <BookmarkList
-        items={items}
+        items={view.rows}
+        summary={
+          view.pageCount > 1
+            ? `共 ${items.length} 条 · 第 ${view.page} 页（${view.from}–${view.to}）· 分类 · 标签 · 来源`
+            : undefined
+        }
         mode={mode === 'inbox' ? 'inbox' : mode === 'trash' ? 'trash' : 'normal'}
         selectable={selectMode}
         selected={selectedSet}
@@ -604,6 +689,16 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
               : { title: '这里还没有匹配的收藏', description: '试试其他关键词，或先保存一个链接。', actionLabel: '＋ 收藏链接', onAction: () => openModal({ kind: 'new-bookmark' }) }
         }
       />
+      <Pager
+        page={view.page}
+        pageCount={view.pageCount}
+        pageSize={view.pageSize}
+        total={view.total}
+        from={view.from}
+        to={view.to}
+        onPage={goPage}
+        onPageSize={changePageSize}
+      />
     </>
   );
 }
@@ -614,12 +709,18 @@ export function SearchPage() {
   const [error, setError] = useState('');
   const [scope, setScope] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
+  /** 搜索结果也可能是几百条，同样按页看。 */
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  const listTopRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     // 换关键词或换检索范围时先回到「检索中」：否则新的检索还没回来，
     // 页面上仍挂着上一个词的结果与「匹配 N 条」，读数会被当成这次的答案。
     setHits(null);
+    // 换了关键词或范围就回到第一页：否则上一次筛到第 5 页，新词可能只有 1 页。
+    setPage(1);
     if (!query.trim()) {
       setHits([]);
       return;
@@ -652,13 +753,15 @@ export function SearchPage() {
     ? data.categories.find((category) => category.id === scope)?.name ?? '当前分类'
     : '全库';
 
+  const view = paginate(items, page, pageSize);
+
   return (
     <>
       <PageHeader
         title="搜索结果"
         description={`关键词「${query}」在${scopeName}内检索，覆盖标题、网址、描述、用途、备注、选中文字、分类与标签。`}
       />
-      <div className="toolbar">
+      <div className="toolbar" ref={listTopRef}>
         <select aria-label="检索范围" value={scope} onChange={(event) => setScope(event.target.value)}>
           <option value="">全库</option>
           {data.categories.map((category) => (
@@ -692,13 +795,36 @@ export function SearchPage() {
           </p>
         </div>
       ) : (
-        <BookmarkList
-          items={items}
-          empty={{
-            title: '没有匹配的收藏',
-            description: '换个关键词、换检索范围，或者清空搜索回到全部收藏。',
-          }}
-        />
+        <>
+          <BookmarkList
+            items={view.rows}
+            summary={
+              view.pageCount > 1
+                ? `共 ${items.length} 条 · 第 ${view.page} 页（${view.from}–${view.to}）· 分类 · 标签 · 来源`
+                : undefined
+            }
+            empty={{
+              title: '没有匹配的收藏',
+              description: '换个关键词、换检索范围，或者清空搜索回到全部收藏。',
+            }}
+          />
+          <Pager
+            page={view.page}
+            pageCount={view.pageCount}
+            pageSize={pageSize}
+            total={items.length}
+            from={view.from}
+            to={view.to}
+            onPage={(next) => {
+              setPage(next);
+              listTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }}
+            onPageSize={(next) => {
+              setPageSize(normalizePageSize(next));
+              setPage(1);
+            }}
+          />
+        </>
       )}
     </>
   );
@@ -716,6 +842,10 @@ export function ReadingPage() {
   const [confirmRemove, setConfirmRemove] = useState(false);
   /** 刚清空 / 批量移出之后的回收提示：待看没有回收站，只能去「最近清理」找回。 */
   const [purged, setPurged] = useState<number | null>(null);
+  /** 待看同样分页：队列攒到上百条时，翻页比一直滚更好找位置。 */
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  const listTopRef = useRef<HTMLDivElement | null>(null);
   const pending = [...data.pendingReading].sort((a, b) => b.addedAt.localeCompare(a.addedAt));
   // 待看独立搜索：只查队列本身，不混入收藏库。
   const term = search.trim().toLowerCase();
@@ -724,6 +854,22 @@ export function ReadingPage() {
         [item.title, item.originalUrl, item.note ?? ''].join(' ').toLowerCase().includes(term)
       )
     : pending;
+
+  const view = useMemo(() => paginate(items, page, pageSize), [items, page, pageSize]);
+
+  useEffect(() => {
+    if (page !== view.page) setPage(view.page);
+  }, [page, view.page]);
+
+  const goPage = (next: number) => {
+    setPage(next);
+    listTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  const changePageSize = (next: number) => {
+    setPageSize(normalizePageSize(next));
+    setPage(1);
+  };
 
   const complete = async (id: string) => {
     setBusy(true);
@@ -736,6 +882,7 @@ export function ReadingPage() {
   useEffect(() => {
     setSelected([]);
     setConfirmRemove(false);
+    setPage(1);
   }, [search]);
 
   useEffect(() => {
@@ -747,6 +894,13 @@ export function ReadingPage() {
   }, [items]);
 
   const selectedSet = useMemo(() => new Set(selected), [selected]);
+
+  // 与收藏列表同一套规则：勾选跨页保留，提示里写明有几条不在这一页。
+  const pageIds = view.rows.map((row) => row.id);
+  const pageSelectedCount = pageIds.filter((id) => selectedSet.has(id)).length;
+  const offPageSelected = selected.length - pageSelectedCount;
+  const allSelected = items.length > 0 && selected.length === items.length;
+  const pageAllSelected = view.rows.length > 0 && pageSelectedCount === view.rows.length;
 
   const removeSelected = async () => {
     if (selected.length === 0) return;
@@ -835,7 +989,7 @@ export function ReadingPage() {
         </Notice>
       ) : null}
 
-      <div className="toolbar">
+      <div className="toolbar" ref={listTopRef}>
         <input
           placeholder="搜索待看的标题、网址或备注…"
           aria-label="搜索待看"
@@ -884,14 +1038,31 @@ export function ReadingPage() {
         <Notice>
           <strong>
             已选 {selected.length} / {items.length} 条
+            {offPageSelected > 0 ? `（其中 ${offPageSelected} 条在别的页）` : ''}
           </strong>
-          <span>待看没有回收站，移除即彻底删除；动作前会先留一份本机清理快照，可以只找回其中几条。</span>
+          <span>
+            待看没有回收站，移除即彻底删除；动作前会先留一份本机清理快照，可以只找回其中几条。同一列表内翻页会保留勾选。
+          </span>
           <button
             className="btn small"
-            onClick={() => setSelected(selected.length === items.length ? [] : items.map((row) => row.id))}
+            onClick={() => setSelected(allSelected ? [] : items.map((row) => row.id))}
           >
-            {selected.length === items.length ? '取消全选' : `全选这 ${items.length} 条`}
+            {allSelected ? '取消全选' : `全选${view.pageCount > 1 ? '全部 ' : '这 '}${items.length} 条`}
           </button>
+          {view.pageCount > 1 ? (
+            <button
+              className="btn small"
+              onClick={() =>
+                setSelected(
+                  pageAllSelected
+                    ? selected.filter((id) => !pageIds.includes(id))
+                    : [...new Set([...selected, ...pageIds])]
+                )
+              }
+            >
+              {pageAllSelected ? '取消本页选择' : `只选本页 ${view.rows.length} 条`}
+            </button>
+          ) : null}
           <button
             className="btn small danger"
             disabled={selected.length === 0}
@@ -919,7 +1090,11 @@ export function ReadingPage() {
       <div className="listbox">
         <div className="listhead">
           <span>待看的内容</span>
-          <span>{items.length} 条 · 最近加入在前</span>
+          <span>
+            {view.pageCount > 1
+              ? `共 ${items.length} 条 · 第 ${view.page} 页（${view.from}–${view.to}）· 最近加入在前`
+              : `${items.length} 条 · 最近加入在前`}
+          </span>
         </div>
         {items.length === 0 ? (
           term ? (
@@ -938,7 +1113,7 @@ export function ReadingPage() {
             />
           )
         ) : (
-          items.map((item) => {
+          view.rows.map((item) => {
             const linked = data.bookmarks.find((bookmark) => bookmark.canonicalUrl === item.canonicalUrl);
             return (
               <ReadingRow
@@ -970,6 +1145,16 @@ export function ReadingPage() {
           })
         )}
       </div>
+      <Pager
+        page={view.page}
+        pageCount={view.pageCount}
+        pageSize={view.pageSize}
+        total={view.total}
+        from={view.from}
+        to={view.to}
+        onPage={goPage}
+        onPageSize={changePageSize}
+      />
       <div className="footerhint">
         <span>待看不进入收藏收件箱，也不受分类约束。</span>
         <span>完成后可在完成历史里恢复。</span>
@@ -986,6 +1171,19 @@ export function ReadingHistoryPage() {
   const items = [...data.completedReading].sort((a, b) =>
     (b.completedAt ?? '').localeCompare(a.completedAt ?? '')
   );
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  const listTopRef = useRef<HTMLDivElement | null>(null);
+  const view = useMemo(() => paginate(items, page, pageSize), [items, page, pageSize]);
+
+  useEffect(() => {
+    if (page !== view.page) setPage(view.page);
+  }, [page, view.page]);
+
+  const goPage = (next: number) => {
+    setPage(next);
+    listTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
 
   return (
     <>
@@ -1040,15 +1238,19 @@ export function ReadingHistoryPage() {
         </Notice>
       ) : null}
 
-      <div className="listbox">
+      <div className="listbox" ref={listTopRef}>
         <div className="listhead">
           <span>已完成</span>
-          <span>{items.length} 条</span>
+          <span>
+            {view.pageCount > 1
+              ? `共 ${items.length} 条 · 第 ${view.page} 页（${view.from}–${view.to}）`
+              : `${items.length} 条`}
+          </span>
         </div>
         {items.length === 0 ? (
           <EmptyState title="还没有完成记录" description="完成一条待看后，会在这里留下可恢复的记录。" />
         ) : (
-          items.map((item) => (
+          view.rows.map((item) => (
             <article className="bookmark" key={item.id}>
               <div className="favicon" aria-hidden="true">
                 {[...item.title][0] ?? '读'}
@@ -1077,6 +1279,19 @@ export function ReadingHistoryPage() {
           ))
         )}
       </div>
+      <Pager
+        page={view.page}
+        pageCount={view.pageCount}
+        pageSize={view.pageSize}
+        total={view.total}
+        from={view.from}
+        to={view.to}
+        onPage={goPage}
+        onPageSize={(next) => {
+          setPageSize(normalizePageSize(next));
+          setPage(1);
+        }}
+      />
       <p className="micro" style={{ marginTop: 12 }}>
         <button className="linkbtn" onClick={() => toast('完成历史不是永久审计日志，不强制保存每一次循环。')}>
           了解保留规则

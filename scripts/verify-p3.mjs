@@ -1842,6 +1842,134 @@ async function main() {
   });
 
   // 每份快照都得先有一次真实的硬删除才会产生，所以这里连续做六轮「新建一条 → 彻底清空」。
+  // 列表分页：条数一多就一直往下滚，既找不到位置，也说不清「看到第几条」。
+  phase('P9.8 列表分页', async () => {
+    const PAGE_URLS = Array.from({ length: 60 }, (_, index) => `https://page.example.com/p${index + 1}`);
+    await goto(page, 'capture', '一次收下多个链接');
+    await setReactInput(page, 'textarea[aria-label="粘贴链接"]', PAGE_URLS.join('\n'));
+    await clickIn(page, '.panel', '预览链接 →');
+    await waitPreview(page);
+    await page.select('select[aria-label="保存目标"]', 'library');
+    await sleep(700);
+    await clickIn(page, '.batchbar', '确认写入');
+    await waitForText(page, '导入完成', 60_000);
+    await sleep(1000);
+
+    await goto(page, 'all', '全部收藏');
+    await sleep(900);
+
+    const readPager = () =>
+      page.evaluate(() => {
+        const node = document.querySelector('.pager');
+        const rows = [...document.querySelectorAll('.listbox .bookmark')];
+        return {
+          text: node ? (node.innerText ?? '').replace(/\s+/g, ' ').trim() : '',
+          rows: rows.length,
+          head: (document.querySelector('.listbox .listhead')?.innerText ?? '').replace(/\s+/g, ' ').trim(),
+          labels: rows.map((row) => row.querySelector('input[type="checkbox"]')?.getAttribute('aria-label') ?? ''),
+        };
+      });
+
+    const totalAll = (await page.evaluate(readMainLibrary)).bookmarks.filter(
+      (row) => row.lifeState === 'active'
+    ).length;
+    const expectedFirst = Math.min(50, totalAll);
+
+    const firstPage = await readPager();
+    record(
+      'P9.8 列表按页显示：第一页 50 条，分页条写明页码与序号范围',
+      firstPage.rows === expectedFirst &&
+        /第 1 \/ \d+ 页/.test(firstPage.text) &&
+        new RegExp(`1–${expectedFirst} / 共 ${totalAll} 条`).test(firstPage.text),
+      `${firstPage.rows} 行｜总 ${totalAll}｜${firstPage.text}`
+    );
+
+    await clickIn(page, '.pager', '下一页');
+    await sleep(600);
+    const secondPage = await readPager();
+    const expectedSecond = Math.max(0, Math.min(50, totalAll - 50));
+    record(
+      'P9.8 点「下一页」换到第二页，条数与序号都接得上',
+      secondPage.rows === expectedSecond &&
+        /第 2 \/ \d+ 页/.test(secondPage.text) &&
+        new RegExp(`51–${50 + expectedSecond} / 共 ${totalAll} 条`).test(secondPage.text),
+      `${secondPage.rows} 行｜${secondPage.text}`
+    );
+
+    // 勾选跨页保留：翻页只是看同一份列表的另一段，不该把已勾的丢掉；
+    // 但提示必须点明「有几条不在这一页」，否则用户以为只处理屏幕上这些。
+    await clickIn(page, '.toolbar', '批量选择');
+    await sleep(400);
+    const tickedOnSecond = await page.evaluate(() => {
+      const box = document.querySelector('.listbox .bookmark input[type="checkbox"]');
+      if (!box) return false;
+      box.click();
+      return true;
+    });
+    await sleep(400);
+    await clickIn(page, '.pager', '上一页');
+    await sleep(600);
+    const crossPageCopy = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('已选')
+      );
+      return notice ? (notice.innerText ?? '').replace(/\s+/g, ' ').trim() : '';
+    });
+    record(
+      'P9.8 翻页不会丢掉勾选，并写明有几条不在这一页',
+      tickedOnSecond && /已选 1 \//.test(crossPageCopy) && /其中 1 条在别的页/.test(crossPageCopy),
+      crossPageCopy.slice(0, 160)
+    );
+
+    // 「只选本页」是跨页勾选的反面：想处理眼前这一屏时，别把别页的一起带上。
+    // 先退出再进入批量选择，保证从「什么都没选」开始。
+    await clickIn(page, '.toolbar', '退出批量选择');
+    await sleep(300);
+    await clickIn(page, '.toolbar', '批量选择');
+    await sleep(400);
+    await clickIn(page, '', `只选本页 ${firstPage.rows} 条`);
+    await sleep(400);
+    const pageOnlyCopy = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('已选')
+      );
+      return notice ? (notice.innerText ?? '').replace(/\s+/g, ' ').trim() : '';
+    });
+    record(
+      'P9.8 「只选本页」只勾当前页，不会把别页的带上',
+      new RegExp(`已选 ${firstPage.rows} /`).test(pageOnlyCopy) && !/在别的页/.test(pageOnlyCopy),
+      pageOnlyCopy.slice(0, 160)
+    );
+
+    // 改每页条数要重排：第 4 页在「一页 20 条」下已经不存在了，必须回到第一页。
+    await clickIn(page, '.toolbar', '退出批量选择');
+    await sleep(300);
+    await page.select('select[aria-label="每页条数"]', '20');
+    await sleep(700);
+    const smallPage = await readPager();
+    record(
+      'P9.8 每页改成 20 条后每页 20 行，并回到第一页',
+      smallPage.rows === Math.min(20, totalAll) &&
+        /第 1 \/ \d+ 页/.test(smallPage.text) &&
+        smallPage.text.includes('1–20 / 共'),
+      `${smallPage.rows} 行｜${smallPage.text}`
+    );
+
+    // 回收站与待看用的是另一套渲染，分页条同样要出现（这里是回收站）。
+    await goto(page, 'trash', '回收站');
+    await sleep(800);
+    const trashPager = await page.evaluate(() => {
+      const node = document.querySelector('.pager');
+      const rows = document.querySelectorAll('.listbox .bookmark').length;
+      return { text: node ? (node.innerText ?? '').replace(/\s+/g, ' ').trim() : '', rows };
+    });
+    record(
+      'P9.8 回收站列表同样分页，不是一次性全渲染',
+      trashPager.rows <= 50 && /\/ 共 \d+ 条/.test(trashPager.text),
+      `${trashPager.rows} 行｜${trashPager.text}`
+    );
+  });
+
   phase('P9.7 回收站入口与清空后的找回入口', async () => {
     // 侧栏入口：删完东西第一反应是找回收站，它不能只藏在「设置与管理」里。
     await goto(page, 'all', '全部收藏');
