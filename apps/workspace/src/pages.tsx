@@ -11,6 +11,9 @@ import {
   paginate,
   toUserMessage,
   type Bookmark,
+  type BulkAction,
+  type BulkPreview,
+  type BulkResult,
   type PurgeCounts,
 } from '@shiye/core';
 import { BookmarkRow, EmptyState, ICONS, Notice, PageHeader, Pager, ReadingRow } from './components.js';
@@ -217,8 +220,10 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
   /** 批量选择：勾选若干条后一次性处理，不用一条条点。 */
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
-  const [bulkPending, setBulkPending] = useState<'trash' | 'purge' | null>(null);
+  const [bulkPlan, setBulkPlan] = useState<BulkPreview | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
+  /** 上一次批量动作的结果：处理了几条、哪几条因为确认后被改过而跳过。 */
+  const [bulkOutcome, setBulkOutcome] = useState<BulkResult | null>(null);
   /**
    * 刚做完一次硬删除（清空或批量彻底删除）。
    *
@@ -306,7 +311,8 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
   useEffect(() => {
     setSelectMode(false);
     setSelected([]);
-    setBulkPending(null);
+    setBulkPlan(null);
+    setBulkOutcome(null);
   }, [mode, categoryId]);
 
   // 换列表、换排序都从第一页看起；排序不改变集合，所以勾选留着。
@@ -343,36 +349,49 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
   const allSelected = items.length > 0 && selected.length === items.length;
   const pageAllSelected = view.rows.length > 0 && pageSelectedCount === view.rows.length;
 
+  /** 动作的中文说法，按钮、确认框与结果都共用，避免三处各写一遍。 */
+  const bulkVerb = (action: BulkAction) =>
+    action === 'trash' ? '移入回收站' : action === 'restore' ? '恢复' : '彻底删除';
+
   /**
-   * 执行一次批量动作。
+   * 点动作按钮：先把勾选冻住。
    *
-   * 仓库只处理「状态还允许」的条目（比如已经在回收站的不会再删一次），
-   * 所以这里按真正处理掉的条数回报，而不是按勾选数假装全都成功。
+   * 只传 id 去执行会有洞——另一页刚把你勾的这条从回收站恢复、给这条加了备注、
+   * 或者把待看标成完成，这边仍会照原样处理。冻结时连版本与状态一起记下，
+   * 确认后变过的一律跳过。这里同时把「现在就已经不符合」的条数摆出来，
+   * 免得确认框写 12 条、实际只处理 9 条。
    */
-  const runBulk = async (action: 'trash' | 'purge' | 'restore') => {
+  const openBulk = async (action: BulkAction) => {
     if (selected.length === 0) return;
     setBulkBusy(true);
-    const ids = [...selected];
-    const done = await run(() =>
-      action === 'trash'
-        ? service.trashBookmarks(ids)
-        : action === 'restore'
-          ? service.restoreBookmarks(ids)
-          : service.purgeBookmarks(ids)
-    );
+    setBulkOutcome(null);
+    const plan = await run(() => service.prepareBulkSelection(action, [...selected]));
     setBulkBusy(false);
-    if (done === null) return;
-    setBulkPending(null);
+    if (plan) setBulkPlan(plan);
+  };
+
+  /** 确认执行：只认冻结清单，按真正处理掉的条数回报。 */
+  const confirmBulk = async () => {
+    if (!bulkPlan) return;
+    const plan = bulkPlan;
+    setBulkBusy(true);
+    const result = await run(() => service.runBulkSelection(plan.token));
+    setBulkBusy(false);
+    if (!result) return;
+    setBulkPlan(null);
     setSelected([]);
-    const verb = action === 'trash' ? '移入回收站' : action === 'restore' ? '恢复' : '彻底删除';
+    setBulkOutcome(result);
     // 彻底删除不进回收站，把「去哪儿找回」直接摆在页面上。
-    if (action === 'purge' && done > 0) setPurged({ removed: done, label: `手动选择的 ${done} 条` });
-    if (done === ids.length) {
-      toast(`已${verb} ${done} 条。`, 'ok');
+    if (plan.action === 'purge' && result.removed > 0) {
+      setPurged({ removed: result.removed, label: `手动选择的 ${result.removed} 条` });
+    }
+    const verb = bulkVerb(plan.action);
+    if (result.skipped.length === 0) {
+      toast(`已${verb} ${result.removed} 条。`, 'ok');
     } else {
       toast(
-        `已${verb} ${done} 条；${ids.length - done} 条的状态在勾选后变过，按最新状态跳过。`,
-        done === 0 ? 'error' : 'ok'
+        `已${verb} ${result.removed} 条；${result.skipped.length} 条在确认后变过，已跳过。`,
+        result.removed === 0 ? 'error' : 'ok'
       );
     }
   };
@@ -548,7 +567,8 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
             onClick={() => {
               setSelectMode(!selectMode);
               setSelected([]);
-              setBulkPending(null);
+              setBulkPlan(null);
+              setBulkOutcome(null);
             }}
           >
             {selectMode ? '退出批量选择' : '批量选择'}
@@ -615,59 +635,89 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
           {mode === 'trash' ? (
             <button
               className="btn small"
-              disabled={selected.length === 0}
-              onClick={() => void runBulk('restore')}
+              disabled={selected.length === 0 || bulkBusy}
+              onClick={() => void openBulk('restore')}
             >
               恢复选中的 {selected.length} 条
             </button>
           ) : (
             <button
               className="btn small"
-              disabled={selected.length === 0}
-              onClick={() => setBulkPending('trash')}
+              disabled={selected.length === 0 || bulkBusy}
+              onClick={() => void openBulk('trash')}
             >
               移入回收站 {selected.length} 条
             </button>
           )}
           <button
             className="btn small danger"
-            disabled={selected.length === 0}
-            onClick={() => setBulkPending('purge')}
+            disabled={selected.length === 0 || bulkBusy}
+            onClick={() => void openBulk('purge')}
           >
             彻底删除 {selected.length} 条…
           </button>
         </Notice>
       ) : null}
 
-      {bulkPending === 'trash' ? (
-        <Notice>
-          <strong>确认把这 {selected.length} 条移入回收站？</strong>
-          <span>回收站里可以逐条恢复，也可以勾选批量恢复；原分类与未读状态都会保留。</span>
+      {bulkPlan ? (
+        <Notice {...(bulkPlan.action === 'purge' ? { tone: 'danger' as const } : {})}>
+          <strong>
+            确认把 {bulkPlan.actionable} 条{bulkVerb(bulkPlan.action)}？
+          </strong>
+          {bulkPlan.excludedCount > 0 ? (
+            <span>
+              勾选里另有 {bulkPlan.excludedCount} 条现在就不在范围里（
+              {[...new Set(bulkPlan.excluded.map((row) => row.reason))].join('、')}），这次不会处理。
+            </span>
+          ) : null}
+          {bulkPlan.action === 'trash' ? (
+            <span>回收站里可以逐条恢复，也可以勾选批量恢复；原分类与未读状态都会保留。</span>
+          ) : null}
+          {bulkPlan.action === 'restore' ? (
+            <span>分类已经被删掉的会落回未分类，不会凭空造一个同名分类。</span>
+          ) : null}
+          {bulkPlan.action === 'purge' ? (
+            <>
+              <span>连删除标记一起清掉，之后同一网址可以重新导入；不进回收站。</span>
+              <span>
+                本机「最近清理」会先留一份快照，可以只找回其中几条（只留最近 5 份、仅本机）。想长期留后路，请先导出完整 JSON。
+              </span>
+            </>
+          ) : null}
+          <span>
+            范围冻结于 {formatDateTime(bulkPlan.frozenAt)}；此后被改动、被移入或移出回收站的，一律跳过并报出来，不会按最新内容替你做决定。
+          </span>
           <button
             className="btn small primary"
-            disabled={bulkBusy}
-            onClick={() => void runBulk('trash')}
+            disabled={bulkBusy || bulkPlan.actionable === 0}
+            onClick={() => void confirmBulk()}
           >
-            确认移入
+            {bulkBusy ? '处理中…' : `确认${bulkVerb(bulkPlan.action)} ${bulkPlan.actionable} 条`}
           </button>
-          <button className="btn small" onClick={() => setBulkPending(null)}>
+          <button className="btn small" disabled={bulkBusy} onClick={() => setBulkPlan(null)}>
             取消
           </button>
         </Notice>
       ) : null}
 
-      {bulkPending === 'purge' ? (
-        <Notice tone="danger">
-          <strong>确认彻底删除这 {selected.length} 条？</strong>
-          <span>连删除标记一起清掉，之后同一网址可以重新导入；不进回收站。</span>
-          <span>
-            本机「最近清理」会先留一份快照，可以只找回其中几条（只留最近 5 份、仅本机）。想长期留后路，请先导出完整 JSON。
-          </span>
-          <button className="btn small danger" disabled={bulkBusy} onClick={() => void runBulk('purge')}>
-            确认彻底删除
-          </button>
-          <button className="btn small" onClick={() => setBulkPending(null)}>
-            取消
+      {bulkOutcome ? (
+        <Notice {...(bulkOutcome.removed === 0 ? { tone: 'danger' as const } : {})}>
+          <strong>
+            {bulkOutcome.removed > 0
+              ? `已${bulkVerb(bulkOutcome.action)} ${bulkOutcome.removed} 条`
+              : `一条都没有${bulkVerb(bulkOutcome.action)}`}
+          </strong>
+          {bulkOutcome.skipped.length > 0 ? (
+            <span>
+              跳过 {bulkOutcome.skipped.length} 条：
+              {[...new Set(bulkOutcome.skipped.map((row) => row.reason))].join('；')}
+              {bulkOutcome.skipped.length <= 5
+                ? `（${bulkOutcome.skipped.map((row) => row.title || '未命名').join('、')}）`
+                : ''}
+            </span>
+          ) : null}
+          <button className="btn small" onClick={() => setBulkOutcome(null)}>
+            知道了
           </button>
         </Notice>
       ) : null}
@@ -841,7 +891,8 @@ export function ReadingPage() {
   /** 批量勾选：待看没有回收站，勾选移除就是彻底删除，所以必须先留快照再动手。 */
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
-  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [removePlan, setRemovePlan] = useState<BulkPreview | null>(null);
+  const [removeOutcome, setRemoveOutcome] = useState<BulkResult | null>(null);
   /** 刚清空 / 批量移出之后的回收提示：待看没有回收站，只能去「最近清理」找回。 */
   const [purged, setPurged] = useState<number | null>(null);
   /** 待看同样分页：队列攒到上百条时，翻页比一直滚更好找位置；每页条数跟全局设置走。 */
@@ -883,7 +934,8 @@ export function ReadingPage() {
   // 搜索一改就清空勾选：筛完之后「已选 8 条」里可能有一半已经不在屏幕上。
   useEffect(() => {
     setSelected([]);
-    setConfirmRemove(false);
+    setRemovePlan(null);
+    setRemoveOutcome(null);
     setPage(1);
   }, [search]);
 
@@ -904,20 +956,29 @@ export function ReadingPage() {
   const allSelected = items.length > 0 && selected.length === items.length;
   const pageAllSelected = view.rows.length > 0 && pageSelectedCount === view.rows.length;
 
-  const removeSelected = async () => {
+  /** 先把勾选冻住：确认后被标完成或转成收藏的，不再算这条队列里的待看。 */
+  const openRemove = async () => {
     if (selected.length === 0) return;
-    const ids = [...selected];
-    const removed = await run(() => service.removeReadingItems(ids));
-    if (removed === null) return;
-    setConfirmRemove(false);
+    setRemoveOutcome(null);
+    const plan = await run(() => service.prepareBulkSelection('reading-remove', [...selected]));
+    if (plan) setRemovePlan(plan);
+  };
+
+  const removeSelected = async () => {
+    if (!removePlan) return;
+    const plan = removePlan;
+    const result = await run(() => service.runBulkSelection(plan.token));
+    if (!result) return;
+    setRemovePlan(null);
     setSelected([]);
+    setRemoveOutcome(result);
     // 待看没有回收站，说清楚去哪儿找回，别让人以为彻底没了。
-    if (removed > 0) setPurged(removed);
+    if (result.removed > 0) setPurged(result.removed);
     toast(
-      removed === ids.length
-        ? `已移出 ${removed} 条待看；需要时可在「数据与备份 → 最近清理」里找回。`
-        : `已移出 ${removed} 条，${ids.length - removed} 条已经不在队列里。`,
-      removed === 0 ? 'error' : 'ok'
+      result.skipped.length === 0
+        ? `已移出 ${result.removed} 条待看；需要时可在「数据与备份 → 最近清理」里找回。`
+        : `已移出 ${result.removed} 条，${result.skipped.length} 条在确认后变过，已跳过。`,
+      result.removed === 0 ? 'error' : 'ok'
     );
   };
 
@@ -1007,7 +1068,8 @@ export function ReadingPage() {
             onClick={() => {
               setSelectMode(!selectMode);
               setSelected([]);
-              setConfirmRemove(false);
+              setRemovePlan(null);
+              setRemoveOutcome(null);
             }}
           >
             {selectMode ? '退出批量选择' : '批量选择'}
@@ -1068,23 +1130,55 @@ export function ReadingPage() {
           <button
             className="btn small danger"
             disabled={selected.length === 0}
-            onClick={() => setConfirmRemove(true)}
+            onClick={() => void openRemove()}
           >
             移出待看 {selected.length} 条…
           </button>
         </Notice>
       ) : null}
 
-      {confirmRemove ? (
+      {removePlan ? (
         <Notice tone="danger">
-          <strong>确认移出这 {selected.length} 条待看？</strong>
+          <strong>确认移出这 {removePlan.actionable} 条待看？</strong>
+          {removePlan.excludedCount > 0 ? (
+            <span>
+              勾选里另有 {removePlan.excludedCount} 条现在就不在队列里（
+              {[...new Set(removePlan.excluded.map((row) => row.reason))].join('、')}），这次不会处理。
+            </span>
+          ) : null}
           <span>待看没有回收站，移除即彻底删除；已有收藏不受影响。</span>
           <span>本机「最近清理」会先留一份快照，可以按次找回（只留最近 5 份、仅本机）。</span>
-          <button className="btn small danger" onClick={() => void removeSelected()}>
-            确认移出
+          <span>
+            范围冻结于 {formatDateTime(removePlan.frozenAt)}；此后被标完成、转成收藏或改过备注的，一律跳过并报出来。
+          </span>
+          <button
+            className="btn small danger"
+            disabled={removePlan.actionable === 0}
+            onClick={() => void removeSelected()}
+          >
+            确认移出 {removePlan.actionable} 条
           </button>
-          <button className="btn small" onClick={() => setConfirmRemove(false)}>
+          <button className="btn small" onClick={() => setRemovePlan(null)}>
             取消
+          </button>
+        </Notice>
+      ) : null}
+
+      {removeOutcome ? (
+        <Notice {...(removeOutcome.removed === 0 ? { tone: 'danger' as const } : {})}>
+          <strong>
+            {removeOutcome.removed > 0
+              ? `已移出 ${removeOutcome.removed} 条待看`
+              : '一条都没有移出'}
+          </strong>
+          {removeOutcome.skipped.length > 0 ? (
+            <span>
+              跳过 {removeOutcome.skipped.length} 条：
+              {[...new Set(removeOutcome.skipped.map((row) => row.reason))].join('；')}
+            </span>
+          ) : null}
+          <button className="btn small" onClick={() => setRemoveOutcome(null)}>
+            知道了
           </button>
         </Notice>
       ) : null}

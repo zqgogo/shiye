@@ -1642,7 +1642,7 @@ async function main() {
     );
 
     await clickIn(page, '', '移入回收站 3 条');
-    await waitForText(page, '确认把这 3 条移入回收站', 10_000);
+    await waitForText(page, '确认把 3 条移入回收站', 10_000);
     await clickIn(page, '', '确认移入');
     await waitForText(page, '已移入回收站 3 条', 20_000);
     await sleep(1000);
@@ -1667,6 +1667,8 @@ async function main() {
       return rows.length;
     });
     await clickIn(page, '', '恢复选中的 3 条');
+    await waitForText(page, '确认把 3 条恢复', 10_000);
+    await clickIn(page, '', '确认恢复 3 条');
     await waitForText(page, '已恢复 3 条', 20_000);
     await sleep(900);
     const afterBulkRestore = await page.evaluate(readMainLibrary);
@@ -1690,14 +1692,14 @@ async function main() {
     });
     await sleep(300);
     await clickIn(page, '', '彻底删除 3 条');
-    await waitForText(page, '确认彻底删除这 3 条', 10_000);
+    await waitForText(page, '确认把 3 条彻底删除', 10_000);
     const purgeCopy = await page.evaluate(() => {
       const notice = [...document.querySelectorAll('.notice')].find((node) =>
-        (node.innerText ?? '').includes('确认彻底删除这 3 条')
+        (node.innerText ?? '').includes('确认把 3 条彻底删除')
       );
       return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
     });
-    await clickIn(page, '', '确认彻底删除');
+    await clickIn(page, '', '确认彻底删除 3 条');
     await waitForText(page, '已彻底删除 3 条', 20_000);
     await sleep(1200);
     record(
@@ -1828,7 +1830,7 @@ async function main() {
     });
     await clickIn(page, '', '移出待看 2 条');
     await waitForText(page, '确认移出这 2 条待看', 10_000);
-    await clickIn(page, '', '确认移出');
+    await clickIn(page, '', '确认移出 2 条');
     await waitForText(page, '已移出 2 条待看', 20_000);
     await sleep(1000);
     const afterRemove = await page.evaluate(readMainLibrary);
@@ -2174,6 +2176,131 @@ async function main() {
     await goto(page, 'settings', '设置与管理');
     await clickIn(page, '', '50 条');
     await sleep(800);
+  });
+
+  // 列表批量操作只传 id 时，另一页刚做的决定会被原样抹掉：勾了要删，
+  // 别人刚恢复/刚改过，这边还照删。这条模拟「确认后被改过」的真实路径。
+  phase('P9.10 列表批量的版本与状态保护', async () => {
+    await goto(page, 'capture', '一次收下多个链接');
+    await setReactInput(
+      page,
+      'textarea[aria-label="粘贴链接"]',
+      ['https://guard.example.com/a', 'https://guard.example.com/b'].join('\n')
+    );
+    await clickIn(page, '.panel', '预览链接 →');
+    await waitPreview(page);
+    await page.select('select[aria-label="保存目标"]', 'library');
+    await sleep(700);
+    await clickIn(page, '.batchbar', '确认写入');
+    await waitForText(page, '导入完成', 40_000);
+    await sleep(900);
+
+    await goto(page, 'all', '全部收藏');
+    await sleep(600);
+    await clickIn(page, '.toolbar', '批量选择');
+    await sleep(300);
+    const guardPicked = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('.listbox .bookmark')].filter((row) =>
+        (row.innerText ?? '').includes('guard.example.com')
+      );
+      for (const row of rows) row.querySelector('input[type="checkbox"]')?.click();
+      return rows.length;
+    });
+    await clickIn(page, '', '彻底删除 2 条');
+    await waitForText(page, '确认把 2 条彻底删除', 10_000);
+
+    const frozenCopy = await page.evaluate(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) =>
+        (node.innerText ?? '').includes('确认把 2 条彻底删除')
+      );
+      return (notice?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    });
+    record(
+      'P9.10 批量确认框写明「范围冻结于」并说明确认后变过会跳过',
+      /范围冻结于/.test(frozenCopy) && /一律跳过/.test(frozenCopy),
+      frozenCopy.slice(0, 160)
+    );
+
+    // 模拟另一页在确认前给其中一条补了备注：直接写库，绕开这个标签页的 React 状态。
+    const bumped = await page.evaluate(async () => {
+      const openDb = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('shiye');
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const tx = openDb.transaction('bookmarks', 'readwrite');
+      const store = tx.objectStore('bookmarks');
+      const all = await new Promise((resolve) => {
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result);
+      });
+      const row = all.find((entry) => (entry.originalUrl ?? '').includes('guard.example.com/a'));
+      if (!row) return null;
+      row.localRevision += 1;
+      row.note = '另一页刚补的备注';
+      await new Promise((resolve) => {
+        const request = store.put(row);
+        request.onsuccess = () => resolve();
+      });
+      await new Promise((resolve) => {
+        tx.oncomplete = () => resolve();
+      });
+      return row.id;
+    });
+    await sleep(400);
+
+    await clickIn(page, '', '确认彻底删除 2 条');
+    await waitForText(page, '1 条在确认后变过，已跳过', 20_000);
+    await sleep(1200);
+
+    const guardLeft = await page.evaluate(async () => {
+      const openDb = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('shiye');
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const tx = openDb.transaction('bookmarks', 'readonly');
+      const all = await new Promise((resolve) => {
+        const request = tx.objectStore('bookmarks').getAll();
+        request.onsuccess = () => resolve(request.result);
+      });
+      return all.filter((row) => (row.originalUrl ?? '').includes('guard.example.com')).map((row) => ({
+        url: row.originalUrl,
+        note: row.note,
+        deletedAt: row.deletedAt,
+      }));
+    });
+    const keptRow = guardLeft.find((row) => row.url.includes('/a'));
+    record(
+      'P9.10 确认后被改过的那条没有被删，另一条照旧处理',
+      Boolean(bumped) &&
+        guardLeft.length === 1 &&
+        keptRow?.note === '另一页刚补的备注' &&
+        keptRow?.deletedAt === null,
+      `剩余=${JSON.stringify(guardLeft)}`
+    );
+
+    const outcomeCopy = await page.evaluate(() =>
+      [...document.querySelectorAll('.notice')]
+        .map((node) => (node.innerText ?? '').replace(/\s+/g, ' ').trim())
+        .find((text) => text.includes('已彻底删除')) ?? ''
+    );
+    record(
+      'P9.10 结果明说「跳过 1 条」与原因，不按勾选数假装成功',
+      /已彻底删除 1 条/.test(outcomeCopy) && /确认后被修改，已保留/.test(outcomeCopy),
+      outcomeCopy.slice(0, 160)
+    );
+
+    // 顺带确认快照只记真正删掉的那一条，避免「找回」时把没删的也塞回去。
+    await goto(page, 'data:cleanup', '数据在手里');
+    await waitForText(page, '最近清理', 15_000);
+    await sleep(800);
+    const guardSnapshots = await readPurgeSnapshots(page);
+    record(
+      'P9.10 清理快照只记真正删掉的那 1 条',
+      /手动选择的 1 条收藏/.test(guardSnapshots.rows[0] ?? ''),
+      `最新=${(guardSnapshots.rows[0] ?? '').slice(0, 120)}`
+    );
   });
 
   phase('P9.3 从分类 / 未分类 / 待看页带入范围', async () => {

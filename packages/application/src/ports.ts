@@ -10,6 +10,10 @@ import type {
   BatchEntryView,
   Bookmark,
   BookmarkPatch,
+  BulkAction,
+  BulkPreview,
+  BulkResult,
+  BulkToken,
   Category,
   CleanupCriteria,
   CleanupPreview,
@@ -437,6 +441,20 @@ export interface CleanupRepository {
   run(token: CleanupToken): Promise<CleanupResult>;
 }
 
+/**
+ * 列表里勾选后的批量动作。
+ *
+ * 与 `CleanupRepository` 共用同一条保护边界：确认时把 id 连版本 / 状态一起冻住，
+ * 执行时在事务内复核，确认后被改动、被恢复、被标完成的一律跳过并报原因。
+ * 列表只传 id 的做法会绕过这层保护——另一页刚做的决定会被原样抹掉。
+ */
+export interface SelectionRepository {
+  /** 冻结勾选：能处理多少、哪些现在就不符合（附原因）、逐条版本与状态。 */
+  prepare(action: BulkAction, ids: readonly string[]): Promise<BulkPreview>;
+  /** 执行：只认冻结清单，事务内复核，硬删除先写本机清理快照。 */
+  run(token: BulkToken): Promise<BulkResult>;
+}
+
 export interface Repositories {
   bookmarks: BookmarkRepository;
   reading: ReadingRepository;
@@ -445,6 +463,7 @@ export interface Repositories {
   settings: SettingsRepository;
   imports: ImportRepository;
   cleanup: CleanupRepository;
+  selection: SelectionRepository;
   handoff: HandoffRepository;
   backup: BackupRepository;
   purge: PurgeSnapshotRepository;

@@ -389,6 +389,61 @@ export interface CleanupResult {
   snapshotId: string | null;
 }
 
+/* ------------------------------------------------------------------ *
+ * 列表批量操作（P9.10）：勾选与确认之间，记录可能被另一页改掉。
+ * ------------------------------------------------------------------ */
+
+/** 列表里勾选后能做的动作；只有 `restore` 从回收站发起，其余从各自列表发起。 */
+export type BulkAction = 'trash' | 'restore' | 'purge' | 'reading-remove';
+
+/** 收藏只看在库 / 回收站；待看看未读完 / 已完成 / 已转收藏。 */
+export type BulkEntryState = 'active' | 'trashed' | 'pending' | 'completed' | 'converted';
+
+/**
+ * 冻结的一条候选。
+ *
+ * 与 `CleanupToken.items` 同构，多带 `title` 只为跳过时能说清是哪一条——
+ * 硬删除之后再去库里查标题就查不到了。
+ */
+export interface BulkTarget {
+  entityId: Id;
+  kind: 'bookmark' | 'reading';
+  title: string;
+  localRevision: number;
+  state: BulkEntryState;
+}
+
+/** 确认时的冻结清单：动作、时间、范围描述与逐条版本 / 状态。 */
+export interface BulkToken {
+  action: BulkAction;
+  frozenAt: ISODateTime;
+  /** 写进清理快照的范围描述，例如「手动选择的 12 条收藏」。 */
+  label: string;
+  items: BulkTarget[];
+}
+
+export interface BulkPreview {
+  action: BulkAction;
+  /** 勾选进来的条数。 */
+  requested: number;
+  /** 确认这一刻就符合动作前提、会被冻结的条数。 */
+  actionable: number;
+  /** 确认这一刻就不在动作范围里的条数（已恢复、已完成、已不存在…）。 */
+  excludedCount: number;
+  excluded: { entityId: Id; title: string; reason: string }[];
+  token: BulkToken;
+  frozenAt: ISODateTime;
+}
+
+export interface BulkResult {
+  action: BulkAction;
+  removed: number;
+  /** 冻结之后被改动 / 状态变过 / 已不存在，因而跳过的条目。 */
+  skipped: { entityId: Id; title: string; reason: string }[];
+  /** 硬删除留下的清理快照；移入回收站与恢复为 null。 */
+  snapshotId: string | null;
+}
+
 export type ImportRowStatus = 'new' | 'duplicate' | 'invalid' | 'suspected';
 
 export interface ImportRow {

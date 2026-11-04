@@ -22,6 +22,10 @@ import type {
   BatchEntryView,
   Bookmark,
   BookmarkPatch,
+  BulkAction,
+  BulkPreview,
+  BulkResult,
+  BulkToken,
   Category,
   CleanupCriteria,
   CleanupPreview,
@@ -68,6 +72,7 @@ import type {
   ReadingRepository,
   Repositories,
   PurgeSnapshotRepository,
+  SelectionRepository,
   SettingsRepository,
   TagRepository,
 } from '@shiye/application';
@@ -93,6 +98,7 @@ import {
   readCleanupScope as readScope,
   runCleanup as runScopeCleanup,
 } from './cleanup.js';
+import { prepareBulkSelection, runBulkSelection } from './selection.js';
 
 function assertNotDeleted(bookmark: Bookmark): void {
   if (bookmark.deletedAt) {
@@ -1797,6 +1803,20 @@ export class DexieCleanupRepository implements CleanupRepository {
   }
 }
 
+export class DexieSelectionRepository implements SelectionRepository {
+  constructor(private readonly db: ShiyeDB, private readonly hooks?: PurgeHooks) {}
+
+  /** 只读：把勾选连同版本 / 状态冻住，并报出确认前就不符合的条目。 */
+  prepare(action: BulkAction, ids: readonly string[]): Promise<BulkPreview> {
+    return prepareBulkSelection(this.db, action, ids);
+  }
+
+  /** 执行冻结清单：事务内复核版本与状态，硬删除先写快照。 */
+  run(token: BulkToken): Promise<BulkResult> {
+    return runBulkSelection(this.db, token, this.hooks);
+  }
+}
+
 export function createRepositories(
   db: ShiyeDB,
   backup?: BackupRepository,
@@ -1810,6 +1830,7 @@ export function createRepositories(
     settings: new DexieSettingsRepository(db),
     imports: new DexieImportRepository(db, hooks),
     cleanup: new DexieCleanupRepository(db, hooks),
+    selection: new DexieSelectionRepository(db, hooks),
     handoff: new DexieHandoffRepository(db),
     backup: backup ?? createBackupRepository(db),
     purge: new DexiePurgeRepository(db),

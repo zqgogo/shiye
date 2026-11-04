@@ -33,6 +33,10 @@ import {
   type BatchEntryView,
   type Bookmark,
   type BookmarkPatch,
+  type BulkAction,
+  type BulkPreview,
+  type BulkResult,
+  type BulkToken,
   type Category,
   type CleanupCriteria,
   type CleanupPreview,
@@ -480,6 +484,21 @@ export class WorkspaceService {
   /** 批量移入回收站：只对勾选里还在库的条目生效，返回真正移走的条数。 */
   async trashBookmarks(ids: string[]): Promise<number> {
     return this.repos.bookmarks.softDeleteMany(ids);
+  }
+
+  /**
+   * 冻结一次列表批量动作。
+   *
+   * 界面点「移入回收站 / 恢复 / 彻底删除 / 移出待看」时先调这里：拿到能处理
+   * 多少条、哪些现在就不符合，以及逐条版本 / 状态；确认时用 `runBulkSelection`。
+   */
+  async prepareBulkSelection(action: BulkAction, ids: readonly string[]): Promise<BulkPreview> {
+    return this.repos.selection.prepare(action, ids);
+  }
+
+  /** 执行冻结清单：确认后被改动、被恢复、被标完成的一律跳过并报原因。 */
+  async runBulkSelection(token: BulkToken): Promise<BulkResult> {
+    return this.repos.selection.run(token);
   }
 
   /** 批量从回收站恢复：分类没了就回未分类。 */
