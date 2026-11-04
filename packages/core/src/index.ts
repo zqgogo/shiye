@@ -15,3 +15,4 @@ export * from './import/paste.js';
 export * from './import/plan.js';
 export * from './ai/prompt.js';
 export * from './backup.js';
+export * from './ai/organize-plan.js';

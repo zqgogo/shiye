@@ -49,6 +49,7 @@ export type FieldSource = 'human' | 'ai';
  * 再开事务写，中间那段时间正是另一个标签页能改策略的窗口。
  */
 export interface ApplySuggestionContext {
+  n?: number;
   taskId: string;
   batchId: string;
   /** 生成材料包时的主库编号；应用时当前主库必须仍是它。 */
@@ -303,6 +304,7 @@ export interface ImportRepository {
 }
 
 export interface CreateHandoffParams {
+  planId?: string;
   id: string;
   protocolVersion: 2;
   policyVersion: number;
@@ -322,7 +324,7 @@ export interface HandoffRepository {
   /** 批次与编号映射必须落库：刷新、重开浏览器后仍要能续接同一批。 */
   createBatch(params: CreateHandoffParams): Promise<HandoffBatch>;
   getBatch(id: string): Promise<HandoffBatch | undefined>;
-  listBatches(limit?: number): Promise<HandoffBatch[]>;
+  listBatches(limit?: number, manualOnly?: boolean): Promise<HandoffBatch[]>;
   listItems(batchId: string): Promise<HandoffItem[]>;
   /** 校验回复后回写每条的状态、建议与原因。 */
   saveItemResults(
@@ -465,7 +467,21 @@ export interface AiTaskRepository {
   recent(): Promise<import('@shiye/core').AiTask[]>;
 }
 
+export interface OrganizePlanRepository {
+  create(plan: import('@shiye/core').OrganizePlan, batches: CreateHandoffParams[]): Promise<void>;
+  get(id: string): Promise<import('@shiye/core').OrganizePlan | null>;
+  recent(): Promise<import('@shiye/core').OrganizePlan[]>;
+  acquire(id: string, owner: string): Promise<void>;
+  claim(id: string, index: number, owner: string): Promise<string>;
+  settle(id: string, index: number, owner: string, attempt: string, result: {
+    state: 'completed' | 'failed' | 'unknown'; error: import('@shiye/core').OrganizePlanPart['error']; reply: string | null;
+  }): Promise<void>;
+  release(id: string, owner: string): Promise<void>;
+  close(id: string): Promise<void>;
+}
+
 export interface Repositories {
+  organizePlans: OrganizePlanRepository;
   aiTasks: AiTaskRepository;
   organization: OrganizationRepository;
   bookmarks: BookmarkRepository;

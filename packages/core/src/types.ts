@@ -625,6 +625,8 @@ export interface ImportParseResult {
 export type HandoffBatchStatus = 'exported' | 'partial' | 'applied' | 'invalidated';
 
 export interface HandoffBatch {
+  planId?: string;
+  directReply?: string;
   id: Id;
   protocolVersion: 2;
   createdAt: ISODateTime;

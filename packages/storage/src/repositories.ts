@@ -1,3 +1,4 @@
+import { createOrganizePlans } from './organize-plans.js';
 import { DexieOrganizationRepository, resolveImportCategory, assertCategoryTree, collectCategoryDependencies } from './organization.js';
 import { ImportDraftSchema, categoryFingerprint } from '@shiye/core';
 import Dexie from 'dexie';
@@ -665,11 +666,16 @@ export class DexieBookmarkRepository implements BookmarkRepository {
         // 批次、主库身份与策略必须和写入在同一个事务里读。事务外查一遍、再开事务写，
         // 中间那段时间正好够另一个标签页改策略，旧建议就会带着「已检查」的标记写进库。
         this.db.handoffBatches,
+        this.db.handoffItems,
         this.db.settings,
         this.db.policies,
       ],
       async () => {
         await this.assertHandoffStillValid(context);
+        if (context.n !== undefined) {
+          const mapping = await this.db.handoffItems.get([context.batchId, context.n]);
+          if (!mapping || mapping.bookmarkId !== id || mapping.baseLocalRevision !== expectedLocalRevision) throw new AppError('STALE_SUGGESTION', '编号映射和原始版本不匹配。');
+        }
         const current = await this.db.bookmarks.get(id);
         if (!current) throw new AppError('NOT_FOUND', '没有找到这条收藏。');
         assertNotDeleted(current);
@@ -752,6 +758,7 @@ export class DexieBookmarkRepository implements BookmarkRepository {
           appliedLocalRevision: next.localRevision,
           undoneAt: null,
         });
+        if (context.n !== undefined) await this.db.handoffItems.update([context.batchId, context.n], { status: 'applied', patch: null, reason: '' });
         return { status: 'applied', bookmark: next };
       }
     );
@@ -1790,6 +1797,7 @@ export class DexieHandoffRepository implements HandoffRepository {
         status: 'exported',
         parts: 1,
         itemCount: params.items.length,
+        ...(params.planId ? { planId: params.planId } : {}),
         materialText: params.materialText,
       };
       await this.db.handoffBatches.put(batch);
@@ -1815,8 +1823,8 @@ export class DexieHandoffRepository implements HandoffRepository {
     return this.db.handoffBatches.get(id);
   }
 
-  async listBatches(limit = 10): Promise<HandoffBatch[]> {
-    return this.db.handoffBatches.orderBy('createdAt').reverse().limit(limit).toArray();
+  async listBatches(limit = 10, manualOnly = false): Promise<HandoffBatch[]> {
+    return this.db.handoffBatches.orderBy('createdAt').reverse().filter((batch) => !manualOnly || !batch.planId).limit(limit).toArray();
   }
 
   async listItems(batchId: string): Promise<HandoffItem[]> {
@@ -1830,6 +1838,7 @@ export class DexieHandoffRepository implements HandoffRepository {
   ): Promise<void> {
     await this.db.transaction('rw', this.db.handoffItems, async () => {
       for (const result of results) {
+        if ((await this.db.handoffItems.get([batchId, result.n]))?.status === 'applied') continue;
         await this.db.handoffItems.update([batchId, result.n], {
           status: result.status,
           patch: result.patch,
@@ -1916,7 +1925,9 @@ export function createRepositories(
   backup?: BackupRepository,
   hooks?: PurgeHooks
 ): Repositories {
+  const handoff = new DexieHandoffRepository(db);
   return {
+    organizePlans: createOrganizePlans(db, handoff),
     aiTasks: {
       async put(task) { await db.aiTasks.put(task); },
       async finish(id, state) { await db.aiTasks.update(id, { state, updatedAt: nowIso() }); },
@@ -1931,7 +1942,7 @@ export function createRepositories(
     imports: new DexieImportRepository(db, hooks),
     cleanup: new DexieCleanupRepository(db, hooks),
     selection: new DexieSelectionRepository(db, hooks),
-    handoff: new DexieHandoffRepository(db),
+    handoff,
     backup: backup ?? createBackupRepository(db),
     purge: new DexiePurgeRepository(db),
   };

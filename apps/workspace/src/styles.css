@@ -449,3 +449,7 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .quick-mode .quick-results { min-height:70px; max-height:none; flex:1; }
 .quick-mode .quick-tabs { margin:7px 0; }
 .quick-mode .quick-link { padding:10px 4px; }
+
+.batch-part-table { width:100%; border-collapse:collapse; text-align:left; }
+.batch-part-table th,.batch-part-table td { padding:10px 12px; border-bottom:1px solid var(--line); }
+.batch-part-table th { background:var(--soft); font-size:11px; color:var(--muted); }

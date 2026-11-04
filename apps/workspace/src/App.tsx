@@ -1,3 +1,4 @@
+import { BatchOrganizePage } from './organize-batch.js';
 import { CloudPage } from './cloud.js';
 import { ImportWorkbench } from './import-workbench.js';
 import { FocusGuard, Sidebar, Topbar } from './components.js';
@@ -40,6 +41,7 @@ function CurrentPage() {
   if (route === 'rules') return <RulesPage />;
   if (route === 'ai') return <AiPage />;
   if (route === 'aiconfig') return <AiConfigPage />;
+  if (route === 'organize:batch') return <BatchOrganizePage />;
   if (route === 'organize') return <OrganizePage />;
   if (route === 'ask') return <AskPage />;
   return <HomePage />;
@@ -67,6 +69,7 @@ function FooterHint() {
     aiconfig: 'AI 通道 · 自配模型与手动交接',
     cloud: 'Cloudflare · 私有只读镜像',
     organize: '整理 · 人工确认后应用',
+    'organize:batch': '分批整理 · 本机计划与人工确认',
     ask: '提问 · 选择不等于授权',
   };
   return (

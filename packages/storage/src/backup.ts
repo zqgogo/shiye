@@ -588,6 +588,7 @@ async function performRestore(
       db.handoffItems.clear(),
       db.appliedChanges.clear(),
       db.aiTasks.clear(),
+      db.meta.where('key').startsWith('ai-organize-plan:').delete(),
     ]);
   }
 

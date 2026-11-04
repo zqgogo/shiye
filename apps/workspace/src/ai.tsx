@@ -42,7 +42,7 @@ export function AiPage() {
         当前可用 {eligible} 条可发送收藏。本地专用与禁止 AI 的条目不会进入材料包；选全不等于授权发送。
       </Notice>
       <div className="hubgrid">
-        {card('✧', '整理收藏', '导出整理包、校验回复并预览应用', 'organize')}
+        {card('✧', '整理收藏', '完整规划分片、直连请求并预览应用', 'organize:batch')}
         {card('⌕', '查找与提问', '检索收藏，生成提问包手动交接', 'ask')}
         {card('⚙', 'AI 通道设置', '自配模型直连与手动交接', 'aiconfig')}
       </div>
@@ -93,7 +93,7 @@ export function OrganizePage() {
   const [includeText, setIncludeText] = useState(false);
   const [includeDictionary, setIncludeDictionary] = useState(false);
   useEffect(() => () => ai.cancel(), []);
-  const { data, service, run, toast } = useWorkspace();
+  const { data, service, run, toast, navigate } = useWorkspace();
   const [step, setStep] = useState(1);
   const [scope, setScope] = useState<'uncategorized' | 'all'>('uncategorized');
   const [pack, setPack] = useState<{
@@ -321,6 +321,7 @@ export function OrganizePage() {
           </button>
         }
       />
+      <Notice>几百上千条资料可使用完整分片计划，不再手工重复取前 20 条。<button className="btn" onClick={() => navigate('organize:batch')}>全范围分批整理 ↗</button></Notice>
       <div className="steps">
         {['选择范围', '交换材料', '预览应用'].map((label, index) => (
           <div key={label} className={`step ${step === index + 1 ? 'active' : ''}`}>

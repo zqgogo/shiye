@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-当前为 **v0.2 预览版**：Chrome / Edge 扩展中的本地收藏工作台、弹窗快速访问、自配模型的问答/单批整理，以及用户自有 Cloudflare 的 S1 私有只读镜像。双向同步、真实服务和 Safari 发布仍有后续验收；不把本地模拟验证当作云端/真机验收。**逐阶段进度与证据只以 [开发进度规划](docs/ROADMAP.md) 为准**。下一版方案见 [v0.2 计划](docs/v0.2-cloudflare-ai-plan.md)，部署自己后端见 [Cloudflare 说明](docs/deployment/cloudflare-s1.md)。
+当前为 **v0.2 预览版**：Chrome / Edge 扩展中的本地收藏工作台、弹窗快速访问、自配模型的问答/全范围分片整理，以及用户自有 Cloudflare 的 S1 私有只读镜像。双向同步、真实服务和 Safari 发布仍有后续验收；不把本地模拟验证当作云端/真机验收。**逐阶段进度与证据只以 [开发进度规划](docs/ROADMAP.md) 为准**。下一版方案见 [v0.2 计划](docs/v0.2-cloudflare-ai-plan.md)，部署自己后端见 [Cloudflare 说明](docs/deployment/cloudflare-s1.md)。
 
 产品与技术依据位于 `resource/拾页开发交付包_v2_1/`。开发前先读其中的 `00_先读我.md`、`02_产品与技术实现说明_v2_1.md`、`03_AI开发任务书_v2_1.md`。该目录只作为输入资料归档，其中的原型、参考类型和 SQL 不作为正式实现代码。
 
@@ -36,6 +36,7 @@ npm install
 | `npm run build` | 产出 `apps/extension/dist`（页面 + 自包含 service worker） |
 | `npm run build:worker` | 本地打包 Worker 与手机页面，不部署 |
 | `npm run cloud:credentials` | 在 Git 忽略目录生成独立的发布/只读凭据，不打印凭据 |
+| `npm run verify:organize-plan` | 300 条分片、重试、续接和跨页应用/撤销专项验证 |
 | `npm run verify:v02` | 快速访问、AI 与镜像手机页面专项浏览器验证（合成数据） |
 | `npm run typecheck` | TypeScript 全量检查 |
 | `npm test` | Vitest 单元 / 集成测试（已限制 V8 堆上限，抗内存紧张） |

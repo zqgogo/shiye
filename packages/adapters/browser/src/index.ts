@@ -11,7 +11,9 @@ export async function requestOrigin(address: string): Promise<void> {
   }
   const api = extensionApi();
   if (!api?.permissions) throw new Error('请在已安装的扩展页面中授权此服务地址。');
-  if (!await api.permissions.request({ origins: [`${url.origin}/*`] })) throw new Error('尚未授予服务地址访问权限。');
+  const permissions = { origins: [`${url.origin}/*`] };
+  if (await api.permissions.contains(permissions)) return;
+  if (!await api.permissions.request(permissions)) throw new Error('尚未授予服务地址访问权限。');
 }
 
 export async function openExternal(address: string): Promise<void> {

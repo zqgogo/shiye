@@ -1,3 +1,4 @@
+import { splitOrganizeMaterial, ORGANIZE_PLAN_LIMITS, type OrganizePlan } from '@shiye/core';
 import { projectMirror } from '../../sync/src/projection.js';
 import { categoryPath } from '@shiye/core';
 import type { ImportArrangement, ImportDraft, OrganizationMove } from '@shiye/core';
@@ -765,7 +766,7 @@ export class WorkspaceService {
           item.bookmark.id,
           item.bookmark.localRevision,
           cleaned,
-          context
+          { ...context, n: item.n }
         );
         if (result.status === 'applied') {
           applied.push({ n: item.n, bookmark: result.bookmark });
@@ -782,9 +783,119 @@ export class WorkspaceService {
     }
     if (itemResults.length) await this.repos.handoff.saveItemResults(batchId, itemResults);
     if (applied.length > 0) {
-      await this.repos.handoff.setStatus(batchId, skipped.length === 0 ? 'applied' : 'partial');
+      const remaining = await this.repos.handoff.listItems(batchId);
+      await this.repos.handoff.setStatus(batchId, skipped.length === 0 && !remaining.some((item) => item.status === 'pending') ? 'applied' : 'partial');
     }
     return { applied, skipped, taskId };
+  }
+
+  async buildOrganizePlan(input: { scope: 'all' | 'uncategorized' | 'selected'; selectedIds: string[];
+    includeNote?: boolean; includeText?: boolean; includeDictionary?: boolean; inputChars: number; outputTokens: number }): Promise<OrganizePlan> {
+    const { scoped, policy, settings, categories, tags } = await this.organizeScope(input);
+    if (scoped.length > ORGANIZE_PLAN_LIMITS.items) throw new AppError('INVALID_INPUT', '本次超过 10000 条，请明确缩小范围；没有截取前面部分。');
+    const source = scoped.map((row, index) => buildAiItem(row, index + 1, input));
+    const parts = splitOrganizeMaterial({ items: source, categories, tags, instruction: composeOrganizeInstruction(policy.instruction),
+      policyVersion: policy.policyVersion, inputChars: input.inputChars, outputTokens: input.outputTokens });
+    const hashes = new Map<string, string>();
+    for (const row of scoped) hashes.set(row.id, await computeInputHash(row));
+    const id = newId();
+    const plan: OrganizePlan = { id, libraryId: settings.libraryId, policyVersion: policy.policyVersion, createdAt: nowIso(), closed: false,
+      replyBytes: 0, inputChars: input.inputChars, outputTokens: input.outputTokens, itemCount: scoped.length, lease: null,
+      parts: parts.map((part) => ({ batchId: part.batchId, itemCount: part.items.length, state: 'ready', attemptId: null, error: null })) };
+    let offset = 0;
+    const batches = parts.map((part) => {
+      const rows = scoped.slice(offset, offset + part.items.length); offset += rows.length;
+      return { id: part.batchId, planId: id, protocolVersion: 2 as const, policyVersion: policy.policyVersion, libraryId: settings.libraryId,
+        materialText: JSON.stringify(part, null, 2), items: rows.map((row, index) => ({ n: index + 1, part: 1, bookmarkId: row.id,
+          baseRevision: row.revision, baseLocalRevision: row.localRevision, inputHash: hashes.get(row.id)! })) };
+    });
+    await this.repos.organizePlans.create(plan, batches);
+    return plan;
+  }
+
+  async listOrganizePlans() { return this.repos.organizePlans.recent(); }
+  async getOrganizePlan(id: string) { return this.repos.organizePlans.get(id); }
+  private async currentOrganizePlan(id: string): Promise<OrganizePlan> {
+    const plan = await this.repos.organizePlans.get(id);
+    const settings = await this.repos.settings.getApp(); const policy = await this.repos.settings.getPolicy();
+    if (!plan || plan.closed || plan.libraryId !== settings.libraryId || plan.policyVersion !== policy.policyVersion) {
+      throw new AppError('STALE_SUGGESTION', '计划已结束、主库或策略已变化，请重新规划。');
+    }
+    return plan;
+  }
+  async openOrganizePart(id: string, index: number) {
+    const plan = await this.currentOrganizePlan(id); const part = plan.parts[index];
+    if (!part) throw new AppError('INVALID_INPUT', '分片不存在。');
+    const batch = await this.repos.handoff.getBatch(part.batchId);
+    if (!batch || batch.planId !== id || !batch.materialText) throw new AppError('STALE_SUGGESTION', '分片材料缺失，请重新规划。');
+    const stored = await this.repos.handoff.listItems(batch.id);
+    const items: { n: number; bookmark: Bookmark; inputHash: string }[] = [];
+    for (const mapping of stored) { const row = await this.repos.bookmarks.get(mapping.bookmarkId);
+      if (row) items.push({ n: mapping.n, bookmark: { ...row, localRevision: mapping.baseLocalRevision, revision: mapping.baseRevision }, inputHash: mapping.inputHash }); }
+    return { batchId: batch.id, materialText: batch.materialText, items, policyVersion: batch.policyVersion,
+      reply: batch.directReply ?? '', status: batch.status, appliedNumbers: stored.filter((row) => row.status === 'applied').map((row) => row.n) };
+  }
+  async startOrganizeRun(id: string, owner: string) { await this.currentOrganizePlan(id); await this.repos.organizePlans.acquire(id, owner); }
+  async claimOrganizePart(id: string, index: number, owner: string) {
+    const pack = await this.openOrganizePart(id, index);
+    return this.repos.organizePlans.claim(id, index, owner);
+  }
+  async completeOrganizePart(id: string, index: number, owner: string, attempt: string, text: string) {
+    if (text.length > LIMITS.aiReplyChars) throw new AppError('INVALID_AI_REPLY', '回复过长。');
+    const pack = await this.openOrganizePart(id, index);
+    const expected = JSON.parse(pack.materialText) as { items: { n: number }[] };
+    const reply = AIReplySchema.parse(extractJsonObject(text));
+    const numbers = new Set(reply.results.map((row) => row.n));
+    if (reply.batchId !== pack.batchId || reply.part !== 1 || numbers.size !== reply.results.length ||
+        expected.items.length !== reply.results.length || expected.items.some((row) => !numbers.has(row.n))) {
+      throw new AppError('INVALID_AI_REPLY', '回复不是此分片的完整结果：编号、分片或覆盖范围不正确。已完成片不会重发。');
+    }
+    await this.repos.organizePlans.settle(id, index, owner, attempt, { state: 'completed', error: null, reply: JSON.stringify(reply) });
+  }
+  async failOrganizePart(id: string, index: number, owner: string, attempt: string, unknown: boolean, invalid = false) {
+    await this.repos.organizePlans.settle(id, index, owner, attempt, { state: unknown ? 'unknown' : 'failed',
+      error: invalid ? 'invalid_reply' : unknown ? 'interrupted' : 'request_failed', reply: null });
+  }
+  async releaseOrganizeRun(id: string, owner: string) { await this.repos.organizePlans.release(id, owner); }
+  async undoOrganizePlan(id: string) {
+    const plan = await this.repos.organizePlans.get(id);
+    if (!plan || plan.closed || plan.libraryId !== (await this.repos.settings.getApp()).libraryId) throw new AppError('STALE_SUGGESTION', '计划不属于当前主库或已结束。');
+    let reverted = 0; const conflicts: { bookmarkId: string; reason: string }[] = [];
+    for (const part of [...plan.parts].reverse()) {
+      if (!(await this.repos.handoff.listAppliedChanges(part.batchId)).length) continue;
+      const result = await this.revertBatch(part.batchId); reverted += result.reverted; conflicts.push(...result.conflicts);
+    }
+    return { reverted, conflicts };
+  }
+  async closeOrganizePlan(id: string) { await this.repos.organizePlans.close(id); }
+
+  private async organizeScope(input: { scope: 'all' | 'uncategorized' | 'selected'; selectedIds: string[]; includeDictionary?: boolean }) {
+    const [bookmarks, categories, tags, policy] = await Promise.all([
+      this.repos.bookmarks.listActive(),
+      this.repos.categories.list(),
+      this.repos.tags.list(),
+      this.repos.settings.getPolicy(),
+    ]);
+    const settings = await this.repos.settings.getApp();
+    const eligible = bookmarks.filter(
+      (bookmark) => !bookmark.privacy.localOnly && !bookmark.privacy.aiBlocked && !bookmark.deletedAt
+    );
+    let scoped = eligible;
+    if (input.scope === 'uncategorized') scoped = eligible.filter((b) => !b.categoryId);
+    if (input.scope === 'selected') {
+      const set = new Set(input.selectedIds);
+      scoped = eligible.filter((b) => set.has(b.id));
+    }
+    const hidden = [...bookmarks.filter((row) => row.privacy.localOnly || row.privacy.aiBlocked), ...await this.repos.bookmarks.listDeleted()];
+    const blockedCategories = new Set<string>();
+    const blockedTags = new Set(hidden.flatMap((row) => row.tagIds));
+    for (const row of hidden) {
+      let id = row.categoryId;
+      while (id && !blockedCategories.has(id)) { blockedCategories.add(id); id = categories.find((category) => category.id === id)?.parentId ?? null; }
+    }
+    return { scoped, policy, settings,
+      categories: input.includeDictionary ? categories.filter((row) => !blockedCategories.has(row.id)) : [],
+      tags: input.includeDictionary ? tags.filter((row) => !blockedTags.has(row.id)) : [] };
   }
 
   /** 手动整理材料包：隐私过滤、白名单字段、编号映射与指纹在本地生成。 */
@@ -802,22 +913,7 @@ export class WorkspaceService {
     policyVersion: number;
     notice: string | null;
   }> {
-    const [bookmarks, categories, tags, policy] = await Promise.all([
-      this.repos.bookmarks.listActive(),
-      this.repos.categories.list(),
-      this.repos.tags.list(),
-      this.repos.settings.getPolicy(),
-    ]);
-    const settings = await this.repos.settings.getApp();
-    const eligible = bookmarks.filter(
-      (bookmark) => !bookmark.privacy.localOnly && !bookmark.privacy.aiBlocked && !bookmark.deletedAt
-    );
-    let scoped = eligible;
-    if (input.scope === 'uncategorized') scoped = eligible.filter((b) => !b.categoryId);
-    if (input.scope === 'selected') {
-      const set = new Set(input.selectedIds);
-      scoped = eligible.filter((b) => set.has(b.id));
-    }
+    let { scoped, policy, settings, categories, tags } = await this.organizeScope(input);
     const max = input.maxItems ?? LIMITS.aiItemsPerPart;
     let warning: string | null = null;
     if (scoped.length > max) {
@@ -835,13 +931,6 @@ export class WorkspaceService {
       items.push(buildAiItem(bookmark, n, input));
       hashes.push({ n, bookmark, inputHash: await computeInputHash(bookmark) });
     }
-    const hidden = [...bookmarks.filter((row) => row.privacy.localOnly || row.privacy.aiBlocked), ...await this.repos.bookmarks.listDeleted()];
-    const blockedCategories = new Set<string>();
-    const blockedTags = new Set(hidden.flatMap((row) => row.tagIds));
-    for (const row of hidden) {
-      let id = row.categoryId;
-      while (id && !blockedCategories.has(id)) { blockedCategories.add(id); id = categories.find((category) => category.id === id)?.parentId ?? null; }
-    }
     const batchId = newId();
     const material = buildOrganizeMaterial({
       batchId,
@@ -849,8 +938,8 @@ export class WorkspaceService {
       policyVersion: policy.policyVersion,
       // 策略决定「怎么分类」，安全条款与输出格式是固定的，不随策略消失。
       instruction: composeOrganizeInstruction(policy.instruction),
-      categories: input.includeDictionary ? categories.filter((row) => !blockedCategories.has(row.id)) : [],
-      tags: input.includeDictionary ? tags.filter((row) => !blockedTags.has(row.id)) : [],
+      categories,
+      tags,
       items,
     });
     const materialText = JSON.stringify(material, null, 2);
@@ -901,7 +990,7 @@ export class WorkspaceService {
       }
   > {
     const [batches, settings] = await Promise.all([
-      this.repos.handoff.listBatches(10),
+      this.repos.handoff.listBatches(10, true),
       this.repos.settings.getApp(),
     ]);
     const pending = batches.find(
@@ -1010,12 +1099,13 @@ export class WorkspaceService {
         throw new AppError('STALE_SUGGESTION', '有资料已修改、删除或禁止 AI，请重新生成材料。');
       }
     }
+    const material = JSON.parse(materialText) as { categories: { id: string; name: string }[]; tags: { id: string; name: string }[] };
+    if (!material.categories.length && !material.tags.length) return;
     const [active, deleted, categories, tags] = await Promise.all([this.repos.bookmarks.listActive(),
       this.repos.bookmarks.listDeleted(), this.repos.categories.list(), this.repos.tags.list()]);
     const privateRows = [...active.filter((row) => row.privacy.localOnly || row.privacy.aiBlocked), ...deleted];
     const blocked = new Set<string>(); const blockedTags = new Set(privateRows.flatMap((row) => row.tagIds));
     for (const row of privateRows) { let id = row.categoryId; while (id && !blocked.has(id)) { blocked.add(id); id = categories.find((category) => category.id === id)?.parentId ?? null; } }
-    const material = JSON.parse(materialText) as { categories: { id: string; name: string }[]; tags: { id: string; name: string }[] };
     if (material.categories.some((row) => blocked.has(row.id) || !categories.some((category) => category.id === row.id) || categoryPath(categories, row.id) !== row.name) ||
         material.tags.some((row) => blockedTags.has(row.id) || !tags.some((tag) => tag.id === row.id && tag.name === row.name))) {
       throw new AppError('STALE_SUGGESTION', '参考分类或标签已变化，或含受保护资料，请重新生成。');
@@ -1056,6 +1146,8 @@ export class WorkspaceService {
     if (!batch) {
       throw new AppError('INVALID_AI_REPLY', '本机没有这批交接的记录，请重新生成材料包。');
     }
+    const expectedPart = batch.materialText ? (JSON.parse(batch.materialText) as { part?: number }).part ?? 1 : 1;
+    if (envelope.data.part !== expectedPart) throw new AppError('INVALID_AI_REPLY', '分片编号不匹配。');
     const settings = await this.repos.settings.getApp();
     if (batch.libraryId !== settings.libraryId) {
       throw new AppError('INVALID_AI_REPLY', '这批交接来自另一个主库，不能在这里校验。');
