@@ -589,6 +589,7 @@ async function performRestore(
       db.appliedChanges.clear(),
       db.aiTasks.clear(),
       db.meta.where('key').startsWith('ai-organize-plan:').delete(),
+      db.meta.where('key').startsWith('cloud-publication:').delete(),
     ]);
   }
 
@@ -833,6 +834,7 @@ async function performRestore(
   const afterLibraryId = str((afterSettings?.value as Raw)?.['libraryId'], '');
   if (adoptSettings && beforeLibraryId && afterLibraryId && beforeLibraryId !== afterLibraryId) {
     result.librarySwitch = { from: beforeLibraryId, to: afterLibraryId };
+    await db.meta.where('key').startsWith('cloud-publication:').delete();
   }
   if (result.handoffInvalidated > 0) {
     warnings.add(

@@ -1,51 +1,100 @@
 # 部署自己的 Cloudflare 私有记录镜像（S1）
 
-这是当前单写端发布、手机只读的实现。不是双向同步，不代理 AI，不上传备份或完整正文。部署资源和费用归你自己的 Cloudflare 账号。
+当前是「电脑手动发布、手机只读」的私有镜像，不是双向同步。**AI 由扩展直接访问用户配置的模型服务，Cloudflare 不代理 AI，也不接收 AI Key。**
 
-## 准备
+## 三步部署
 
-本地使用仓库锁定的 Wrangler 4，执行 `npm ci`。SQL 协议测试用 Node 内置 SQLite，需要 Node 22.13+（本轮使用 Node 25.2.1）；扩展构建照旧。
+在拾页项目目录执行。需要 Node 22.13+，首次使用先 `npm ci`。
 
 ```sh
+npm run cloud:prepare
+npm run cloud:login
+npm run cloud:deploy
+```
+
+- `prepare`：只在本机生成独立项目名称、配置及两份随机应用凭据；不连接云端。已有配置和凭据不会被重复生成覆盖。
+- `login`：打开 Cloudflare 官方登录流程，登录你自己的账号。账号管理凭据由 Wrangler 管理，不填进拾页插件。
+- `deploy`：核对账号 → 核对/创建独立 D1 → 执行迁移 → 部署 Worker 和手机页 → 设置两份应用凭据的 SHA256 → 在线握手验证。会创建你账号中的资源，费用取决于你的 Cloudflare 方案；不会自动上传任何收藏。
+
+部署结束会给出 HTTPS 地址。把它填进插件「Cloudflare 镜像」页，再从本机的 `publisher.txt` 读取应用发布凭据。手机使用 `reader.txt`。**两份应用凭据均与 DeepSeek / 其他模型的 API Key 无关。**
+
+## 本地文件和检查
+
+本地生成的文件均已被 Git 忽略，不应提交到源码或发给别人：
+
+| 文件 | 用途 |
+| --- | --- |
+| `apps/worker/wrangler.local.jsonc` | 用户自己的 Worker / D1 配置 |
+| `.verify/cloudflare-setup/publisher.txt` | 插件发布镜像时输入，不能交给只读设备 |
+| `.verify/cloudflare-setup/reader.txt` | 手机只读登录时输入 |
+| `.verify/cloudflare-setup/*_TOKEN_SHA256.txt` | 后端仅存两种凭据的哈希 |
+| `.verify/cloudflare-setup/deployment.json` | 部署阶段与服务地址，不含原始凭据 |
+
+```sh
+npm run cloud:doctor
 npm run build:worker
-npm run cloud:credentials
-cp apps/worker/wrangler.jsonc apps/worker/wrangler.local.jsonc
-npx wrangler login
-npx wrangler d1 create shiye-private-library
 ```
 
-把创建结果中的 database_id 填入 `apps/worker/wrangler.local.jsonc`，也可调整独立 Worker 名。不要把 Cloudflare 管理 API token 填进插件。`wrangler.local.jsonc` 与本地凭据目录均已被 Git 忽略。
+`doctor` 只核对本地配置、部署路径、凭据相互隔离、哈希与文件权限，不访问账号。`build:worker` 只本地打包，不部署。
 
-## 初始化与部署
-
-下面的 remote 命令会操作你自己的远端资源，请核对账号和数据库名称后再运行。`cloud:credentials` 生成的 publisher.txt 是扩展发布凭据，reader.txt 是手机只读凭据；其余 SHA256 文件只用于 Worker secret。不要互换两种凭据。
+需要指定项目名称时，在**第一次准备**时运行：
 
 ```sh
-npx wrangler d1 migrations apply shiye-private-library --remote --config apps/worker/wrangler.local.jsonc
-npx wrangler secret put WRITE_TOKEN_SHA256 --config apps/worker/wrangler.local.jsonc < .verify/cloudflare-setup/WRITE_TOKEN_SHA256.txt
-npx wrangler secret put READ_TOKEN_SHA256 --config apps/worker/wrangler.local.jsonc < .verify/cloudflare-setup/READ_TOKEN_SHA256.txt
-npx wrangler deploy --config apps/worker/wrangler.local.jsonc
+npm run cloud:prepare -- --name shiye-my-library
 ```
 
-初次设置 secret 时 Wrangler 可能先创建 Worker 的草稿，之后 deploy 会上传代码和私有网页静态资源。也可先 deploy 再设置 secret；两份 secret 配齐前 API 拒绝服务。源码中不含任何共享账号、固定服务器或可用凭据。
+有多个 Cloudflare 账号时，需要明确选择账户编号，可先 `npx wrangler whoami` 查看：
 
-## 插件与手机
+```sh
+npm run cloud:deploy -- --account 你的32位账户编号
+```
 
-1. 重新加载扩展，打开工作台侧栏「Cloudflare 镜像」。填刚部署的 HTTPS 根地址，以及 publisher.txt 中的应用凭据。点击测试连接并授予该域名权限；握手不会上传收藏。
-2. 准备发布预览。核对实际白名单内容、目标库和条数，再确认上传发布。按最多 50 项及 180 KB 分片，完整镜像上限 50000 项（含分类和标签）/24 MB。
-3. 手机打开同一个 HTTPS 根地址，填 reader.txt。登录后通过 HttpOnly / Secure / SameSite=Strict cookie 只读访问（浏览器 cookie 8 小时），可以搜索、筛选分类、打开网址及退出。发布凭据不能用于手机登录；手机 cookie 不允许写接口。
-4. 电脑修改后再次手动发布。删除和转为本地专用只有再次发布成功后才从云端撤回，离线不会擦掉云端旧镜像。需要立即取消共享时使用「清空云端镜像」。断开插件只清本页凭据，不清云端。
+要复用自己明确选择的已有 D1，可在首次 prepare 使用 `--database-id 数据库UUID`。默认会创建新的独立 D1。绑定账号、项目或数据库后，向导不会自动换成别的项目。
 
-未读取网页正文；不包含备注、摘录、来源历史、AI 会话/任务、Key、暂存和日志。云端保存的是可读记录，并非端到端加密备份。Cloudflare 账号所有者及其平台权限仍可访问 D1；自己的账号不等于消除所有网络风险。
+## 中断和重跑
 
-## 故障与维护
+部署阶段保存在本机，失败后可重新运行 `npm run cloud:deploy`：
 
-- 上传中断：active 指针不变，手机仍读旧版本。本页保留计划时可手动重试同一编号；重试相同分片幂等，发布成功但响应丢失也能核对。关闭页面后计划不持久续传，重新打开先连接核对再创建新计划。
-- 多标签页竞争：同基线只允许一份发布成功；另一份返回冲突并要求重新预览。不会悄悄覆盖新镜像。
-- 首次上传或修改隐私后仍应检查手机实测结果。旧已发布版本与放弃上传随成功发布一并删除；未完成上传在后续创建计划时清理超过 24 小时的内容。空闲期间不会自动清理，必要时手动清空。
-- 凭据轮换：重新生成各角色随机 token，更新对应 SHA256 secret，并在相应设备重新输入。旧 token 即失效；不提供单设备独立撤销管理界面。保护本机凭据文件，不通过 URL 传递。
-- 备份 D1：使用 Cloudflare 提供的导出或恢复工具。不要直接编辑身份/epoch；后续若设计重置流程，必须更换身份并让旧客户端停下。
-- API 和静态页面明确 no-store，不安装 Service Worker、不持久缓存私有内容。关闭/退出页面清空当前 DOM 数据；浏览器、操作系统及离线旧设备的已有副本不受云端删除控制。
-- 最终发布校验需完整读取/校验镜像，规模大时应使用并实测适当 Workers 计划；本轮不承诺免费 CPU 额度覆盖最坏样本。国内网络可达性需要用最终域名实测。
+- 同名 D1 会先查询再复用；“创建成功但响应丢失”不会盲目重复创建。
+- 已应用的迁移由 Wrangler 记录并跳过；不会清空现有数据库。
+- 只设置本工具的两项认证哈希，不删除其他 secret；部署时复用原来的随机凭据，不自动轮换密码。
+- 未能从本次 Wrangler 输出确认地址时，不把凭据发往旧缓存地址。可以从控制台核对地址后手动验证：
 
-本地验证不等于已完成真实 Cloudflare 部署，也不等于 iOS Safari 真机验收。协议 SQLite 测试、Worker dry-run 与扩展浏览器测试记录见本轮实施报告。
+```sh
+npm run cloud:verify -- --url https://你的Worker地址
+```
+
+在线验证仅请求鉴权握手与只读权限探针，不上传记录。它不等于已经完成真实收藏发布、手机网络或 iOS Safari 真机验收。
+
+首次发版后、secret 配置完成前，API 会暂时拒绝服务。源码没有共享账号或固定可用凭据。不要删除本地凭据文件后以为“再部署一次”就能自动恢复原密码；轮换应另外明确操作。
+
+## 插件和手机的实际使用
+
+1. 重新加载扩展，侧栏进入「Cloudflare 镜像」，输入部署地址和应用发布凭据。测试连接并授予域名权限，握手不会发送收藏。
+2. 准备发布预览。核对目标库、条数和分页展示的白名单内容后再确认上传。每片最多 50 项 / 180 KB，完整镜像上限 50000 项（含分类和标签）/24 MB。
+3. 手机打开同一个 HTTPS 根地址，输入只读凭据。通过 HttpOnly / Secure / SameSite=Strict cookie 访问，只读登录 8 小时；可搜索、筛分类、开网址和退出。手机 cookie 不能调用发布/清空接口。
+4. 电脑修改后重新预览并手动发布。删除或转为本地专用只有再次发布成功后才从已有云镜像撤回，离线不会擦掉旧镜像。需要取消已有共享时，使用「清空云端镜像」。
+
+云端白名单仅为标题、网址、必要分类/标签、置顶/未读及待看记录，不包含备注、摘录、来源历史、AI 任务/会话、AI Key、导入暂存或应用日志。它是可读的私有记录镜像，不是端到端加密备份。
+
+## 镜像断点续传和取消
+
+- 上传快照与进度保存在本机，发布凭据仍仅当前页面。刷新后重新输入凭据并测试连接，再主动续传；不会自动发网络请求。
+- 续传先核对服务器收到的分片编号与 SHA256，只补缺失部分。服务器若已经发布该编号，则只核对成功状态，不重复上传或推进版本。
+- 快照绑定 HTTPS 地址、serverId/libraryId/epoch 和本机主库。换地址清除输入中的旧凭据；服务身份或基线版本改变时，拒绝重放旧计划。
+- 本机每次只允许一个页面上传，租约 120 秒、逐片续期。意外关闭后到期才能接管；大快照与小进度分开保存，更新进度不会重写全部记录。
+- 每片上传前复核当前记录的白名单和隐私，最终发布前重新核对完整投影。内容变了需取消旧上传、重新预览。不要把“已上传暂存”当作已发布，发布前手机仍读旧完整镜像。
+- 「取消未发布上传」会删掉这份服务器暂存和本机队列，保留原已发布镜像；已经发布的编号不能被此按钮误删。「清空云端镜像」另外确认，清除已发布镜像及所有暂存。
+- 整库替换或空库合并导致本机身份切换，会作废本机发布计划，不自动改变云库或重放旧快照。
+
+未完成上传会在后续创建计划时清理超过 24 小时的内容，空闲时没有后台定时清理；也可主动取消。已发布旧版本及其余放弃上传会在新版本成功发布时一并移除。
+
+## 维护与边界
+
+- 应用凭据遗失/泄露时，明确生成新值并更新对应 secret，同时在设备重新输入；不提供单设备独立撤销管理界面。
+- 通过 Cloudflare 官方工具备份 D1。不要直接编辑 serverId/libraryId/epoch；本轮没有云库重置协议。
+- 私有接口和手机页明确 no-store，不安装 Service Worker、不持久缓存私有内容。退出/关闭清除当前页面内容；用户已复制到别处或离线旧设备的副本不受远端删除控制。
+- 最终发布要完整校验镜像，规模大时需实测 Workers CPU/配额及最终域名可达性，本轮不承诺免费额度覆盖最坏规模。
+- Chrome 本地自动化、官方 workerd / D1 本地验证不等于真实 Cloudflare 账号部署或 Safari 真机支持。Safari 扩展包与 S2 双向同步仍单列后续工作。
+
+官方依据：[Wrangler API / Test Harness](https://developers.cloudflare.com/workers/wrangler/api/)、[D1 batch](https://developers.cloudflare.com/d1/worker-api/d1-database/)。工具锁定 Wrangler 4.157.0，升级时需复跑部署工具与本地运行时验证。

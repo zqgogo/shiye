@@ -35,6 +35,13 @@ npm install
 | `npm run dev` | 以开发模式打开工作台页面 |
 | `npm run build` | 产出 `apps/extension/dist`（页面 + 自包含 service worker） |
 | `npm run build:worker` | 本地打包 Worker 与手机页面，不部署 |
+| `npm run cloud:prepare` | 本地准备自有后端配置和独立应用凭据 |
+| `npm run cloud:doctor` | 离线检查部署配置与凭据 |
+| `npm run cloud:login` | 登录用户自己的 Cloudflare |
+| `npm run cloud:deploy` | 创建/复用 D1 并部署 Worker 与手机只读页，不上传收藏 |
+| `npm run cloud:verify` | 在线只做鉴权及身份检查，不上传记录 |
+| `npm run verify:cloud-runtime` | 官方 workerd / D1 本地集成测试 |
+| `npm run verify:cloud-publication` | 镜像续传、刷新、隐私和取消专项浏览器验证 |
 | `npm run cloud:credentials` | 在 Git 忽略目录生成独立的发布/只读凭据，不打印凭据 |
 | `npm run verify:organize-plan` | 300 条分片、重试、续接和跨页应用/撤销专项验证 |
 | `npm run verify:v02` | 快速访问、AI 与镜像手机页面专项浏览器验证（合成数据） |

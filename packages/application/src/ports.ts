@@ -480,7 +480,18 @@ export interface OrganizePlanRepository {
   close(id: string): Promise<void>;
 }
 
+export interface MirrorPublicationRepository {
+  save(snapshot: import('../../sync/src/publication.js').PublicationSnapshot, expectedId: string | null): Promise<import('../../sync/src/publication.js').SavedPublication>;
+  get(): Promise<import('../../sync/src/publication.js').SavedPublication | null>;
+  acquire(id: string, owner: string): Promise<void>;
+  progress(id: string, owner: string, confirmed: number): Promise<void>;
+  complete(id: string, owner: string, receipt: import('../../sync/src/protocol.js').MirrorInfo): Promise<void>;
+  release(id: string, owner: string): Promise<void>;
+  remove(id: string, force?: boolean): Promise<void>;
+}
+
 export interface Repositories {
+  publications: MirrorPublicationRepository;
   organizePlans: OrganizePlanRepository;
   aiTasks: AiTaskRepository;
   organization: OrganizationRepository;

@@ -14,10 +14,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --max-old-space-size=768 node_modules/vitest/vitest.mjs run",
     "test:watch": "vitest",
-    "verify": "npm run typecheck && npm run test && npm run build",
+    "verify": "npm run typecheck && npm run test && npm run test:cloud-tools && npm run build",
     "verify:browser": "node scripts/verify-p0.mjs",
     "verify:import": "node scripts/verify-p0-import.mjs",
-    "verify:all": "npm run verify && npm run verify:browser && npm run verify:import && npm run verify:p1 && npm run verify:p2 && npm run verify:p3 && npm run verify:p4 && npm run verify:p5 && npm run verify:p6 && npm run verify:a11y && npm run verify:workbench && npm run verify:v02 && npm run build:worker && npm run verify:organize-plan",
+    "verify:all": "npm run verify && npm run verify:browser && npm run verify:import && npm run verify:p1 && npm run verify:p2 && npm run verify:p3 && npm run verify:p4 && npm run verify:p5 && npm run verify:p6 && npm run verify:a11y && npm run verify:workbench && npm run verify:v02 && npm run build:worker && npm run verify:organize-plan && npm run verify:cloud-runtime && npm run verify:cloud-publication",
     "verify:p1": "node scripts/verify-p1.mjs",
     "verify:p2": "node scripts/verify-p2.mjs",
     "verify:p3": "node scripts/verify-p3.mjs",
@@ -30,7 +30,15 @@
     "build:worker": "node scripts/build-worker.mjs",
     "cloud:credentials": "node scripts/create-cloudflare-credentials.mjs",
     "verify:v02": "node scripts/verify-v02.mjs",
-    "verify:organize-plan": "node scripts/verify-organize-plan.mjs"
+    "verify:organize-plan": "node scripts/verify-organize-plan.mjs",
+    "cloud:prepare": "node scripts/cloudflare.mjs prepare",
+    "cloud:doctor": "node scripts/cloudflare.mjs doctor",
+    "cloud:login": "node scripts/cloudflare.mjs login",
+    "cloud:deploy": "node scripts/cloudflare.mjs deploy",
+    "cloud:verify": "node scripts/cloudflare.mjs verify",
+    "test:cloud-tools": "node --test scripts/tests/cloud-setup.test.mjs",
+    "verify:cloud-runtime": "node scripts/verify-cloud-runtime.mjs",
+    "verify:cloud-publication": "node scripts/verify-cloud-publication.mjs"
   },
   "dependencies": {
     "dexie": "4.0.11",
@@ -50,7 +58,7 @@
     "typescript": "5.7.3",
     "vite": "5.4.21",
     "vitest": "2.1.9",
-    "wrangler": "^4.157.0"
+    "wrangler": "4.157.0"
   },
   "engines": {
     "node": ">=22.13.0"

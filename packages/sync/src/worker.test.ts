@@ -106,3 +106,40 @@ it('清空镜像采用版本守卫，过期请求不影响已发布内容', asyn
   const cleared = await client.clear(latest, signal()); expect(cleared.activeGeneration).toBeNull();
   expect((sqlite.prepare('SELECT COUNT(*) AS n FROM mirror_chunks').get() as { n: number }).n).toBe(0);
 });
+
+it('丢失分片响应后查询服务器摘要，只补传未收到的分片', async () => {
+  const rows = Array.from({ length: 120 }, (_, index) => ({ ...sample(`资料${index}`)[0]!, id: `b${index}`, url: `https://example.com/${index}` }));
+  const plan = await planMirror(rows, await client.info(signal())); let interrupted = false;
+  const unreliable = new MirrorClient('https://mirror.test', writeToken, async (input, init) => {
+    const response = await transport(input, init);
+    if (!interrupted && new URL(String(input)).pathname.endsWith('/chunks/1')) { interrupted = true; throw new Error('lost response'); } return response;
+  });
+  await expect(unreliable.publish(plan, signal(), () => undefined)).rejects.toThrow();
+  const sent: string[] = [];
+  const resumed = new MirrorClient('https://mirror.test', writeToken, async (input, init) => { if (/\/chunks\//.test(String(input))) sent.push(String(input)); return transport(input, init); });
+  await resumed.publish(plan, signal(), () => undefined);
+  expect(sent).toHaveLength(1); expect(sent[0]).toMatch(/chunks\/2$/);
+});
+it('未发布上传可独立取消，不能误删已发布镜像，只读凭据不能查看上传状态', async () => {
+  const first = await planMirror(sample('已发布'), await client.info(signal())); await client.publish(first, signal(), () => undefined);
+  const next = await planMirror(sample('暂存'), await client.info(signal())); await stage(next);
+  const status = await transport(`https://mirror.test/v1/generations/${next.declaration.generationId}`, { headers: { Authorization: `Bearer ${readToken}` } });
+  expect(status.status).toBe(401);
+  await client.cancel(next, signal()); await client.cancel(next, signal());
+  expect(await publishedId()).toBe(first.declaration.generationId);
+  await expect(client.cancel(first, signal())).rejects.toThrow();
+  expect((sqlite.prepare('SELECT COUNT(*) AS n FROM mirror_chunks').get() as { n: number }).n).toBe(1);
+});
+it('并发创建暂存计划也不能绕过服务端数量上限', async () => {
+  const info = await client.info(signal()); const plans = await Promise.all(Array.from({ length: 6 }, (_, index) => planMirror(sample(String(index)), info)));
+  const responses = await Promise.all(plans.map((plan) => post('/v1/generations', plan.declaration)));
+  expect(responses.filter((response) => response.status === 200)).toHaveLength(5);
+  expect((sqlite.prepare('SELECT COUNT(*) AS n FROM mirror_generations').get() as { n: number }).n).toBe(5);
+});
+it('最后一条共享记录转私密后，可发布空镜像撤回全部旧内容', async () => {
+  const first = await planMirror(sample('以前共享'), await client.info(signal())); await client.publish(first, signal(), () => undefined);
+  const empty = await planMirror([], await client.info(signal())); await client.publish(empty, signal(), () => undefined);
+  const chunks = sqlite.prepare('SELECT body FROM mirror_chunks').all() as { body: string }[];
+  expect(chunks.flatMap((row) => JSON.parse(row.body))).toEqual([]);
+  expect(await publishedId()).toBe(empty.declaration.generationId);
+});

@@ -1,3 +1,4 @@
+import { createMirrorPublications } from './mirror-publication.js';
 import { createOrganizePlans } from './organize-plans.js';
 import { DexieOrganizationRepository, resolveImportCategory, assertCategoryTree, collectCategoryDependencies } from './organization.js';
 import { ImportDraftSchema, categoryFingerprint } from '@shiye/core';
@@ -1927,6 +1928,7 @@ export function createRepositories(
 ): Repositories {
   const handoff = new DexieHandoffRepository(db);
   return {
+    publications: createMirrorPublications(db),
     organizePlans: createOrganizePlans(db, handoff),
     aiTasks: {
       async put(task) { await db.aiTasks.put(task); },

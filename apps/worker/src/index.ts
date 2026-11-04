@@ -82,10 +82,29 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
         db.prepare('DELETE FROM mirror_generations WHERE id <> COALESCE((SELECT active_generation FROM mirror_library WHERE singleton=1), \'\') AND created_at < ?').bind(Date.now() - 86400000),
         db.prepare(`INSERT INTO mirror_generations(id,epoch,base_revision,chunk_count,record_count,content_hash,created_at)
           SELECT ?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM mirror_library WHERE singleton=1 AND server_id=? AND library_id=? AND epoch=? AND revision=?)
+          AND (SELECT COUNT(*) FROM mirror_generations WHERE id <> COALESCE((SELECT active_generation FROM mirror_library WHERE singleton=1), '')) < 5
           ON CONFLICT(id) DO NOTHING`).bind(input.generationId, input.identity.epoch, input.baseRevision, input.chunkCount, input.recordCount, input.contentHash, Date.now(), input.identity.serverId, input.identity.libraryId, input.identity.epoch, input.baseRevision),
       ]);
       await generation(db, input.generationId);
       return json({ generationId: input.generationId });
+    }
+    const generationMatch = /^\/v1\/generations\/([a-f0-9-]{36})$/.exec(path);
+    if (generationMatch && (request.method === 'GET' || request.method === 'DELETE')) {
+      await authenticate(request, env, true);
+      const id = z.string().uuid().parse(generationMatch[1]), lib = await library(db);
+      if (request.method === 'DELETE') {
+        const input = PublishSchema.parse(await body(request)); guard(lib, input.identity);
+        await db.prepare(`DELETE FROM mirror_generations WHERE id=? AND epoch=?
+          AND id IS NOT (SELECT active_generation FROM mirror_library WHERE singleton=1)`).bind(id, lib.epoch).run();
+        if ((await library(db)).active_generation === id) fail(409, '该镜像已经发布，取消上传不能删除它；请使用清空云镜像。');
+        return json({ ok: true });
+      }
+      const gen = await generation(db, id);
+      if (gen.epoch !== lib.epoch || (lib.active_generation !== id && gen.base_revision !== lib.revision)) fail(409, '上传计划已过期。');
+      const chunks = (await db.prepare('SELECT part,hash FROM mirror_chunks WHERE generation_id=? ORDER BY part').bind(id).all<{ part: number; hash: string }>()).results;
+      return json({ declaration: { identity: identityOf(lib), generationId: id, baseRevision: gen.base_revision,
+        chunkCount: gen.chunk_count, recordCount: gen.record_count, contentHash: gen.content_hash },
+        state: lib.active_generation === id ? 'published' : 'staging', received: chunks.map((part) => ({ index: part.part, hash: part.hash })), expiresAt: gen.created_at + 86400000 });
     }
     const match = /^\/v1\/generations\/([a-f0-9-]{36})\/(?:chunks\/(\d+)|(publish))$/.exec(path);
     if (match && request.method === 'POST') {

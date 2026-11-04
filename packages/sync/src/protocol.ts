@@ -54,3 +54,7 @@ export function validateMirror(records: MirrorRecord[]): void {
     if (row.kind === 'bookmark' && ((row.categoryId && !categories.has(row.categoryId)) || row.tagIds.some((id) => !tags.has(id)))) throw new Error('镜像包含失效分类或标签引用。');
   }
 }
+
+export const GenerationStatusSchema = z.object({ declaration: CreateGenerationSchema,
+  state: z.enum(['staging', 'published']), received: z.array(z.object({ index: z.number().int().nonnegative(), hash: z.string().regex(/^[a-f0-9]{64}$/) }).strict()).max(MIRROR_LIMITS.chunks),
+  expiresAt: z.number() }).strict();

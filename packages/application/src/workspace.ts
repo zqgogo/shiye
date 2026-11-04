@@ -1,5 +1,7 @@
+import { planMirror, mirrorBase } from '../../sync/src/client.js';
+import type { MirrorInfo, MirrorRecord } from '../../sync/src/protocol.js';
 import { splitOrganizeMaterial, ORGANIZE_PLAN_LIMITS, type OrganizePlan } from '@shiye/core';
-import { projectMirror } from '../../sync/src/projection.js';
+import { projectMirror, projectSharedBookmark } from '../../sync/src/projection.js';
 import { categoryPath } from '@shiye/core';
 import type { ImportArrangement, ImportDraft, OrganizationMove } from '@shiye/core';
 import {
@@ -175,6 +177,43 @@ export class WorkspaceService {
     // Export is one consistent local transaction; the private source never leaves this method.
     return projectMirror(await this.repos.backup.exportDocument({ includeLocalOnly: true }));
   }
+
+  async savedCloudPublication() { return this.repos.publications.get(); }
+  async prepareCloudPublication(baseUrl: string, info: MirrorInfo, expectedId: string | null, signal?: AbortSignal) {
+    const localLibraryId = (await this.repos.settings.getApp()).libraryId;
+    const plan = await planMirror(await this.buildCloudMirror(), info);
+    signal?.throwIfAborted();
+    return this.repos.publications.save({ id: plan.declaration.generationId, localLibraryId, baseUrl: mirrorBase(baseUrl).href, createdAt: nowIso(), plan }, expectedId);
+  }
+  async validateCloudPublication(id: string) {
+    const saved = await this.repos.publications.get();
+    if (!saved || saved.snapshot.id !== id) throw new AppError('STALE_SUGGESTION', '发布计划已变化，请重新准备预览。');
+    const fresh = await planMirror(await this.buildCloudMirror(), { ...saved.snapshot.plan.declaration.identity, protocol: 1,
+      revision: saved.snapshot.plan.declaration.baseRevision, activeGeneration: null, publishedAt: null });
+    if (fresh.declaration.contentHash !== saved.snapshot.plan.declaration.contentHash) throw new AppError('STALE_SUGGESTION', '本机内容、删除或隐私状态已变化，请取消旧上传并重新准备预览。');
+    return saved;
+  }
+  async validateCloudChunk(records: readonly MirrorRecord[]) {
+    const categories = records.some((row) => row.kind === 'category') ? new Map((await this.repos.categories.list()).map((row) => [row.id, row])) : new Map();
+    const tags = records.some((row) => row.kind === 'tag') ? new Map((await this.repos.tags.list()).map((row) => [row.id, row])) : new Map();
+    for (const frozen of records) {
+      let current: MirrorRecord | null = null;
+      if (frozen.kind === 'bookmark') { const row = await this.repos.bookmarks.get(frozen.id); if (row) current = projectSharedBookmark(row); }
+      if (frozen.kind === 'reading') {
+        const row = await this.repos.reading.get(frozen.id);
+        const related = row?.relatedBookmarkId ? await this.repos.bookmarks.get(row.relatedBookmarkId) : null;
+        if (row?.status === 'pending' && !(related?.privacy.localOnly || related?.deletedAt)) current = { kind: 'reading', id: row.id, title: row.title, url: row.originalUrl };
+      }
+      if (frozen.kind === 'category') { const row = categories.get(frozen.id); if (row) current = { kind: 'category', id: row.id, name: row.name, parentId: row.parentId ?? null }; }
+      if (frozen.kind === 'tag') { const row = tags.get(frozen.id); if (row) current = { kind: 'tag', id: row.id, name: row.name }; }
+      if (!current || JSON.stringify(current) !== JSON.stringify(frozen)) throw new AppError('STALE_SUGGESTION', '待上传记录已修改、删除或转为本地专用，已停止旧计划。请取消旧上传并重新准备预览。');
+    }
+  }
+  async acquireCloudPublication(id: string, owner: string) { await this.repos.publications.acquire(id, owner); }
+  async progressCloudPublication(id: string, owner: string, confirmed: number) { await this.repos.publications.progress(id, owner, confirmed); }
+  async completeCloudPublication(id: string, owner: string, receipt: MirrorInfo) { await this.repos.publications.complete(id, owner, receipt); }
+  async releaseCloudPublication(id: string, owner: string) { await this.repos.publications.release(id, owner); }
+  async removeCloudPublication(id: string, force = false) { await this.repos.publications.remove(id, force); }
 
   async snapshot(): Promise<WorkspaceSnapshot> {
     return this.loadAll();
