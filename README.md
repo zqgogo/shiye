@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-v1a 主体已实现并可构建：Chrome / Edge MV3 扩展 + React 工作台，数据落在扩展 origin 下的单一 IndexedDB 主库。P0–P6 已完成并留下真实浏览器证据（9 个回归脚本共 366 项断言、159 项单测）；P7 内置 AI 未实现，界面明确禁用；P6.4 手机真机与读屏播报仍待人工验证。**逐阶段进度与证据只以 [开发进度规划](docs/ROADMAP.md) 为准**，本文件不重复记录状态。
+当前为 **v0.2 预览版**：Chrome / Edge 扩展中的本地收藏工作台、弹窗快速访问、自配模型的问答/单批整理，以及用户自有 Cloudflare 的 S1 私有只读镜像。双向同步、真实服务和 Safari 发布仍有后续验收；不把本地模拟验证当作云端/真机验收。**逐阶段进度与证据只以 [开发进度规划](docs/ROADMAP.md) 为准**。下一版方案见 [v0.2 计划](docs/v0.2-cloudflare-ai-plan.md)，部署自己后端见 [Cloudflare 说明](docs/deployment/cloudflare-s1.md)。
 
 产品与技术依据位于 `resource/拾页开发交付包_v2_1/`。开发前先读其中的 `00_先读我.md`、`02_产品与技术实现说明_v2_1.md`、`03_AI开发任务书_v2_1.md`。该目录只作为输入资料归档，其中的原型、参考类型和 SQL 不作为正式实现代码。
 
@@ -12,8 +12,8 @@ v1a 主体已实现并可构建：Chrome / Edge MV3 扩展 + React 工作台，�
 
 - v1a：Chrome / Edge MV3 扩展；React + TypeScript 工作台；Dexie / IndexedDB 为唯一可编辑主库。
 - 待看与收藏是两条独立的线，共用一套 URL 去重；不引入价值等级。
-- AI 默认关闭、默认人工交接：只导出材料、导入结果并逐条校验应用，不接真实模型。
-- v1b Worker + D1 同步是独立可选阶段，当前不建云端工程。
+- AI 默认关闭；保留人工交接，可自配 DeepSeek / Chat Completions 服务，测试并主动开启后确认发送。
+- Cloudflare Worker + D1 为可选私有镜像，代码与模板位于 apps/worker；S2 双向同步单独实施。
 
 ## 在新机器上继续
 
@@ -24,8 +24,7 @@ git checkout develop
 npm install
 ```
 
-要求：Node 20+（开发时用 22.22.2）、npm 10+。若 `registry.npmjs.org` 不可达，改用镜像：
-`npm install --registry=https://registry.npmmirror.com --strict-ssl=false`。
+要求：Node 22.13+、npm 10+；本轮使用 Node 25.2.1。正式测试使用 Node 内置 SQLite，Wrangler 为锁定的开发依赖。
 
 接手前按顺序读四份：`docs/ROADMAP.md` 的「当前进度」看做到哪、`docs/next-step-cloudflare-ai-implementation.md` 看下一阶段（自有 Cloudflare 后端、自配 AI、Safari 支持）的要求、`docs/import-rollback-and-bulk-cleanup-design.md` 看撤回与清理的场景与已定默认值、`docs/purge-by-criteria-design.md` 看 P9 的分层与接口。进度只在 ROADMAP 维护。
 
@@ -35,6 +34,9 @@ npm install
 | --- | --- |
 | `npm run dev` | 以开发模式打开工作台页面 |
 | `npm run build` | 产出 `apps/extension/dist`（页面 + 自包含 service worker） |
+| `npm run build:worker` | 本地打包 Worker 与手机页面，不部署 |
+| `npm run cloud:credentials` | 在 Git 忽略目录生成独立的发布/只读凭据，不打印凭据 |
+| `npm run verify:v02` | 快速访问、AI 与镜像手机页面专项浏览器验证（合成数据） |
 | `npm run typecheck` | TypeScript 全量检查 |
 | `npm test` | Vitest 单元 / 集成测试（已限制 V8 堆上限，抗内存紧张） |
 | `npm run test:lowmem` | 同上，进一步降到 384 MB 堆，给浏览器别的活腾地方 |

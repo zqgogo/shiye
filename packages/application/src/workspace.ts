@@ -1,3 +1,5 @@
+import { projectMirror } from '../../sync/src/projection.js';
+import { categoryPath } from '@shiye/core';
 import type { ImportArrangement, ImportDraft, OrganizationMove } from '@shiye/core';
 import {
   composeOrganizeInstruction,
@@ -155,6 +157,22 @@ export class WorkspaceService {
       completedReading,
       trashedCount: trashed.length,
     };
+  }
+
+  async beginAiTask(kind: 'ask' | 'organize', configFingerprint: string, ids: string[]): Promise<string> {
+    const id = newId(); const now = nowIso();
+    const snapshots = [];
+    for (const itemId of ids) { const row = await this.repos.bookmarks.get(itemId); if (row) snapshots.push({ itemId, localRevision: row.localRevision, inputHash: await computeInputHash(row) }); }
+    // Unknown is durable before the request: a closed page never promises safe automatic retry.
+    await this.repos.aiTasks.put({ id, kind, configFingerprint, state: 'outcome_unknown', createdAt: now, updatedAt: now, snapshots, errorCode: null });
+    return id;
+  }
+  async finishAiTask(id: string, state: 'completed' | 'outcome_unknown'): Promise<void> { await this.repos.aiTasks.finish(id, state); }
+  async recentAiTasks() { return this.repos.aiTasks.recent(); }
+
+  async buildCloudMirror() {
+    // Export is one consistent local transaction; the private source never leaves this method.
+    return projectMirror(await this.repos.backup.exportDocument({ includeLocalOnly: true }));
   }
 
   async snapshot(): Promise<WorkspaceSnapshot> {
@@ -774,6 +792,9 @@ export class WorkspaceService {
     scope: 'all' | 'uncategorized' | 'selected';
     selectedIds: string[];
     maxItems?: number;
+    includeNote?: boolean;
+    includeText?: boolean;
+    includeDictionary?: boolean;
   }): Promise<{
     batchId: string;
     materialText: string;
@@ -811,8 +832,15 @@ export class WorkspaceService {
     for (let index = 0; index < scoped.length; index += 1) {
       const bookmark = scoped[index] as Bookmark;
       const n = index + 1;
-      items.push(buildAiItem(bookmark, n));
+      items.push(buildAiItem(bookmark, n, input));
       hashes.push({ n, bookmark, inputHash: await computeInputHash(bookmark) });
+    }
+    const hidden = [...bookmarks.filter((row) => row.privacy.localOnly || row.privacy.aiBlocked), ...await this.repos.bookmarks.listDeleted()];
+    const blockedCategories = new Set<string>();
+    const blockedTags = new Set(hidden.flatMap((row) => row.tagIds));
+    for (const row of hidden) {
+      let id = row.categoryId;
+      while (id && !blockedCategories.has(id)) { blockedCategories.add(id); id = categories.find((category) => category.id === id)?.parentId ?? null; }
     }
     const batchId = newId();
     const material = buildOrganizeMaterial({
@@ -821,8 +849,8 @@ export class WorkspaceService {
       policyVersion: policy.policyVersion,
       // 策略决定「怎么分类」，安全条款与输出格式是固定的，不随策略消失。
       instruction: composeOrganizeInstruction(policy.instruction),
-      categories,
-      tags,
+      categories: input.includeDictionary ? categories.filter((row) => !blockedCategories.has(row.id)) : [],
+      tags: input.includeDictionary ? tags.filter((row) => !blockedTags.has(row.id)) : [],
       items,
     });
     const materialText = JSON.stringify(material, null, 2);
@@ -940,7 +968,9 @@ export class WorkspaceService {
   async buildAskPack(input: {
     question: string;
     bookmarkIds: string[];
-  }): Promise<{ text: string; chars: number; items: Bookmark[] }> {
+    includeNote?: boolean;
+    includeText?: boolean;
+  }): Promise<{ text: string; chars: number; items: Bookmark[]; libraryId: string }> {
     const question = input.question.trim();
     if (!question) throw new AppError('INVALID_INPUT', '请先填写问题。');
     if ([...question].length > LIMITS.questionChars) {
@@ -956,12 +986,40 @@ export class WorkspaceService {
     }
     const material = buildAskMaterial({
       question,
-      items: chosen.map((bookmark, index) => buildAiItem(bookmark, index + 1)),
+      items: chosen.map((bookmark, index) => buildAiItem(bookmark, index + 1, input)),
     });
     if (material.chars > LIMITS.aiReplyChars) {
       throw new AppError('INVALID_INPUT', '所选资料超出提问包上限，请减少资料后重试。');
     }
-    return { text: material.text, chars: material.chars, items: chosen };
+    return { text: material.text, chars: material.chars, items: chosen, libraryId: (await this.repos.settings.getApp()).libraryId };
+  }
+
+  async assertHandoffSendable(batchId: string, materialText: string): Promise<void> {
+    const batch = await this.repos.handoff.getBatch(batchId);
+    const settings = await this.repos.settings.getApp();
+    const policy = await this.repos.settings.getPolicy();
+    if (!batch || batch.materialText !== materialText || batch.libraryId !== settings.libraryId ||
+        batch.policyVersion !== policy.policyVersion || !['exported', 'partial'].includes(batch.status)) {
+      throw new AppError('STALE_SUGGESTION', '材料、主库或策略已变化，请重新生成。');
+    }
+    const mappings = await this.repos.handoff.listItems(batchId);
+    for (const mapping of mappings) {
+      const current = await this.repos.bookmarks.get(mapping.bookmarkId);
+      if (!current || current.deletedAt || current.privacy.localOnly || current.privacy.aiBlocked ||
+          current.localRevision !== mapping.baseLocalRevision || await computeInputHash(current) !== mapping.inputHash) {
+        throw new AppError('STALE_SUGGESTION', '有资料已修改、删除或禁止 AI，请重新生成材料。');
+      }
+    }
+    const [active, deleted, categories, tags] = await Promise.all([this.repos.bookmarks.listActive(),
+      this.repos.bookmarks.listDeleted(), this.repos.categories.list(), this.repos.tags.list()]);
+    const privateRows = [...active.filter((row) => row.privacy.localOnly || row.privacy.aiBlocked), ...deleted];
+    const blocked = new Set<string>(); const blockedTags = new Set(privateRows.flatMap((row) => row.tagIds));
+    for (const row of privateRows) { let id = row.categoryId; while (id && !blocked.has(id)) { blocked.add(id); id = categories.find((category) => category.id === id)?.parentId ?? null; } }
+    const material = JSON.parse(materialText) as { categories: { id: string; name: string }[]; tags: { id: string; name: string }[] };
+    if (material.categories.some((row) => blocked.has(row.id) || !categories.some((category) => category.id === row.id) || categoryPath(categories, row.id) !== row.name) ||
+        material.tags.some((row) => blockedTags.has(row.id) || !tags.some((tag) => tag.id === row.id && tag.name === row.name))) {
+      throw new AppError('STALE_SUGGESTION', '参考分类或标签已变化，或含受保护资料，请重新生成。');
+    }
   }
 
   /** 严格校验 AI 回复：字段白名单、编号、重复、隐私与指纹。 */

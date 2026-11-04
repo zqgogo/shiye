@@ -127,6 +127,7 @@ export function Sidebar() {
       <div className="navgroup nav-tools">
         <small>工具 · TOOLS</small>
         {item('ai', ICONS.ai, 'AI 助手')}
+        {item('cloud', '☁', 'Cloudflare 镜像')}
         {item('settings', ICONS.settings, '设置与管理')}
       </div>
 

@@ -1715,3 +1715,42 @@ describe('导入撤销与批量清空', () => {
     expect(snapshot.completedReading).toHaveLength(1);
   });
 });
+
+it('内置 AI 发送前复核隐私、版本和字典，备注摘录需主动选择', async () => {
+  const parent = await repos.categories.create('公开目录');
+  const hiddenCategory = await repos.categories.create('私密目录');
+  const shown = await repos.bookmarks.create({ originalUrl: 'https://example.com/sendable', title: '公开资料', note: '不默认发送的备注', selectedText: '不默认发送的摘录', categoryId: parent.id });
+  await repos.bookmarks.create({ originalUrl: 'https://example.com/private', title: '不能外发', categoryId: hiddenCategory.id, privacy: { localOnly: true } });
+  const ask = await service.buildAskPack({ question: '概括资料', bookmarkIds: [shown.id] });
+  expect(ask.text).not.toContain('不默认发送');
+  const explicit = await service.buildAskPack({ question: '概括资料', bookmarkIds: [shown.id], includeNote: true, includeText: true });
+  expect(explicit.text).toContain('不默认发送的备注');
+  expect(explicit.text).toContain('不默认发送的摘录');
+  const pack = await service.buildOrganizePack({ scope: 'all', selectedIds: [], includeDictionary: true });
+  expect(pack.materialText).toContain('公开目录'); expect(pack.materialText).not.toContain('私密目录');
+  await service.assertHandoffSendable(pack.batchId, pack.materialText);
+  await repos.bookmarks.update(shown.id, shown.localRevision, { privacy: { localOnly: false, aiBlocked: true } }, 'human');
+  await expect(service.assertHandoffSendable(pack.batchId, pack.materialText)).rejects.toThrow();
+});
+
+it('云镜像白名单只含共享记录和必要目录，不带本地专用、正文、任务或凭据', async () => {
+  const publicCategory = await repos.categories.create('公开目录'); const privateCategory = await repos.categories.create('私人目录');
+  const shared = await repos.bookmarks.create({ originalUrl: 'https://example.com/shared', title: '共享', categoryId: publicCategory.id, note: '保密备注', selectedText: '保密摘录', privacy: { aiBlocked: true } });
+  await repos.bookmarks.create({ originalUrl: 'https://example.com/hidden', title: '隐藏标题', categoryId: privateCategory.id, privacy: { localOnly: true } });
+  await service.addReading({ originalUrl: 'https://example.com/read', title: '待看' });
+  const records = await service.buildCloudMirror(); const serialized = JSON.stringify(records);
+  expect(records.filter((row) => row.kind === 'bookmark')).toHaveLength(1);
+  expect(records.some((row) => row.kind === 'reading')).toBe(true);
+  expect(serialized).not.toMatch(/保密备注|保密摘录|隐藏标题|私人目录|localRevision|aiBlocked|privacy|sources/);
+  await repos.bookmarks.update(shared.id, shared.localRevision, { privacy: { localOnly: true, aiBlocked: true } }, 'human');
+  expect((await service.buildCloudMirror()).some((row) => row.kind === 'bookmark')).toBe(false);
+});
+
+it('AI 请求状态跨页面保留最小记录，普通备份排除请求状态', async () => {
+  const row = await repos.bookmarks.create({ originalUrl: 'https://example.com/task', title: '任务' });
+  const id = await service.beginAiTask('ask', 'config-version-only', [row.id]);
+  expect((await service.recentAiTasks())[0]?.state).toBe('outcome_unknown');
+  await service.finishAiTask(id, 'completed');
+  expect((await service.recentAiTasks())[0]?.state).toBe('completed');
+  expect((await service.exportBackup(false)).text).not.toContain('config-version-only');
+});

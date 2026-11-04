@@ -47,15 +47,15 @@ export interface AiInputItem {
 }
 
 /** 只取白名单字段，绝不把隐私标记之外的内部字段发给模型。 */
-export function buildAiItem(bookmark: Bookmark, n: number): AiInputItem {
+export function buildAiItem(bookmark: Bookmark, n: number, fields: { includeNote?: boolean; includeText?: boolean } = {}): AiInputItem {
   return {
     n,
     bookmarkId: bookmark.id,
     title: bookmark.title,
     url: bookmark.canonicalUrl,
     sourceDescription: bookmark.sourceDescription,
-    note: bookmark.note,
-    selectedText: bookmark.selectedText,
+    note: fields.includeNote ? bookmark.note : '',
+    selectedText: fields.includeText ? bookmark.selectedText : '',
     categoryId: bookmark.categoryId,
     tagIds: [...bookmark.tagIds].sort(),
     lockedFields: [...bookmark.lockedFields].sort(),
@@ -153,4 +153,11 @@ export function buildAskMaterial(input: {
   };
   const text = JSON.stringify(payload, null, 2);
   return { text, chars: [...text].length };
+}
+
+/** Unknown model references are displayed as warnings, never made into source links. */
+export function unknownAskReferences(answer: string, sourceCount: number): number[] {
+  const found = new Set<number>();
+  for (const match of answer.matchAll(/\[(\d{1,6})\]/g)) { const n = Number(match[1]); if (n < 1 || n > sourceCount) found.add(n); }
+  return [...found].sort((a, b) => a - b);
 }

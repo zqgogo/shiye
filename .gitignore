@@ -21,3 +21,9 @@ Thumbs.db
 
 # 真实书签导出（含个人浏览记录，只作本地导入测试，不入库）
 resource/favorites_*.html
+
+# 用户自己的 Cloudflare 配置和本地 secret
+.dev.vars
+.dev.vars.*
+.wrangler/
+apps/worker/wrangler.local.jsonc

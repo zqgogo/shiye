@@ -1,3 +1,4 @@
+import { CloudPage } from './cloud.js';
 import { ImportWorkbench } from './import-workbench.js';
 import { FocusGuard, Sidebar, Topbar } from './components.js';
 import { ModalHost, DetailDrawer } from './dialogs.js';
@@ -31,6 +32,7 @@ function CurrentPage() {
   if (route === 'capture') return <CapturePage key="capture-paste" />;
   if (route === 'capture:file:manual') return <CapturePage key="capture-file-manual" initialMode="file" />;
   if (route === 'capture:file') return <ImportWorkbench />;
+  if (route === 'cloud') return <CloudPage />;
   if (route === 'settings') return <SettingsPage />;
   if (route === 'data') return <DataPage />;
   // 清空完成后的「去最近清理找回」：同一个页面，进来自动滚到「最近清理」。
@@ -62,14 +64,15 @@ function FooterHint() {
     'data:cleanup': '最近清理 · 按次找回',
     rules: '分类与整理策略',
     ai: 'AI 助手 · 手动交接可用',
-    aiconfig: 'AI 通道 · 导入直连与手动交接',
+    aiconfig: 'AI 通道 · 自配模型与手动交接',
+    cloud: 'Cloudflare · 私有只读镜像',
     organize: '整理 · 人工确认后应用',
     ask: '提问 · 选择不等于授权',
   };
   return (
     <div className="footerhint">
       <span>{mapping[route] ?? '拾页'}</span>
-      <span>v0.1.0 · 本地优先 · 数据存于扩展 origin</span>
+      <span>v0.2.0 预览 · 本地优先 · 数据存于扩展 origin</span>
     </div>
   );
 }

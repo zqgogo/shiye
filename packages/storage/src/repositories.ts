@@ -1917,6 +1917,11 @@ export function createRepositories(
   hooks?: PurgeHooks
 ): Repositories {
   return {
+    aiTasks: {
+      async put(task) { await db.aiTasks.put(task); },
+      async finish(id, state) { await db.aiTasks.update(id, { state, updatedAt: nowIso() }); },
+      async recent() { return db.aiTasks.orderBy('createdAt').reverse().limit(20).toArray(); },
+    },
     organization: new DexieOrganizationRepository(db),
     bookmarks: new DexieBookmarkRepository(db, hooks),
     reading: new DexieReadingRepository(db, hooks),

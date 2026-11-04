@@ -1,3 +1,4 @@
+import { AiConnectionProvider } from './ai-connection.js';
 import { StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { createWorkspaceService } from '@shiye/application';
@@ -25,7 +26,7 @@ export async function mountWorkspace(element: HTMLElement): Promise<void> {
     root.render(
       <StrictMode>
         <WorkspaceProvider service={service} initialData={initialData}>
-          <App />
+          <AiConnectionProvider><App /></AiConnectionProvider>
         </WorkspaceProvider>
       </StrictMode>
     );

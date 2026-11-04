@@ -429,3 +429,23 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .move-picker { font-size:11px; max-width:160px; }
 .move-picker select { max-width:155px; }
 @media(max-width:900px) { .import-layout { grid-template-columns:1fr; } .import-folders { border-right:0; border-bottom:1px solid #e4e6dc; padding:0 0 12px; } }
+
+.quick-tabs { display:flex; align-items:center; gap:8px; margin:10px 0; flex-wrap:wrap; }
+.popupframe .quick-tabs .btn { width:auto; margin:0; flex:1; }
+.quick-results { max-height:360px; overflow:auto; }
+.quick-link { display:block; width:100%; background:transparent; border:0; border-bottom:1px solid var(--line); text-align:left; padding:12px 4px; color:var(--ink); cursor:pointer; }
+.quick-link:hover { background:var(--soft); }
+.quick-link strong { display:block; font-size:14px; overflow-wrap:anywhere; }
+.quick-link strong span { float:right; }
+.quick-link small { display:block; margin-top:4px; color:var(--muted); overflow-wrap:anywhere; }
+
+.popupframe.quick-mode { height:590px; padding:14px 20px; display:flex; flex-direction:column; }
+.quick-mode .brand-mark { width:32px; height:32px; font-size:20px; }
+.quick-mode section { min-height:0; flex:1; display:flex; flex-direction:column; }
+.quick-mode h2 { display:none; }
+.quick-mode .field { margin:6px 0; gap:3px; }
+.quick-mode .field > span { font-size:10px; }
+.quick-mode .field input,.quick-mode .field select { padding:8px 10px; }
+.quick-mode .quick-results { min-height:70px; max-height:none; flex:1; }
+.quick-mode .quick-tabs { margin:7px 0; }
+.quick-mode .quick-link { padding:10px 4px; }

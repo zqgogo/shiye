@@ -1,3 +1,4 @@
+import { QuickAccess } from './QuickAccess.js';
 import { useEffect, useState } from 'react';
 import { isAppError, LIMITS, newId, toUserMessage, type Category } from '@shiye/core';
 import type { WorkspaceService } from '@shiye/application';
@@ -15,6 +16,8 @@ async function currentTab(): Promise<{ url: string; title: string; tabId: number
 }
 
 export function Popup({ service }: { service: WorkspaceService }) {
+  const [tab, setTab] = useState<'capture' | 'quick'>(() => { try { return localStorage.getItem('shiye:popup-tab') === 'quick' ? 'quick' : 'capture'; } catch { return 'capture'; } });
+  const switchTab = (next: 'capture' | 'quick') => { setTab(next); try { localStorage.setItem('shiye:popup-tab', next); } catch { /* Private mode may block preferences. */ } };
   const [url, setUrl] = useState('');
   const [title, setTitle] = useState('');
   const [categoryId, setCategoryId] = useState<string | null>(null);
@@ -159,8 +162,8 @@ export function Popup({ service }: { service: WorkspaceService }) {
   );
 
   return (
-    <div className="popupframe">
-      <div className="brand" style={{ marginBottom: 18 }}>
+    <div className={`popupframe ${tab === 'quick' ? 'quick-mode' : ''}`}>
+      <div className="brand" style={{ marginBottom: tab === 'quick' ? 6 : 18 }}>
         <div className="brand-mark">拾</div>
         <div>
           <b>拾页</b>
@@ -168,6 +171,9 @@ export function Popup({ service }: { service: WorkspaceService }) {
         </div>
       </div>
 
+      <div className="quick-tabs" aria-label="插件页面"><button className={`btn ${tab === 'capture' ? 'primary' : ''}`} aria-pressed={tab === 'capture'} onClick={() => switchTab('capture')}>收藏当前页</button><button className={`btn ${tab === 'quick' ? 'primary' : ''}`} aria-pressed={tab === 'quick'} onClick={() => switchTab('quick')}>快速访问</button></div>
+      {tab === 'quick' && <><QuickAccess service={service} /><button className="btn" onClick={() => openWorkspace()}>打开工作台 ↗</button></>}
+      <div hidden={tab !== 'capture'}>
       {saved ? (
         <>
           <h2>已保存到{ saved.kind === 'reading' ? '待看' : '收件箱' }</h2>
@@ -250,6 +256,7 @@ export function Popup({ service }: { service: WorkspaceService }) {
           </p>
         </>
       )}
+      </div>
     </div>
   );
 }

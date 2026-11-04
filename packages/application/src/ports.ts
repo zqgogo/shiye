@@ -459,7 +459,14 @@ export interface SelectionRepository {
   run(token: BulkToken): Promise<BulkResult>;
 }
 
+export interface AiTaskRepository {
+  put(task: import('@shiye/core').AiTask): Promise<void>;
+  finish(id: string, state: import('@shiye/core').AiTaskState): Promise<void>;
+  recent(): Promise<import('@shiye/core').AiTask[]>;
+}
+
 export interface Repositories {
+  aiTasks: AiTaskRepository;
   organization: OrganizationRepository;
   bookmarks: BookmarkRepository;
   reading: ReadingRepository;
