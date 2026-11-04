@@ -38,6 +38,24 @@ async function makePrivate(id) { await page.evaluate(async (itemId) => {
 }, id); }
 async function connect() { await setReactInput(page, 'input[type=password]', harness.publisher); await click('测试连接（不上传）'); await waitText('连接通过'); }
 try {
+  // Keep the browser's native fetch here: a JS replacement hides receiver errors.
+  const nativePage = await browser.newPage();
+  await nativePage.evaluateOnNewDocument(() => { chrome.permissions.request = async () => true; chrome.permissions.contains = async () => true; });
+  await nativePage.setRequestInterception(true);
+  nativePage.on('request', async (request) => {
+    if (new URL(request.url()).origin !== 'https://mirror.test') { await request.continue(); return; }
+    if (request.method() === 'OPTIONS') { await request.respond({ status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization,content-type', 'Access-Control-Allow-Methods': 'GET,POST,DELETE' } }); return; }
+    const result = await harness.request(request.url(), { method: request.method(), headers: request.headers(), body: request.postData() });
+    await request.respond({ status: result.status, headers: { ...result.headers, 'Access-Control-Allow-Origin': '*' }, body: result.body });
+  });
+  await nativePage.goto(`chrome-extension://${attempt.extId}/workspace.html#cloud`);
+  await nativePage.waitForSelector('input[type=password]');
+  await setReactInput(nativePage, 'input[placeholder="https://shiye.example.com"]', 'https://mirror.test');
+  await setReactInput(nativePage, 'input[type=password]', harness.publisher);
+  await nativePage.evaluate(() => [...document.querySelectorAll('button')].find((node) => node.textContent.trim() === '测试连接（不上传）').click());
+  await nativePage.waitForFunction(() => [...document.querySelectorAll('[role=status]')].some((node) => node.textContent.trim()), { timeout: 10000 });
+  check('浏览器原生 fetch 可正常握手，不发生 Illegal invocation', await nativePage.evaluate(() => document.body.innerText.includes('连接通过')));
+  await nativePage.close();
   await page.goto(`chrome-extension://${attempt.extId}/workspace.html#cloud`); await waitText('测试连接（不上传）');
   await page.evaluate(async () => {
     const db = await new Promise((resolve) => { const req = indexedDB.open('shiye'); req.onsuccess = () => resolve(req.result); });

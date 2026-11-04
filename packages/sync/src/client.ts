@@ -10,7 +10,7 @@ export function mirrorBase(address: string): URL {
   url.pathname = url.pathname.replace(/\/+$/, '') + '/'; return url;
 }
 export class MirrorClient {
-  constructor(private readonly base: string, private readonly token: string, private readonly fetcher: typeof fetch = fetch) {}
+  constructor(private readonly base: string, private readonly token: string, private readonly fetcher: typeof fetch = globalThis.fetch.bind(globalThis)) {}
   private async request(path: string, signal: AbortSignal, body?: unknown, method?: string): Promise<unknown> {
     const response = await this.fetcher(new URL(path, mirrorBase(this.base)).href, {
       method: method ?? (body === undefined ? 'GET' : 'POST'), redirect: 'error', credentials: 'omit', referrerPolicy: 'no-referrer', signal,
