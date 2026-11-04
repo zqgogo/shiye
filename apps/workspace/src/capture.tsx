@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   LIMITS,
   computeStats,
+  paginate,
   foldersOf,
   newId,
   toUserMessage,
@@ -11,7 +12,7 @@ import {
   type ImportUndoItem,
 } from '@shiye/core';
 import type { ImportUndoPreview } from '@shiye/application';
-import { KeptList, PageHeader, Notice } from './components.js';
+import { KeptList, PageHeader, Notice, Pager } from './components.js';
 import { useWorkspace } from './state.js';
 
 let pendingPaste = '';
@@ -38,7 +39,7 @@ interface PreviewState {
 }
 
 export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' | 'file' }) {
-  const { service, data, navigate, run, toast } = useWorkspace();
+  const { service, data, navigate, run, toast, setPageSize } = useWorkspace();
   const [mode, setMode] = useState<'paste' | 'file'>(initialMode);
   const [text, setText] = useState(() => takePendingPaste());
   const [fileName, setFileName] = useState('');
@@ -51,6 +52,8 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [view, setView] = useState<'all' | 'new' | 'duplicate' | 'invalid'>('all');
   const [mapping, setMapping] = useState<Record<string, string>>({});
+  const [rowPage, setRowPage] = useState(1);
+  const [folderPage, setFolderPage] = useState(1);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ inserted: number; skipped: number; skippedReasons: { line: number; reason: string }[]; destination: ImportDestination; batchId: string } | null>(null);
@@ -151,7 +154,7 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
     setError('');
     if (!file) return;
     if (file.size > LIMITS.importFileBytes) {
-      setError('文件超过 3 MB，请拆分后导入。');
+      setError('文件超过 30 MB，请拆分后导入。');
       return;
     }
     setFileName(file.name);
@@ -260,6 +263,9 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
 
   const visibleRows = (preview?.rows ?? []).filter((row) => (view === 'all' ? true : row.status === view));
   const folders = preview && preview.destination === 'library' ? foldersOf(preview.rows) : [];
+  const rowView = paginate(visibleRows, rowPage, data.settings.pageSize);
+  const folderView = paginate(folders, folderPage, data.settings.pageSize);
+  useEffect(() => { setRowPage(1); setFolderPage(1); }, [view, preview?.batchId]);
 
   return (
     <>
@@ -423,7 +429,7 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
                 onChange={(event) => void onFile(event.target.files?.[0])}
               />
               <small>
-                仅在当前页面本地解析；上限 3 MB、每批 {LIMITS.importRows} 条，不执行文件脚本、不加载图片或样式。
+                仅在当前页面本地解析；上限 30 MB、每批 {LIMITS.importRows} 条，不执行文件脚本、不加载图片或样式。
               </small>
             </label>
             {fileName ? <p className="micro">已选择：{fileName}</p> : null}
@@ -513,7 +519,7 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
                       </tr>
                     </thead>
                     <tbody>
-                      {folders.map((folder) => (
+                      {folderView.rows.map((folder) => (
                         <tr key={folder.folder || 'none'}>
                           <td>{folder.folder || '无目录 / 粘贴链接'}</td>
                           <td>{folder.count}</td>
@@ -536,6 +542,7 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
                     </tbody>
                   </table>
                 </div>
+                <Pager {...folderView} onPage={setFolderPage} onPageSize={setPageSize} />
               </>
             ) : null
           ) : null}
@@ -579,7 +586,7 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
                     <td colSpan={4}>当前筛选没有条目。</td>
                   </tr>
                 ) : (
-                  visibleRows.map((row) => (
+                  rowView.rows.map((row) => (
                     <tr key={row.sourceKey}>
                       <td>
                         <input
@@ -624,6 +631,7 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
             </table>
           </div>
 
+          <Pager {...rowView} onPage={setRowPage} onPageSize={setPageSize} />
           <div className="batchbar">
             <span>
               将写入 {stats.selected} 条到{destination === 'reading' ? '待看' : '收藏库'} · 未勾选与无效行不会入库

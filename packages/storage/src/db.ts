@@ -115,7 +115,7 @@ export class ShiyeDB extends Dexie {
     });
 
     // 版本 4 只给批次补撤回相关字段，表结构不变；老批次补成「未撤回」。
-    this.version(SCHEMA_VERSION).stores({
+    this.version(4).stores({
       bookmarks:
         '&id, canonicalUrl, categoryKey, lifeState, [lifeState+unreadFlag], createdAt, lastOpenedAt, localRevision, *tagIds',
       readingItems: '&id, canonicalUrl, status, [status+addedAt], relatedBookmarkId, localRevision',
@@ -134,7 +134,16 @@ export class ShiyeDB extends Dexie {
       meta: '&key',
     });
 
-    this.version(SCHEMA_VERSION).upgrade((tx) => migrateV3ToV4(tx));
+    this.version(4).upgrade((tx) => migrateV3ToV4(tx));
+    this.version(5).stores({ categories: '&id, name, parentId' }).upgrade(async (tx) => {
+      let categoryOrder = 0;
+      let bookmarkOrder = 0;
+      await tx.table('categories').toCollection().modify((row: Record<string, unknown>) => {
+        row['parentId'] ??= null;
+        row['sortOrder'] ??= (categoryOrder += 1024);
+      });
+      await tx.table('bookmarks').toCollection().modify((row: Record<string, unknown>) => { row['sortOrder'] ??= (bookmarkOrder += 1024); });
+    });
   }
 }
 

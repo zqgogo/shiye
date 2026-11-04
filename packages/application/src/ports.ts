@@ -1,3 +1,4 @@
+import type { ImportArrangement, OrganizationRepository } from '@shiye/core';
 import type {
   AISuggestionPatch,
   AppSettings,
@@ -199,6 +200,9 @@ export interface CommitImportParams {
   fileHash: string | null;
   destination: ImportDestination;
   rows: ImportRow[];
+  arrangement?: ImportArrangement;
+  draftRevision?: number;
+  draftId?: string;
 }
 
 export interface CommitImportResult {
@@ -456,6 +460,7 @@ export interface SelectionRepository {
 }
 
 export interface Repositories {
+  organization: OrganizationRepository;
   bookmarks: BookmarkRepository;
   reading: ReadingRepository;
   categories: CategoryRepository;

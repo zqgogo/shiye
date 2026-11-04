@@ -24,6 +24,7 @@ const READ_TABLES = (db: ShiyeDB) => [
   db.importItems,
   db.bookmarks,
   db.readingItems,
+  db.categories,
 ];
 
 function emptyCounts(): Record<BatchEntryState, number> {
@@ -69,13 +70,18 @@ async function readBatchEntries(db: ShiyeDB, batch: ImportBatch): Promise<BatchE
   for (const mapping of mappings) {
     if (batch.destination === 'library') {
       const row = await db.bookmarks.get(mapping.entityId);
+      let changedCategory = false;
+      for (const baseline of mapping.categoryTrail ?? []) {
+        const category = await db.categories.get(baseline.id);
+        if (!category || category.revision !== baseline.revision) { changedCategory = true; break; }
+      }
       rows.push({
         entityId: mapping.entityId,
         title: row?.title ?? '',
         originalUrl: row?.originalUrl ?? '',
         site: row ? hostOf(row.canonicalUrl) : '',
         folder: row ? folderOf(row, batch.id) : '',
-        state: bookmarkState(row),
+        state: row && !row.deletedAt && changedCategory ? 'modified' : bookmarkState(row),
         localRevision: row?.localRevision ?? 0,
       });
       continue;

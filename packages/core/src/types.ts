@@ -20,6 +20,7 @@ export interface SourceInfo {
   capturedAt: ISODateTime;
   importBatchId?: Id;
   originalFolder?: string;
+  originalFolderSegments?: string[];
 }
 
 export type LifeState = 'active' | 'deleted';
@@ -45,6 +46,7 @@ export interface Bookmark {
   note: string;
   selectedText: string;
   categoryId: Id | null;
+  sortOrder?: number;
   tagIds: Id[];
   inboxUnread: boolean;
   pinned: boolean;
@@ -85,6 +87,9 @@ export interface ReadingItem {
 
 export interface Category {
   id: Id;
+  parentId?: Id | null;
+  sortOrder?: number;
+  createdByImportId?: Id;
   name: string;
   description: string;
   revision: number;
@@ -197,6 +202,7 @@ export interface ImportBatch {
 }
 
 export interface ImportItem {
+  categoryTrail?: { id: string; revision: number }[];
   batchId: Id;
   sourceKey: string;
   entityId: Id;
@@ -453,6 +459,7 @@ export interface ImportRow {
   canonicalUrl: string | null;
   title: string;
   sourceFolder: string;
+  sourceFolderSegments?: string[] | undefined;
   targetCategoryId: Id | null;
   status: ImportRowStatus;
   reason: string;
@@ -503,6 +510,7 @@ export interface PurgeRestoreCounts {
  * 只存本机、不上传、不随备份导出；恢复只认这里的条目，绝不覆盖当前数据。
  */
 export interface PurgeSnapshot {
+  categoryDependencies?: Category[];
   id: string;
   createdAt: string;
   entry: PurgeEntry;
@@ -605,6 +613,7 @@ export interface ParsedImportEntry {
   originalUrl: string;
   title: string;
   sourceFolder: string;
+  sourceFolderSegments?: string[] | undefined;
 }
 
 export interface ImportParseResult {

@@ -46,6 +46,7 @@ export function planImport(entries: ParsedImportEntry[], ctx: ImportPlanContext)
       canonicalUrl: checked ? checked.canonicalUrl : null,
       title: entry.title.trim() || (checked ? fallbackTitle(checked.originalUrl) : ''),
       sourceFolder: entry.sourceFolder,
+      ...(entry.sourceFolderSegments ? { sourceFolderSegments: entry.sourceFolderSegments } : {}),
       targetCategoryId: ctx.folderMapping?.get(entry.sourceFolder) ?? null,
       status: 'new',
       reason: '可保存',

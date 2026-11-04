@@ -1,3 +1,4 @@
+import { categoryPath } from '@shiye/core';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   LIMITS,
@@ -28,6 +29,7 @@ function BookmarkList({
   selected,
   onSelect,
   summary,
+  manualSort,
 }: {
   items: Bookmark[];
   mode?: 'trash' | 'inbox' | 'normal' | undefined;
@@ -37,6 +39,7 @@ function BookmarkList({
   selected?: Set<string>;
   onSelect?: (id: string, checked: boolean) => void;
   /** 列表头右侧的统计文案：分页后要写清「第几页、本页第几条到第几条」。 */
+  manualSort?: boolean | undefined;
   summary?: string | undefined;
 }) {
   const { data } = useWorkspace();
@@ -62,6 +65,8 @@ function BookmarkList({
           mode={mode}
           selectable={selectable}
           selected={selected?.has(bookmark.id)}
+          dragIds={selected?.has(bookmark.id) ? [...selected] : [bookmark.id]}
+          manualSort={manualSort}
           onSelect={(checked) => onSelect?.(bookmark.id, checked)}
         />
       ))}
@@ -213,7 +218,7 @@ const LIST_TITLES: Record<string, [string, string]> = {
 
 export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES | 'category'; categoryId?: string }) {
   const { data, navigate, openModal, run, service, toast, setPageSize: applyPageSize } = useWorkspace();
-  const [sort, setSort] = useState<'recent' | 'title'>('recent');
+  const [sort, setSort] = useState<'recent' | 'title' | 'manual'>('recent');
   const [trash, setTrash] = useState<Bookmark[] | null>(null);
   const [confirmPurge, setConfirmPurge] = useState(false);
   const [purgeCounts, setPurgeCounts] = useState<PurgeCounts | null>(null);
@@ -267,6 +272,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
     if (mode === 'inbox') {
       return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     }
+    if (sort === 'manual') return rows.sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.id.localeCompare(b.id));
     return sort === 'title'
       ? rows.sort((a, b) => a.title.localeCompare(b.title, 'zh-CN'))
       : rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -299,7 +305,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
 
   const [title, description] =
     mode === 'category'
-      ? [category?.name ?? '分类', category?.description || '这个分类下的收藏。']
+      ? [categoryPath(data.categories, categoryId ?? null), category?.description || '当前分类的直属收藏；子分类可在左侧展开。']
       : LIST_TITLES[mode] ?? ['收藏', '当前列表'];
 
   /**
@@ -416,7 +422,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
         ? {
             label: `「${category?.name ?? '这个分类'}」下的收藏`,
             count: items.length,
-            note: '分类本身保留，只清空它下面的收藏。',
+            note: '仅清空当前分类的直属收藏，分类及子分类保留。',
             action: () => service.purgeCategoryBookmarks(categoryId),
             done: '这个分类已清空。',
           }
@@ -558,6 +564,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
         </Notice>
       ) : null}
 
+      {mode === 'category' && data.categories.some((row) => row.parentId === categoryId) && <div className="notice"><strong>子分类</strong><div className="actions">{data.categories.filter((row) => row.parentId === categoryId).map((row) => <button className="btn small" key={row.id} onClick={() => navigate(`cat:${row.id}`)}>{row.name}</button>)}</div><span>下方显示当前分类的直属收藏。</span></div>}
       <div className="toolbar" ref={listTopRef}>
         <span className="micro">共 {items.length} 条</span>
         <span className="spacer" />
@@ -599,6 +606,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
           <select aria-label="排序" value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}>
             <option value="recent">最近新增</option>
             <option value="title">标题排序</option>
+            {(mode === 'category' || mode === 'uncategorized') && <option value="manual">手动排序（拖动记录）</option>}
           </select>
         ) : null}
       </div>
@@ -732,6 +740,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
         mode={mode === 'inbox' ? 'inbox' : mode === 'trash' ? 'trash' : 'normal'}
         selectable={selectMode}
         selected={selectedSet}
+        manualSort={sort === 'manual'}
         onSelect={toggleSelected}
         empty={
           mode === 'trash'
@@ -818,7 +827,7 @@ export function SearchPage() {
           <option value="">全库</option>
           {data.categories.map((category) => (
             <option key={category.id} value={category.id}>
-              {category.name}
+              {categoryPath(data.categories, category.id)}
             </option>
           ))}
         </select>
@@ -1512,7 +1521,7 @@ export function RulesPage() {
           <div className="rule-row" key={category.id}>
             <span className="category-dot" />
             <strong>
-              {category.name}
+              {categoryPath(data.categories, category.id)}
               <small>{category.description || '暂无说明'}</small>
             </strong>
             <small>{data.bookmarks.filter((bookmark) => bookmark.categoryId === category.id).length} 条</small>

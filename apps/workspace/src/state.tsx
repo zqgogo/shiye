@@ -17,7 +17,7 @@ export type ModalState =
   | { kind: 'new-bookmark'; url?: string }
   | { kind: 'categories' }
   | { kind: 'add-reading' }
-  | { kind: 'convert-reading'; readingId: string }
+  | { kind: 'convert-reading'; readingId: string; categoryId?: string | null }
   | { kind: 'delete-bookmark'; bookmarkId: string }
   | { kind: 'category-editor'; categoryId?: string }
   /** 按条件清理：范围由入口带入（分类页 / 未分类 / 待看页），弹窗里也可以改。 */

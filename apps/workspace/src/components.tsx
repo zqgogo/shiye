@@ -1,3 +1,5 @@
+import { categoryFingerprint } from '@shiye/core';
+import { MovePicker, OrganizationTree, ORGANIZATION_DRAG, announceOrganization } from './organization-controls.js';
 import { useEffect, useState } from 'react';
 import type { BatchEntryState, Bookmark, Category, ImportUndoItem, ImportUndoReason } from '@shiye/core';
 import { PAGE_SIZE_OPTIONS, domainOf, formatDateTime, isHttpUrl } from '@shiye/core';
@@ -94,12 +96,14 @@ export function Sidebar() {
         {item('inbox', ICONS.inbox, '收件箱', inboxCount)}
         {item('uncategorized', ICONS.uncategorized, '未分类', uncategorized)}
         {item('all', ICONS.all, '全部收藏', active.length)}
+        {item('capture:file', ICONS.all, '导入与待整理')}
         {/* 删完东西第一反应是找回收站，所以把它从「设置与管理」里提到日常组。 */}
         {item('trash', ICONS.trash, '回收站', data.trashedCount)}
       </div>
 
       <div className="navgroup" style={{ marginTop: 24 }}>
         <small>我的分类 · COLLECTIONS</small>
+        <OrganizationTree />
         {pinned.map((category) => (
           <button
             key={category.id}
@@ -210,6 +214,8 @@ export function BookmarkRow({
   tags,
   selected,
   selectable,
+  dragIds,
+  manualSort,
   mode,
   onSelect,
 }: {
@@ -217,11 +223,13 @@ export function BookmarkRow({
   category: Category | undefined;
   tags: { id: string; name: string }[];
   selected?: boolean | undefined;
+  dragIds?: string[] | undefined;
+  manualSort?: boolean | undefined;
   selectable?: boolean | undefined;
   mode?: 'trash' | 'inbox' | 'normal' | undefined;
   onSelect?: ((checked: boolean) => void) | undefined;
 }) {
-  const { openBookmark, openModal, run, service, toast } = useWorkspace();
+  const { data, openBookmark, openModal, run, service, toast } = useWorkspace();
   const deleted = Boolean(bookmark.deletedAt);
 
   const addToReading = async () => {
@@ -244,7 +252,28 @@ export function BookmarkRow({
   };
 
   return (
-    <article className="bookmark">
+    <article className="bookmark"
+      onDragStart={(event) => {
+        if (!(event.target as Element).closest('.drag-handle')) return;
+        const ids = dragIds ?? [bookmark.id];
+        const items = ids.flatMap((id) => { const row = data.bookmarks.find((entry) => entry.id === id); return row ? [{ kind: 'bookmark', id, revision: row.localRevision }] : []; });
+        event.dataTransfer.setData(ORGANIZATION_DRAG, JSON.stringify(items));
+        event.dataTransfer.setData('text/plain', `移动 ${items.length} 条收藏`);
+      }}
+      onDragOver={(event) => { if (manualSort) event.preventDefault(); }}
+      onDrop={async (event) => {
+        if (!manualSort) return;
+        const raw = event.dataTransfer.getData(ORGANIZATION_DRAG);
+        if (!raw) return;
+        event.preventDefault();
+        try {
+          const items = JSON.parse(raw) as import('@shiye/core').OrganizationTarget[];
+          if (items.some((row) => row.id === bookmark.id || row.kind !== 'bookmark')) return;
+          const parent = data.categories.find((row) => row.id === bookmark.categoryId);
+          const result = await run(() => service.moveOrganization({ items, categoryFingerprint: categoryFingerprint(data.categories), parentId: bookmark.categoryId, beforeId: bookmark.id, ...(parent ? { parentRevision: parent.revision } : {}) }));
+          if (result) announceOrganization(result.operationId);
+        } catch { toast('无法完成排序，请重试。', 'error'); }
+      }}>
       {selectable ? (
         <input
           type="checkbox"
@@ -253,6 +282,8 @@ export function BookmarkRow({
           onChange={(event) => onSelect?.(event.target.checked)}
         />
       ) : null}
+      {!deleted && <button className="iconbtn drag-handle" draggable aria-label={`拖动 ${bookmark.title}`} title="拖动到分类，或在手动排序时拖到记录前面">⋮⋮</button>}
+      {!deleted && <MovePicker items={[{ kind: 'bookmark', id: bookmark.id, revision: bookmark.localRevision }]} />}
       <div className="favicon" aria-hidden="true">
         {[...bookmark.title][0] ?? '书'}
       </div>
@@ -504,7 +535,11 @@ export function ReadingRow({
   onSelect?: ((checked: boolean) => void) | undefined;
 }) {
   return (
-    <article className="bookmark">
+    <article className="bookmark" onDragStart={(event) => {
+      if (!(event.target as Element).closest('.drag-handle')) return;
+      event.dataTransfer.setData('application/x-shiye-reading', item.id);
+    }}>
+      {item.status === 'pending' && <button className="iconbtn drag-handle" draggable aria-label={`拖动待看 ${item.title}`} title="拖到分类后确认转入收藏">⋮⋮</button>}
       {selectable ? (
         <input
           type="checkbox"

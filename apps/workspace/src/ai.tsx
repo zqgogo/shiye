@@ -1,3 +1,4 @@
+import { categoryPath } from '@shiye/core';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   LIMITS,
@@ -41,7 +42,7 @@ export function AiPage() {
       <div className="hubgrid">
         {card('✧', '整理收藏', '导出整理包、校验回复并预览应用', 'organize')}
         {card('⌕', '查找与提问', '检索收藏，生成提问包手动交接', 'ask')}
-        {card('⚙', 'AI 通道设置', '内置 AI 尚未接入（P7 阶段）', 'aiconfig')}
+        {card('⚙', 'AI 通道设置', '导入专用直连与手动交接', 'aiconfig')}
       </div>
       <div className="panel" style={{ marginTop: 16 }}>
         <h2>两条通道的边界</h2>
@@ -68,6 +69,7 @@ export function AiConfigPage() {
           </button>
         }
       />
+      <Notice><strong>书签导入 AI</strong><span>可在导入页使用 DeepSeek 或自配兼容服务，先检查发送材料，再预览整理建议。密钥仅在该页面内存保存。</span><button className="btn" onClick={() => navigate('capture:file')}>去导入整理</button></Notice>
       <div className="panel">
         <h2>
           手动交接 <span className="tag">默认可用</span>
@@ -82,8 +84,7 @@ export function AiConfigPage() {
           内置 AI <span className="tag">未启用</span>
         </h2>
         <p>
-          按技术说明 P7，内置通道需要供应商端点、模型、凭据、主机权限与真实测试。当前版本尚未实现适配器，
-          因此这里不接收密钥，也不会显示“测试通过”。
+          按技术说明 P7，内置通道需要供应商端点、模型、凭据、主机权限与真实测试。通用整理与问答直连仍待完整接入。导入专用 AI 已可在书签导入页配置和使用。
         </p>
         <div className="notice">
           密钥不会进入备份、日志、材料包或 content script；未来接入时也只在可信扩展上下文使用。
@@ -620,7 +621,7 @@ function MaterialPicker({
             <option value="selected">仅已选（{selected.size}）</option>
             {categories.map((entry) => (
               <option key={entry.id} value={entry.id}>
-                {entry.name}
+                {categoryPath(data.categories, entry.id)}
               </option>
             ))}
           </select>

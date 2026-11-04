@@ -15,10 +15,11 @@ export const LIMITS = {
   categoryName: 60,
   categoryDescription: 200,
   tagName: 40,
-  importFileBytes: 3 * 1024 * 1024,
-  importRows: 1000,
+  importFileBytes: 30 * 1024 * 1024,
+  importDraftBytes: 100 * 1024 * 1024,
+  importRows: 10_000,
   importDepth: 32,
-  importNodes: 20000,
+  importNodes: 200_000,
   importWarningChars: 4000,
   aiReplyChars: 300_000,
   aiItemsPerPart: 20,
@@ -26,8 +27,8 @@ export const LIMITS = {
   /** 清理快照：保留最近几份（按时间淘汰最旧）。 */
   purgeSnapshotsKept: 5,
   /** 单份快照上限：条数或字节数先到者为准，超限拒绝清理。 */
-  purgeSnapshotMaxItems: 5000,
-  purgeSnapshotMaxBytes: 5 * 1024 * 1024,
+  purgeSnapshotMaxItems: 10_000,
+  purgeSnapshotMaxBytes: 20 * 1024 * 1024,
   /** 全部快照合计上限，超限提示先清理旧快照。 */
   purgeSnapshotsTotalBytes: 50 * 1024 * 1024,
   aiPurposeSuggestion: 2000,
@@ -38,5 +39,5 @@ export const TRASH_RETENTION_DAYS = 30;
 
 export const DELETED_CATEGORY_KEY = 'uncategorized';
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 export const AI_PROTOCOL_VERSION = 2;

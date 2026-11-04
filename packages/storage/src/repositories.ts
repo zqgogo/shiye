@@ -1,3 +1,5 @@
+import { DexieOrganizationRepository, resolveImportCategory, assertCategoryTree, collectCategoryDependencies } from './organization.js';
+import { ImportDraftSchema, categoryFingerprint } from '@shiye/core';
 import Dexie from 'dexie';
 import {
   AppError,
@@ -240,6 +242,8 @@ export class DexieBookmarkRepository implements BookmarkRepository {
         });
       }
       await this.assertReferences(bookmark.categoryId, bookmark.tagIds);
+      const siblings = await this.db.bookmarks.where('categoryKey').equals(bookmark.categoryKey).toArray();
+      bookmark.sortOrder = Math.max(0, ...siblings.map((row) => row.sortOrder ?? 0)) + 1024;
       await this.db.bookmarks.add(bookmark);
       return bookmark;
     });
@@ -1126,11 +1130,13 @@ export class DexieCategoryRepository implements CategoryRepository {
     const cleanName = requireText(name, '分类名称', LIMITS.categoryName);
     const cleanDesc = optionalText(description, '分类说明', LIMITS.categoryDescription);
     return this.db.transaction('rw', this.db.categories, async () => {
-      const sameName = await this.db.categories.where('name').equals(cleanName).first();
+      const sameName = (await this.db.categories.where('name').equals(cleanName).toArray()).find((row) => !row.parentId);
       if (sameName) throw new AppError('DUPLICATE', '已经有同名分类。');
       const now = nowIso();
       const category: Category = {
         id: newId(),
+        parentId: null,
+        sortOrder: Math.max(0, ...(await this.db.categories.toArray()).map((row) => row.sortOrder ?? 0)) + 1024,
         name: cleanName,
         description: cleanDesc,
         revision: 1,
@@ -1153,7 +1159,7 @@ export class DexieCategoryRepository implements CategoryRepository {
           ? current.description
           : optionalText(patch.description, '分类说明', LIMITS.categoryDescription);
       if (name !== current.name) {
-        const sameName = await this.db.categories.where('name').equals(name).first();
+        const sameName = (await this.db.categories.where('name').equals(name).toArray()).find((row) => row.id !== id && (row.parentId ?? null) === (current.parentId ?? null));
         if (sameName) throw new AppError('DUPLICATE', '已经有同名分类。');
       }
       const next: Category = {
@@ -1193,7 +1199,12 @@ export class DexieCategoryRepository implements CategoryRepository {
           Object.assign(next, deriveIndexFields(next));
           await this.db.bookmarks.put(next);
         }
+        const children = (await this.db.categories.toArray()).filter((row) => row.parentId === id);
+        for (const child of children) {
+          await this.db.categories.put({ ...child, parentId: current.parentId ?? null, revision: child.revision + 1, updatedAt: nowIso() });
+        }
         await this.db.categories.delete(id);
+        assertCategoryTree(await this.db.categories.toArray());
         const settingsRow = await this.db.settings.get('app');
         if (settingsRow) {
           const value = settingsRow.value as { pinnedCategoryIds?: string[] };
@@ -1378,7 +1389,12 @@ export class DexieImportRepository implements ImportRepository {
           judgements.push({ action: 'keep', item: toUndoItem(row, 'trashed') });
           continue;
         }
-        if (row.localRevision > 1) {
+        let changedCategory = false;
+        for (const baseline of item.categoryTrail ?? []) {
+          const category = await this.db.categories.get(baseline.id);
+          if (!category || category.revision !== baseline.revision) { changedCategory = true; break; }
+        }
+        if (row.localRevision > 1 || changedCategory) {
           judgements.push({ action: 'keep', item: toUndoItem(row, 'modified') });
           continue;
         }
@@ -1412,7 +1428,7 @@ export class DexieImportRepository implements ImportRepository {
     // 否则读到一半另一页改了记录，预览里的「删几条」本身就是拼出来的。
     return this.db.transaction(
       'r',
-      [this.db.importBatches, this.db.importItems, this.db.bookmarks, this.db.readingItems],
+      [this.db.importBatches, this.db.importItems, this.db.bookmarks, this.db.readingItems, this.db.categories],
       async () => {
         const batch = await this.db.importBatches.get(batchId);
         if (!batch) throw new AppError('NOT_FOUND', '找不到这次导入的记录。');
@@ -1460,6 +1476,7 @@ export class DexieImportRepository implements ImportRepository {
         this.db.settings,
         this.db.purgeSnapshots,
         this.db.meta,
+        this.db.categories,
       ],
       async () => {
         const batch = await this.db.importBatches.get(batchId);
@@ -1500,6 +1517,7 @@ export class DexieImportRepository implements ImportRepository {
               bookmarks: removeBookmarks,
               readingItems: removeReadings,
               tombstones: batchTombstones,
+              categoryDependencies: collectCategoryDependencies(await this.db.categories.toArray(), removeBookmarks.map((row) => row.categoryId)),
             },
             this.hooks
           );
@@ -1515,6 +1533,19 @@ export class DexieImportRepository implements ImportRepository {
         await this.db.importItems.bulkDelete(
           items.map((item) => [item.batchId, item.sourceKey] as [string, string])
         );
+        // Only unused, untouched categories created by this import can be removed.
+        let removedCategory = true;
+        while (removedCategory) {
+          removedCategory = false;
+          const categories = await this.db.categories.toArray();
+          for (const category of categories) {
+            if (category.createdByImportId !== batchId || category.revision !== 1) continue;
+            if (categories.some((child) => child.parentId === category.id)) continue;
+            if (await this.db.bookmarks.where('categoryKey').equals(category.id).count()) continue;
+            await this.db.categories.delete(category.id);
+            removedCategory = true;
+          }
+        }
         // importItems 马上就要被清空，撤回结果从此只能靠批次上的这几个字段回看。
         const removed = removeBookmarks.length + removeReadings.length;
         const kept = keptItems.filter((entry) => entry.reason !== 'missing').length;
@@ -1542,8 +1573,24 @@ export class DexieImportRepository implements ImportRepository {
         this.db.importItems,
         this.db.tombstones,
         this.db.categories,
+        this.db.meta,
       ],
       async () => {
+        if (params.draftRevision !== undefined) {
+          const saved = await this.db.meta.get(`import-draft:${params.draftId ?? params.batchId}`);
+          if (!saved || ImportDraftSchema.parse(saved.value).revision !== params.draftRevision) {
+            throw new AppError('REVISION_CONFLICT', '暂存已被修改，请重新打开后加入。');
+          }
+        }
+        if (params.arrangement?.categoryFingerprint && params.arrangement.categoryFingerprint !== categoryFingerprint(await this.db.categories.toArray())) {
+          throw new AppError('REVISION_CONFLICT', '分类结构已变化，请重新预览导入位置。');
+        }
+        if (params.arrangement?.parentId) {
+          const parent = await this.db.categories.get(params.arrangement.parentId);
+          if (!parent || parent.revision !== params.arrangement.parentRevision) {
+            throw new AppError('REVISION_CONFLICT', '目标分类已变化，请重新选择。');
+          }
+        }
         const existingBatch = await this.db.importBatches.get(params.batchId);
         if (existingBatch && existingBatch.status === 'applied') {
           throw new AppError('ALREADY_APPLIED', '这一批已经写入，不会重复新增。', {
@@ -1554,6 +1601,9 @@ export class DexieImportRepository implements ImportRepository {
         const selected = params.rows.filter((row) => row.selected && row.status === 'new');
         const skippedReasons: { line: number; reason: string }[] = [];
         const createdIds: string[] = [];
+        // Read each destination's existing order once per transaction, not once per row.
+        const lastOrderByCategory = new Map<string, number>();
+        const resolvedPaths = new Map<string, string | null>();
         const now = nowIso();
 
         const batch: ImportBatch = {
@@ -1576,12 +1626,17 @@ export class DexieImportRepository implements ImportRepository {
         };
         await this.db.importBatches.put(batch);
 
-        for (const row of selected) {
+        for (const inputRow of selected) {
+          let row: ImportRow;
+          try { row = { ...inputRow, canonicalUrl: canonicalizeUrl(inputRow.originalUrl).canonicalUrl }; }
+          catch { skippedReasons.push({ line: inputRow.line, reason: '网址不是有效的 http / https 链接' }); continue; }
           if (!row.canonicalUrl) {
             skippedReasons.push({ line: row.line, reason: '缺少有效网址' });
             continue;
           }
           if (params.destination === 'library') {
+            const marked = await this.db.tombstones.where('canonicalUrl').equals(row.canonicalUrl).filter((entry) => entry.entityType === 'bookmark').first();
+            if (marked) { skippedReasons.push({ line: row.line, reason: '存在已删除收藏，未绕过墓碑' }); continue; }
             const active = await this.db.bookmarks
               .where('canonicalUrl')
               .equals(row.canonicalUrl)
@@ -1600,26 +1655,51 @@ export class DexieImportRepository implements ImportRepository {
               skippedReasons.push({ line: row.line, reason: '存在已删除收藏，未绕过墓碑' });
               continue;
             }
+            const pathKey = JSON.stringify(params.arrangement?.mode === 'manual'
+              ? row.targetCategoryId
+              : params.arrangement?.paths[row.sourceKey] ?? row.sourceFolderSegments ?? row.sourceFolder);
+            let targetCategoryId = row.targetCategoryId;
+            if (params.arrangement) {
+              if (!resolvedPaths.has(pathKey)) resolvedPaths.set(pathKey,
+                await resolveImportCategory(this.db, params.arrangement, row, params.batchId));
+              targetCategoryId = resolvedPaths.get(pathKey)!;
+            }
             const bookmark = buildBookmark({
               id: newId(),
               originalUrl: row.originalUrl,
               title: row.title,
-              categoryId: row.targetCategoryId,
+              categoryId: targetCategoryId,
               inboxUnread: true,
               sourceType: params.source === 'paste' ? 'manual' : 'html',
               sourceFolder: row.sourceFolder,
               importBatchId: params.batchId,
             });
+            if (row.sourceFolderSegments && bookmark.sources[0]) bookmark.sources[0].originalFolderSegments = [...row.sourceFolderSegments];
             if (bookmark.categoryId) {
               const category = await this.db.categories.get(bookmark.categoryId);
               if (!category) bookmark.categoryId = null;
               Object.assign(bookmark, deriveIndexFields(bookmark));
             }
+            if (!lastOrderByCategory.has(bookmark.categoryKey)) {
+              let lastOrder = 0;
+              await this.db.bookmarks.where('categoryKey').equals(bookmark.categoryKey).each((existing) => {
+                lastOrder = Math.max(lastOrder, existing.sortOrder ?? 0);
+              });
+              lastOrderByCategory.set(bookmark.categoryKey, lastOrder);
+            }
+            bookmark.sortOrder = lastOrderByCategory.get(bookmark.categoryKey)! + 1024;
+            lastOrderByCategory.set(bookmark.categoryKey, bookmark.sortOrder);
             await this.db.bookmarks.add(bookmark);
+            const categoryTrail: { id: string; revision: number }[] = [];
+            let ancestorId = bookmark.categoryId;
+            while (ancestorId) {
+              const category = await this.db.categories.get(ancestorId);
+              if (!category) break;
+              categoryTrail.push({ id: category.id, revision: category.revision });
+              ancestorId = category.parentId ?? null;
+            }
             await this.db.importItems.put({
-              batchId: params.batchId,
-              sourceKey: row.sourceKey,
-              entityId: bookmark.id,
+              batchId: params.batchId, sourceKey: row.sourceKey, entityId: bookmark.id, categoryTrail,
             });
             createdIds.push(bookmark.id);
           } else {
@@ -1669,6 +1749,20 @@ export class DexieImportRepository implements ImportRepository {
           skipped: skippedReasons.length,
           appliedAt: nowIso(),
         };
+        assertCategoryTree(await this.db.categories.toArray());
+        if (params.draftRevision !== undefined) {
+          const key = `import-draft:${params.draftId ?? params.batchId}`;
+          const saved = await this.db.meta.get(key);
+          const draft = ImportDraftSchema.parse(saved!.value);
+          const attempted = new Set(selected.map((row) => row.sourceKey));
+          const remaining = draft.rows.filter((row) => !attempted.has(row.sourceKey));
+          const remainingKeys = new Set(remaining.map((row) => row.sourceKey));
+          if (remaining.length) {
+            const group = params.arrangement?.mode === 'group' ? (await this.db.categories.toArray()).find((row) => row.name === params.arrangement!.groupName.trim() && (row.parentId ?? null) === params.arrangement!.parentId) : undefined;
+            await this.db.meta.put({ key, value: { ...draft, rows: remaining, arrangement: { ...draft.arrangement, paths: Object.fromEntries(Object.entries(draft.arrangement.paths).filter(([sourceKey]) => remainingKeys.has(sourceKey))), ...(group ? { groupCategoryId: group.id } : {}) }, aiExcluded: draft.aiExcluded.filter((key) => remainingKeys.has(key)), fixedKeys: (draft.fixedKeys ?? []).filter((key) => remainingKeys.has(key)), revision: draft.revision + 1, savedAt: nowIso() } });
+          }
+          else await this.db.meta.delete(key);
+        }
         await this.db.importBatches.put(applied);
         return {
           batch: applied,
@@ -1823,6 +1917,7 @@ export function createRepositories(
   hooks?: PurgeHooks
 ): Repositories {
   return {
+    organization: new DexieOrganizationRepository(db),
     bookmarks: new DexieBookmarkRepository(db, hooks),
     reading: new DexieReadingRepository(db, hooks),
     categories: new DexieCategoryRepository(db),

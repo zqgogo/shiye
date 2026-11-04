@@ -1,3 +1,4 @@
+import { AppError } from '../errors.js';
 import { LIMITS } from '../constants.js';
 import type { ImportParseResult, ImportParseWarning, ParsedImportEntry } from '../types.js';
 import { clampForStorage } from '../text.js';
@@ -120,6 +121,7 @@ export function parseBookmarkHtml(html: string): ImportParseResult {
       originalUrl: href,
       title,
       sourceFolder: currentFolder(),
+      sourceFolderSegments: folderStack.filter((part) => part.trim()).slice(0, LIMITS.importDepth),
     });
   };
 
@@ -148,6 +150,7 @@ export function parseBookmarkHtml(html: string): ImportParseResult {
       if (closing) {
         inH3 = false;
         pendingFolder = collapse(decodeEntities(h3Buffer));
+        if (pendingFolder.length > 1000) throw new AppError('INVALID_INPUT', '文件中有超过 1000 字的目录名称，请缩短该目录名后重新导出。');
         h3Buffer = '';
       } else {
         inH3 = true;

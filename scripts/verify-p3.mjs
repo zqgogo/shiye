@@ -575,7 +575,7 @@ async function main() {
   });
 
   phase('P3.3/P3.4 Chrome 书签导入', async () => {
-    await goto(page, 'capture:file', '选择浏览器导出的书签 HTML');
+    await goto(page, 'capture:file:manual', '选择浏览器导出的书签 HTML');
     await uploadFixture(page, FIXTURES.chrome);
     await waitPreview(page);
     // 默认目标必须是收藏库：书签本质是收藏。默认成待看会让整批书签静默进待看，
@@ -771,7 +771,7 @@ async function main() {
     await waitForSelectorGone(page, '.modal input[placeholder="https://"]', 20_000);
     await sleep(600);
 
-    await goto(page, 'capture:file', '选择浏览器导出的书签 HTML');
+    await goto(page, 'capture:file:manual', '选择浏览器导出的书签 HTML');
     await uploadFixture(page, FIXTURES.firefox);
     await waitPreview(page);
     // 先切到收藏库再统计：目标为待看时同一 URL 已在队列里会被算作重复。
@@ -990,7 +990,7 @@ async function main() {
       `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n${'<!-- padding -->\n'.repeat(220000)}</DL><p>\n`,
       'utf8'
     );
-    await goto(page, 'capture:file', '选择浏览器导出的书签 HTML');
+    await goto(page, 'capture:file:manual', '选择浏览器导出的书签 HTML');
     await uploadFixture(page, bigFile);
     await sleep(1500);
     const bigFileError = await page.evaluate(() => document.querySelector('.panel .alert')?.textContent ?? '');

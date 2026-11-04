@@ -5,6 +5,7 @@ import {
   newId,
   nowIso,
   type Bookmark,
+  type Category,
   type PurgeEntry,
   type PurgeRestoreDecision,
   type PurgeRestorePreview,
@@ -30,6 +31,7 @@ export interface PurgeHooks {
 }
 
 export interface PurgeSnapshotPayload {
+  categoryDependencies?: Category[];
   entry: PurgeEntry;
   scopeLabel: string;
   bookmarks?: Bookmark[];
@@ -97,16 +99,17 @@ export async function writePurgeSnapshot(
       readingItems: readingItems.length,
       tombstones: tombstones.length,
     },
-    bytes: bytesOf({ bookmarks, readingItems, tombstones }),
+    bytes: bytesOf({ bookmarks, readingItems, tombstones, categoryDependencies: payload.categoryDependencies ?? [] }),
     restoredAt: null,
     restoredCounts: null,
     restoredIds: [],
+    ...(payload.categoryDependencies ? { categoryDependencies: payload.categoryDependencies } : {}),
   };
 
   if (total > LIMITS.purgeSnapshotMaxItems || snapshot.bytes > LIMITS.purgeSnapshotMaxBytes) {
     throw new AppError(
       'SNAPSHOT_TOO_LARGE',
-      `这次要清理 ${total} 条（约 ${mb(snapshot.bytes)}），超过单份清理快照上限（${LIMITS.purgeSnapshotMaxItems} 条 / 5 MB）。请先到「数据与备份」导出完整 JSON，再分批清理。`,
+      `这次要清理 ${total} 条（约 ${mb(snapshot.bytes)}），超过单份清理快照上限（${LIMITS.purgeSnapshotMaxItems} 条 / ${mb(LIMITS.purgeSnapshotMaxBytes)}）。请先到「数据与备份」导出完整 JSON，再分批清理。`,
       { total, bytes: snapshot.bytes }
     );
   }
@@ -245,7 +248,13 @@ async function decideReading(db: ShiyeDB, row: ReadingItem): Promise<PurgeRestor
 
 async function planRestore(db: ShiyeDB, snapshot: PurgeSnapshot): Promise<PurgeRestoreDecision[]> {
   const decisions: PurgeRestoreDecision[] = [];
-  for (const row of snapshot.bookmarks) decisions.push(await decideBookmark(db, row));
+  for (const row of snapshot.bookmarks) {
+    const decision = await decideBookmark(db, row);
+    if (decision.action === 'restore' && row.categoryId && snapshot.categoryDependencies?.some((category) => category.id === row.categoryId) && !(await db.categories.get(row.categoryId))) {
+      decision.reason = '将恢复或复用原分类层级';
+    }
+    decisions.push(decision);
+  }
   for (const row of snapshot.readingItems) decisions.push(await decideReading(db, row));
   return decisions;
 }
@@ -380,6 +389,28 @@ export async function restorePurgeSnapshot(
         throw new AppError('INVALID_INPUT', '没有勾选可找回的条目。');
       }
       const preview = summarize(snapshot, decisions);
+      const categoryMapping = new Map<string, string>();
+      const dependencies = snapshot.categoryDependencies ?? [];
+      const needed = new Set<string>();
+      for (const decision of decisions) {
+        if (decision.action !== 'restore') continue;
+        let categoryId = snapshot.bookmarks.find((row) => row.id === decision.id)?.categoryId;
+        while (categoryId && !needed.has(categoryId)) {
+          needed.add(categoryId);
+          categoryId = dependencies.find((row) => row.id === categoryId)?.parentId;
+        }
+      }
+      const pending = dependencies.filter((row) => needed.has(row.id));
+      while (pending.length) {
+        const index = pending.findIndex((row) => !row.parentId || !needed.has(row.parentId) || categoryMapping.has(row.parentId));
+        if (index < 0) throw new AppError('INVALID_INPUT', '快照的分类层级无效，恢复已停止。');
+        const saved = pending.splice(index, 1)[0]!;
+        if (await db.categories.get(saved.id)) { categoryMapping.set(saved.id, saved.id); continue; }
+        const parentId = saved.parentId ? categoryMapping.get(saved.parentId) ?? ((await db.categories.get(saved.parentId)) ? saved.parentId : null) : null;
+        const same = (await db.categories.where('name').equals(saved.name).toArray()).find((row) => (row.parentId ?? null) === parentId);
+        if (!same) await db.categories.put({ ...saved, parentId, revision: saved.revision + 1, updatedAt: nowIso() });
+        categoryMapping.set(saved.id, same?.id ?? saved.id);
+      }
       const bookmarkById = new Map(snapshot.bookmarks.map((row) => [row.id, row]));
       const readingById = new Map(snapshot.readingItems.map((row) => [row.id, row]));
       const now = nowIso();
@@ -393,7 +424,7 @@ export async function restorePurgeSnapshot(
         const bookmark = bookmarkById.get(decision.id);
         if (bookmark) {
           const categoryId =
-            bookmark.categoryId && (await db.categories.get(bookmark.categoryId)) ? bookmark.categoryId : null;
+            bookmark.categoryId ? categoryMapping.get(bookmark.categoryId) ?? ((await db.categories.get(bookmark.categoryId)) ? bookmark.categoryId : null) : null;
           // 版本只能往上走：写回快照里的版本（甚至退回 1）会让清理前的旧编辑基线重新生效，
           // 旧页面一保存就把恢复后的内容覆盖掉，而版本校验还认为「没冲突」。
           const version = await allocateRestoredVersion(db, 'bookmark', bookmark);

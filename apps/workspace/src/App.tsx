@@ -1,3 +1,4 @@
+import { ImportWorkbench } from './import-workbench.js';
 import { FocusGuard, Sidebar, Topbar } from './components.js';
 import { ModalHost, DetailDrawer } from './dialogs.js';
 import { useWorkspace } from './state.js';
@@ -28,7 +29,8 @@ function CurrentPage() {
   if (route === 'search') return <SearchPage />;
   // 两个路由是同一个组件，用 key 强制重建，避免切换路由后仍停留在上一个模式的页签。
   if (route === 'capture') return <CapturePage key="capture-paste" />;
-  if (route === 'capture:file') return <CapturePage key="capture-file" initialMode="file" />;
+  if (route === 'capture:file:manual') return <CapturePage key="capture-file-manual" initialMode="file" />;
+  if (route === 'capture:file') return <ImportWorkbench />;
   if (route === 'settings') return <SettingsPage />;
   if (route === 'data') return <DataPage />;
   // 清空完成后的「去最近清理找回」：同一个页面，进来自动滚到「最近清理」。
@@ -60,7 +62,7 @@ function FooterHint() {
     'data:cleanup': '最近清理 · 按次找回',
     rules: '分类与整理策略',
     ai: 'AI 助手 · 手动交接可用',
-    aiconfig: '内置 AI · 未启用',
+    aiconfig: 'AI 通道 · 导入直连与手动交接',
     organize: '整理 · 人工确认后应用',
     ask: '提问 · 选择不等于授权',
   };

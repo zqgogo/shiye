@@ -1,3 +1,4 @@
+import { categoryPath } from '@shiye/core';
 import { useEffect, useMemo, useState } from 'react';
 import {
   LIMITS,
@@ -62,7 +63,7 @@ function CategoryPicker({
         <option value="">暂不分类</option>
         {visible.map((category) => (
           <option key={category.id} value={category.id}>
-            {category.name}
+            {categoryPath(categories, category.id)}
           </option>
         ))}
       </select>
@@ -247,7 +248,7 @@ export function AddReadingModal() {
   );
 }
 
-export function ConvertReadingModal({ readingId }: { readingId: string }) {
+export function ConvertReadingModal({ readingId, categoryId: initialCategoryId }: { readingId: string; categoryId?: string | null }) {
   const { data, service, closeModal, run, openBookmark, navigate } = useWorkspace();
   const item = data.pendingReading.find((entry) => entry.id === readingId);
   const existing = item
@@ -255,7 +256,7 @@ export function ConvertReadingModal({ readingId }: { readingId: string }) {
     : undefined;
   const [title, setTitle] = useState(item?.title ?? '');
   const [note, setNote] = useState(item?.note ?? '');
-  const [categoryId, setCategoryId] = useState<string | null>(null);
+  const [categoryId, setCategoryId] = useState<string | null>(initialCategoryId ?? null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   /**
@@ -960,7 +961,7 @@ export function CategoriesModal() {
                   />
                 ) : (
                   <>
-                    {category.name}
+                    {categoryPath(data.categories, category.id)}
                     <small>{category.description || '暂无说明'}</small>
                   </>
                 )}
@@ -1035,7 +1036,7 @@ export function CategoriesModal() {
                 .filter((category) => category.id !== deleting)
                 .map((category) => (
                   <option key={category.id} value={category.id}>
-                    {category.name}
+                    {categoryPath(data.categories, category.id)}
                   </option>
                 ))}
             </select>
@@ -1285,7 +1286,7 @@ export function CleanupModal({ scope: initialScope }: { scope: CleanupScope }) {
                 <option value="reading">待看（未读完）</option>
                 {data.categories.map((category) => (
                   <option key={category.id} value={`cat:${category.id}`}>
-                    分类：{category.name}
+                    分类：{categoryPath(data.categories, category.id)}
                   </option>
                 ))}
               </select>
@@ -1521,7 +1522,7 @@ export function ModalHost() {
     case 'add-reading':
       return <AddReadingModal />;
     case 'convert-reading':
-      return <ConvertReadingModal readingId={modal.readingId} />;
+      return <ConvertReadingModal readingId={modal.readingId} {...(modal.categoryId !== undefined ? { categoryId: modal.categoryId } : {})} />;
     case 'delete-bookmark':
       return <DeleteBookmarkModal bookmarkId={modal.bookmarkId} />;
     case 'categories':

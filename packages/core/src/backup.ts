@@ -1,3 +1,4 @@
+import { categoryPath } from './library-organization.js';
 import type { Bookmark, Category } from './types.js';
 import { tryCanonicalizeUrl } from './url.js';
 import { isSnapshotEligible } from './privacy.js';
@@ -30,7 +31,7 @@ export interface SnapshotOptions {
  * 全部条目先在 HTML 中渲染，脚本只负责隐藏不匹配项，禁用脚本时仍可阅读。
  */
 export function buildSnapshotHtml(bookmarks: Bookmark[], options: SnapshotOptions): string {
-  const categoryName = new Map(options.categories.map((c) => [c.id, c.name]));
+  const categoryName = new Map(options.categories.map((c) => [c.id, categoryPath(options.categories, c.id)]));
   const eligible = bookmarks.filter(isSnapshotEligible);
   const usedCategories = [...new Set(eligible.map((b) => b.categoryId).filter((id): id is string => !!id))]
     .map((id) => ({ id, name: categoryName.get(id) ?? '其他分类' }))

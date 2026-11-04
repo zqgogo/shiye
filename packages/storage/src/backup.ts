@@ -1,3 +1,4 @@
+import { assertCategoryTree } from './organization.js';
 import {
   AppError,
   SCHEMA_VERSION,
@@ -82,6 +83,7 @@ function sanitizeSource(entry: unknown, now: string): SourceInfo | null {
   if (batchId) source.importBatchId = batchId.slice(0, 64);
   const folder = str(sourceRaw['originalFolder'], '');
   if (folder) source.originalFolder = clampForStorage(folder, 1000);
+  if (Array.isArray(sourceRaw['originalFolderSegments'])) source.originalFolderSegments = sourceRaw['originalFolderSegments'].filter((value): value is string => typeof value === 'string').slice(0, LIMITS.importDepth).map((value) => clampForStorage(value, 1000));
   return source;
 }
 
@@ -125,6 +127,7 @@ function sanitizeBookmark(raw: Raw, reject: Reject, warnings: Set<string>): Book
     note,
     selectedText,
     categoryId,
+    sortOrder: Number.isFinite(raw['sortOrder']) ? Number(raw['sortOrder']) : 0,
     tagIds: arr(raw['tagIds']).filter((value): value is string => typeof value === 'string'),
     inboxUnread,
     pinned: bool(raw['pinned']),
@@ -196,6 +199,8 @@ function sanitizeCategory(raw: Raw, reject: Reject): Category | null {
   return {
     id,
     name,
+    parentId: typeof raw['parentId'] === 'string' ? raw['parentId'] : null,
+    sortOrder: Number.isFinite(raw['sortOrder']) ? Number(raw['sortOrder']) : 0,
     description: str(raw['description'], str(raw['desc'])),
     revision: num(raw['revision']),
     createdAt: toIso(raw['createdAt'], nowIso()),
@@ -339,6 +344,10 @@ function prepareRestore(document: BackupDocument): PreparedRestore {
   // 备份可能来自另一台设备或只恢复了部分数据：引用到不存在的分类/标签时清空，
   // 否则恢复后会出现指向空气的条目，「未分类」计数与分类页都会对不上。
   const knownCategories = new Set(categories.map((row) => row.id));
+  for (const category of categories) {
+    if (category.parentId && !knownCategories.has(category.parentId)) category.parentId = null;
+  }
+  assertCategoryTree(categories);
   const knownTags = new Set(tags.map((row) => row.id));
   let danglingReferences = 0;
   for (const bookmark of bookmarks) {
@@ -590,13 +599,29 @@ async function performRestore(
     (await db.tags.count()) === 0;
   const adoptSettings = mode === 'replace' || freshLibrary;
 
-  for (const category of categories) {
+  const categoryMapping = new Map<string, string>();
+  const pendingCategories = [...categories];
+  while (pendingCategories.length) {
+    const index = pendingCategories.findIndex((row) => !row.parentId || categoryMapping.has(row.parentId));
+    if (index < 0) throw new AppError('INVALID_INPUT', '分类层级包含循环或缺失父级，恢复已停止。');
+    const category = pendingCategories.splice(index, 1)[0]!;
     const existing = await db.categories.get(category.id);
-    if (!existing || mode === 'replace') {
-      await db.categories.put(category);
+    if (existing) { categoryMapping.set(category.id, category.id); continue; }
+    const parentId = category.parentId ? categoryMapping.get(category.parentId)! : null;
+    const samePath = (await db.categories.where('name').equals(category.name).toArray()).find((row) => (row.parentId ?? null) === parentId);
+    const mappedId = samePath?.id ?? category.id;
+    if (!samePath) {
+      const order = Math.max(0, ...(await db.categories.toArray()).map((row) => row.sortOrder ?? 0)) + 1024;
+      await db.categories.put({ ...category, parentId, sortOrder: category.sortOrder || order });
       result.categoriesAdded += 1;
     }
+    categoryMapping.set(category.id, mappedId);
   }
+  for (const bookmark of bookmarks) {
+    if (bookmark.categoryId) bookmark.categoryId = categoryMapping.get(bookmark.categoryId) ?? bookmark.categoryId;
+    Object.assign(bookmark, deriveIndexFields(bookmark));
+  }
+  assertCategoryTree(await db.categories.toArray());
   for (const tag of tags) {
     const existing = await db.tags.get(tag.id);
     if (!existing || mode === 'replace') {

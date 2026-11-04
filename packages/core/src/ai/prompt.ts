@@ -1,3 +1,4 @@
+import { categoryPath } from '../library-organization.js';
 import { AI_PROTOCOL_VERSION, LIMITS } from '../constants.js';
 import { canonicalJson, sha256Hex } from '../text.js';
 import type { Bookmark, Category, Tag } from '../types.js';
@@ -115,7 +116,7 @@ export function buildOrganizeMaterial(input: {
     part: input.part,
     policyVersion: input.policyVersion,
     instruction: input.instruction || AI_INSTRUCTION,
-    categories: input.categories.map((c) => ({ id: c.id, name: c.name })),
+    categories: input.categories.map((c) => ({ id: c.id, name: categoryPath(input.categories, c.id) })),
     tags: input.tags.map((t) => ({ id: t.id, name: t.name })),
     items: input.items.map((item) => ({
       n: item.n,

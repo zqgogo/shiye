@@ -1,6 +1,6 @@
 import Dexie from 'dexie';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AppError, SCHEMA_VERSION, nowIso } from '@shiye/core';
+import { AppError, LIMITS, SCHEMA_VERSION, nowIso } from '@shiye/core';
 import type { Repositories } from '@shiye/application';
 import { ShiyeDB } from './db.js';
 import { createRepositories } from './repositories.js';
@@ -495,7 +495,7 @@ describe('清理快照与单次恢复', () => {
 
   it('超过单份上限时拒绝清理，主库不动', async () => {
     const seed = await repos.bookmarks.create({ originalUrl: 'https://example.com/seed', title: 'seed' });
-    const rows = Array.from({ length: 5001 }, (_, index) => ({
+    const rows = Array.from({ length: LIMITS.purgeSnapshotMaxItems + 1 }, (_, index) => ({
       ...seed,
       id: `bulk-${index}`,
       originalUrl: `https://example.com/bulk-${index}`,
@@ -505,7 +505,7 @@ describe('清理快照与单次恢复', () => {
     await db.bookmarks.bulkPut(rows);
 
     await expect(repos.bookmarks.purgeAll()).rejects.toMatchObject({ code: 'SNAPSHOT_TOO_LARGE' });
-    expect(await db.bookmarks.count()).toBe(5002);
+    expect(await db.bookmarks.count()).toBe(LIMITS.purgeSnapshotMaxItems + 2);
     expect(await repos.purge.list()).toHaveLength(0);
   });
 

@@ -1,3 +1,4 @@
+import type { ImportArrangement, ImportDraft, OrganizationMove } from '@shiye/core';
 import {
   composeOrganizeInstruction,
   toUserMessage,
@@ -121,7 +122,7 @@ export class WorkspaceService {
       bookmarks
         .map((bookmark) => `${bookmark.id}:${bookmark.localRevision}:${bookmark.categoryId ?? ''}:${bookmark.tagIds.join(',')}`)
         .join('|'),
-      categories.map((category) => `${category.id}:${category.name}`).join('|'),
+      categories.map((category) => `${category.id}:${category.name}:${category.parentId ?? ''}:${category.revision}`).join('|'),
       tags.map((tag) => `${tag.id}:${tag.name}`).join('|'),
     ].join('#');
     if (this.searchCache?.key === key) {
@@ -364,7 +365,7 @@ export class WorkspaceService {
     destination: ImportDestination;
   }): Promise<ImportPreview> {
     if (input.mode === 'bookmarkHtml' && input.text.length > LIMITS.importFileBytes) {
-      throw new AppError('FILE_TOO_LARGE', '文件超过 3 MB，请拆分后导入。');
+      throw new AppError('FILE_TOO_LARGE', '文件超过 30 MB，请拆分后导入。');
     }
     const parsed =
       input.mode === 'paste' ? parsePasteInput(input.text) : parseBookmarkHtml(input.text);
@@ -421,6 +422,9 @@ export class WorkspaceService {
     fileHash: string | null;
     destination: ImportDestination;
     rows: ImportRow[];
+    arrangement?: ImportArrangement;
+    draftRevision?: number;
+  draftId?: string;
   }): Promise<CommitImportResult> {
     return this.repos.imports.commit({
       batchId: input.batchId,
@@ -429,8 +433,18 @@ export class WorkspaceService {
       fileHash: input.fileHash,
       destination: input.destination,
       rows: input.rows,
+      ...(input.arrangement ? { arrangement: input.arrangement } : {}),
+      ...(input.draftRevision !== undefined ? { draftRevision: input.draftRevision } : {}),
+      ...(input.draftId ? { draftId: input.draftId } : {}),
     });
   }
+
+  readImportDraftRevision(id: string) { return this.repos.organization.draftRevision(id); }
+  listImportDrafts() { return this.repos.organization.drafts(); }
+  saveImportDraft(draft: ImportDraft) { return this.repos.organization.saveDraft(draft); }
+  removeImportDraft(id: string, revision: number) { return this.repos.organization.removeDraft(id, revision); }
+  moveOrganization(input: OrganizationMove) { return this.repos.organization.move(input); }
+  undoOrganization(id: string) { return this.repos.organization.undo(id); }
 
   /** 导入批次历史：按文件名搜索并分页，撤销入口要靠它找回「那一份文件」。 */
   async listImportBatches(query?: ImportBatchQuery): Promise<ImportBatchPage> {

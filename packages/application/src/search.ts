@@ -1,3 +1,4 @@
+import { categoryPath } from '@shiye/core';
 import MiniSearch, { type SearchResult } from 'minisearch';
 import type { Bookmark, Category, Tag } from '@shiye/core';
 
@@ -59,7 +60,7 @@ export class LocalSearchIndex {
         boost: { title: 3, tagNames: 2, categoryName: 2 },
       },
     });
-    const categoryName = new Map(this.categories.map((c) => [c.id, c.name]));
+    const categoryName = new Map(this.categories.map((c) => [c.id, categoryPath(this.categories, c.id)]));
     const tagName = new Map(this.tags.map((t) => [t.id, t.name]));
     index.addAll(
       this.bookmarks.map((bookmark) => ({
