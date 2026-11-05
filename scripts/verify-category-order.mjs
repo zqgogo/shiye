@@ -49,7 +49,12 @@ try {
  await page.click('.nav-more'); await page.waitForSelector('[aria-labelledby="cat-title"]');
  assert.equal(await page.$$eval('[aria-labelledby="cat-title"] .rule-row',ns=>ns.length),3);
  await page.select('[aria-label="新分类的上级"]',parentId);
- await page.type('.category-create-form input','D 子分类');
+ await page.type('[aria-label="搜索新分类的上级"]','A');
+ assert.ok(await page.$$eval('[aria-label="新分类的上级"] option',ns=>!ns.some(n=>n.textContent==='B')));
+ await page.type('[aria-label="搜索新分类的上级"]','-not-found');
+ assert.equal(await page.$eval('[aria-label="新分类的上级"]',n=>n.value),parentId);
+ assert.ok(await page.$eval('.category-create-form',n=>n.textContent.includes('没有匹配的分类')));
+ await page.type('.category-create-form input[placeholder="分类名称"]','D 子分类');
  await page.click('.category-create-form .btn');
  await page.waitForFunction(()=>document.body.innerText.includes('已创建分类'));
  assert.equal((await rows()).find(r=>r.name==='D 子分类').parentId,parentId);
