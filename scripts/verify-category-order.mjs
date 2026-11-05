@@ -92,6 +92,20 @@ try {
  assert.deepEqual(await page.$$eval('.bookmark h3',ns=>ns.map(n=>n.textContent.trim())),['排序一','排序二']);
  await page.reload(); await page.waitForSelector('[aria-label="排序"]'); assert.equal(await page.$eval('[aria-label="排序"]',n=>n.value),'manual');
  console.log('PASS Edge: 最近新增下拖放可生效，自动切换手动排序并显示目标顺序');
+ await page.evaluate(async()=>{const q=indexedDB.open('shiye'); const db=await new Promise(r=>q.onsuccess=()=>r(q.result)); const tx=db.transaction('bookmarks','readwrite'); const store=tx.objectStore('bookmarks'); const req=store.getAll(); req.onsuccess=()=>{const base=req.result[0];for(let i=0;i<55;i++){const url=`https://bulk-ui.example/${i}`;store.put({...base,id:crypto.randomUUID(),originalUrl:url,canonicalUrl:url,title:`批量测试${i}`});}};await new Promise((r,j)=>{tx.oncomplete=r;tx.onerror=j;});db.close();});
+ await page.reload(); await page.waitForFunction(()=>document.querySelectorAll('.bookmark').length===50);
+ const clickText=async text=>page.evaluate(text=>{const b=[...document.querySelectorAll('button')].find(n=>n.textContent.trim()===text);if(!b)throw new Error(`找不到按钮 ${text}`); b.click();},text);
+ await clickText('批量选择'); await page.click('.bookmark input[type=checkbox]');
+ await page.evaluate(()=>document.querySelector('.pager button[aria-label="下一页"]')?.click());
+ // Pager text is used across browsers; no native UI interaction.
+ if(await page.$$('.bookmark').then(ns=>ns.length)===50) await page.evaluate(()=>[...document.querySelectorAll('button')].find(n=>n.textContent.includes('下一页')&&!n.disabled)?.click());
+ await page.waitForFunction(()=>document.querySelectorAll('.bookmark').length===7);
+ await page.click('.bookmark input[type=checkbox]'); await clickText('加入待看 2 条…'); await clickText('确认加入待看');
+ await page.waitForFunction(()=>document.body.innerText.includes('新增 2 条'));
+ await clickText('全选全部 57 条'); await clickText('加入待看 57 条…'); await clickText('确认加入待看');
+ await page.waitForFunction(()=>document.body.innerText.includes('新增 55 条')&&document.body.innerText.includes('已在待看 2 条'));
+ const queueCount=await page.evaluate(async()=>{const q=indexedDB.open('shiye'); const db=await new Promise(r=>q.onsuccess=()=>r(q.result));const req=db.transaction('readingItems').objectStore('readingItems').count();const n=await new Promise(r=>req.onsuccess=()=>r(req.result));db.close();return n;});
+ assert.equal(queueCount,57); console.log('PASS Edge: 跨页勾选 2 条批量待看，全选 57 条时新增 55 条并跳过 2 条重复');
  assert.deepEqual(errors,[]); console.log('PASS Edge: 前移、末尾、移入分类、刷新后排序与默认折叠（真实扩展 + IndexedDB）');
  await page.screenshot({path:path.join(dir,'result.png')});
 } finally { await browser.close(); }

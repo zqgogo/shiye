@@ -881,6 +881,25 @@ export class DexieBookmarkRepository implements BookmarkRepository {
 }
 
 export class DexieReadingRepository implements ReadingRepository {
+  async addBookmarks(items: { id: string; revision: number }[]) {
+    return this.db.transaction('rw', [this.db.bookmarks, this.db.readingItems], async () => {
+      const result = { added: 0, reactivated: 0, alreadyPending: 0, changed: 0, missing: 0 };
+      const seen = new Set<string>();
+      for (const item of items) {
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
+        const bookmark = await this.db.bookmarks.get(item.id);
+        if (!bookmark || bookmark.deletedAt) { result.missing++; continue; }
+        if (bookmark.localRevision !== item.revision) { result.changed++; continue; }
+        const existing = await this.findByCanonical(bookmark.canonicalUrl);
+        if (existing?.status === 'pending') { result.alreadyPending++; continue; }
+        const saved = await this.add({ originalUrl: bookmark.originalUrl, title: bookmark.title, relatedBookmarkId: bookmark.id });
+        if (saved.reactivated) result.reactivated++; else result.added++;
+      }
+      return result;
+    });
+  }
+
   constructor(private readonly db: ShiyeDB, private readonly hooks?: PurgeHooks) {}
 
   async get(id: string): Promise<ReadingItem | undefined> {

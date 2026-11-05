@@ -152,7 +152,9 @@ export interface BookmarkRepository {
   }>;
 }
 
+export interface BulkReadingResult { added: number; reactivated: number; alreadyPending: number; changed: number; missing: number; }
 export interface ReadingRepository {
+  addBookmarks(items: { id: string; revision: number }[]): Promise<BulkReadingResult>;
   get(id: string): Promise<ReadingItem | undefined>;
   listPending(): Promise<ReadingItem[]>;
   listCompleted(): Promise<ReadingItem[]>;

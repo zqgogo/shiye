@@ -237,6 +237,18 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
   const [bulkBusy, setBulkBusy] = useState(false);
   /** 上一次批量动作的结果：处理了几条、哪几条因为确认后被改过而跳过。 */
   const [bulkOutcome, setBulkOutcome] = useState<BulkResult | null>(null);
+  const [readingPlan, setReadingPlan] = useState<{ id: string; revision: number }[] | null>(null);
+  const [readingResult, setReadingResult] = useState<Awaited<ReturnType<typeof service.addBookmarksToReading>> | null>(null);
+  useEffect(() => { setReadingPlan(null); setReadingResult(null); }, [mode, categoryId]);
+  const addSelectedToReading = async () => {
+    if (!readingPlan || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const result = await run(() => service.addBookmarksToReading(readingPlan));
+      if (result) { setReadingResult(result); setReadingPlan(null); setSelected([]); }
+    } finally { setBulkBusy(false); }
+  };
+
   /**
    * 刚做完一次硬删除（清空或批量彻底删除）。
    *
@@ -327,6 +339,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
     setSelected([]);
     setBulkPlan(null);
     setBulkOutcome(null);
+    setReadingPlan(null);
   }, [mode, categoryId]);
 
   // 换列表、换排序都从第一页看起；排序不改变集合，所以勾选留着。
@@ -379,6 +392,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
     if (selected.length === 0) return;
     setBulkBusy(true);
     setBulkOutcome(null);
+    setReadingPlan(null);
     const plan = await run(() => service.prepareBulkSelection(action, [...selected]));
     setBulkBusy(false);
     if (plan) setBulkPlan(plan);
@@ -584,6 +598,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
               setSelected([]);
               setBulkPlan(null);
               setBulkOutcome(null);
+              setReadingPlan(null);
             }}
           >
             {selectMode ? '退出批量选择' : '批量选择'}
@@ -648,6 +663,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
               {pageAllSelected ? '取消本页选择' : `只选本页 ${view.rows.length} 条`}
             </button>
           ) : null}
+          {mode !== 'trash' && <button className="btn small primary" disabled={selected.length === 0 || bulkBusy} onClick={() => { setBulkPlan(null); setReadingResult(null); setReadingPlan(selected.map((id) => ({ id, revision: data.bookmarks.find((row) => row.id === id)?.localRevision ?? -1 }))); }}>加入待看 {selected.length} 条…</button>}
           {mode === 'trash' ? (
             <button
               className="btn small"
@@ -675,6 +691,8 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
         </Notice>
       ) : null}
 
+      {readingPlan && <Notice><strong>确认将所选 {readingPlan.length} 条加入待看？</strong><span>原收藏和分类保留；已在待看的跳过，已完成的重新加入。范围按此次确认冻结，之后修改或删除的收藏会跳过。</span><button className="btn small primary" disabled={bulkBusy} onClick={() => void addSelectedToReading()}>{bulkBusy ? '正在加入…' : '确认加入待看'}</button><button className="btn small" disabled={bulkBusy} onClick={() => setReadingPlan(null)}>取消</button></Notice>}
+      {readingResult && <Notice><strong>批量加入待看完成</strong><span>新增 {readingResult.added} 条 · 已完成重新加入 {readingResult.reactivated} 条 · 已在待看 {readingResult.alreadyPending} 条 · 修改后跳过 {readingResult.changed} 条 · 已删除或不存在 {readingResult.missing} 条。</span><button className="btn small" onClick={() => navigate('reading')}>查看待看</button></Notice>}
       {bulkPlan ? (
         <Notice {...(bulkPlan.action === 'purge' ? { tone: 'danger' as const } : {})}>
           <strong>

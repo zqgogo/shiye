@@ -330,6 +330,10 @@ export class WorkspaceService {
     await this.repos.bookmarks.touchOpened(id);
   }
 
+  async addBookmarksToReading(items: { id: string; revision: number }[]) {
+    return this.repos.reading.addBookmarks(items);
+  }
+
   async addReading(raw: unknown): Promise<ReadingItem> {
     const parsed = ReadingCreateSchema.parse(raw);
     const params: Parameters<Repositories['reading']['add']>[0] = { originalUrl: parsed.originalUrl };
