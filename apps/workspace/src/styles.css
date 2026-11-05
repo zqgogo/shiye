@@ -503,12 +503,6 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .category-drop .move-picker > summary::-webkit-details-marker { display:none; }
 .category-drop .move-picker > summary::after { content:'⋯'; font-size:18px; line-height:28px; }
 .category-drop .move-picker > summary:hover { background:var(--accent-soft); }
-.category-drop .move-picker[open] { position:static; }
-.category-drop .move-picker[open] > input,.category-drop .move-picker[open] > select,.category-drop .move-picker[open] > button { position:relative; max-width:100%; }
-.category-drop:has(.move-picker[open]) { flex-wrap:wrap; padding-bottom:8px; background:var(--accent-soft); }
-.category-drop .move-picker[open] { width:100%; padding:4px 8px; }
-.category-drop .move-picker[open] > summary { margin-left:auto; }
-.category-drop .move-picker[open] > input,.category-drop .move-picker[open] > select { display:block; width:100%; margin-bottom:6px; }
 .category-root-drop { color:var(--muted); font-size:10px; line-height:1.5; }
 @media (max-width:760px) {
   .sidebar-shell { position:static; height:auto; }
@@ -521,3 +515,15 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .category-drop.drop-before::before { top:-2px; }
 .category-drop.drop-after::after { bottom:-2px; }
 .category-drop-hint { position:sticky; top:0; z-index:3; padding:7px; background:var(--accent-soft); color:var(--accent); font-size:11px; height:32px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+.move-shade { z-index:100; }
+.move-dialog { width:min(560px, 100%); font-size:14px; }
+.move-dialog .move-subject { font-size:16px; font-weight:600; margin:14px 0 8px; overflow-wrap:anywhere; }
+.move-dialog .micro { line-height:1.7; }
+.move-dialog .field { margin:18px 0; }
+.move-dialog .field > span { font-size:12px; font-weight:600; }
+.move-dialog select,.move-dialog input { width:100%; max-width:100%; }
+.move-preview { padding:14px 16px; margin:20px 0; border:1px solid #dce3d3; background:var(--accent-soft); border-radius:10px; line-height:1.7; overflow-wrap:anywhere; }
+.move-preview b { font-size:12px; color:var(--accent); }
+.move-preview p { margin:6px 0; }
+.move-preview small { color:var(--muted); }

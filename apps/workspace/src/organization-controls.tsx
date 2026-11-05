@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { AppError, categoryPath, categoryFingerprint, type Category, type OrganizationMove, type OrganizationTarget } from '@shiye/core';
 import { useWorkspace } from './state.js';
 import type { WorkspaceService } from '@shiye/application';
@@ -33,6 +34,17 @@ export function MovePicker({ items }: { items: OrganizationTarget[] }) {
   const [position, setPosition] = useState<'last' | 'first' | 'before' | 'after'>('last');
   const [anchorId, setAnchorId] = useState('');
   const [anchorQuery, setAnchorQuery] = useState('');
+  const details = useRef<HTMLDetailsElement>(null);
+  const headingId = useId();
+  const [busy, setBusy] = useState(false);
+  const isCategory = items[0]?.kind === 'category';
+  const selectedRows = items.map((item) => item.kind === 'category' ? data.categories.find((row) => row.id === item.id) : data.bookmarks.find((row) => row.id === item.id));
+  const currentParents = selectedRows.map((row) => row ? 'categoryId' in row ? row.categoryId : row.parentId ?? null : null);
+  const sharedParent = currentParents.every((id) => id === currentParents[0]) ? currentParents[0] ?? '' : '';
+  const subject = items.length === 1 ? selectedRows[0] ? ('name' in selectedRows[0] ? selectedRows[0].name : selectedRows[0].title) : '已选项目' : `${items.length} 项${isCategory ? '分类' : '收藏'}`;
+  const close = () => { if (busy) return; if (details.current) details.current.open = false; setOpen(false); };
+  const forbidden = new Set(isCategory ? items.map((item) => item.id) : []);
+  if (isCategory) { let changed = true; while (changed) { changed = false; for (const row of data.categories) if (row.parentId && forbidden.has(row.parentId) && !forbidden.has(row.id)) { forbidden.add(row.id); changed = true; } } }
   const moving = new Set(items.map((item) => item.id));
   const anchors = (items[0]?.kind === 'category'
     ? data.categories.filter((row) => (row.parentId ?? null) === (target || null) && !moving.has(row.id))
@@ -42,19 +54,37 @@ export function MovePicker({ items }: { items: OrganizationTarget[] }) {
     const category = data.categories.find((row) => row.id === target);
     const anchor = position === 'first' ? anchors[0] : anchors.find((row) => row.id === anchorId);
     if ((position === 'before' || position === 'after') && !anchor) return;
+    setBusy(true);
     const result = await run(() => moveWithMerge(service, { items, ...(position !== 'last' && anchor ? { ...(position === 'after' ? { afterId: anchor.id } : { beforeId: anchor.id }), anchorRevision: 'localRevision' in anchor ? anchor.localRevision : anchor.revision } : {}), categoryFingerprint: categoryFingerprint(data.categories), parentId: target || null,
       ...(category ? { parentRevision: category.revision } : {}) }), '已移动，可在左侧目录树撤销。');
-    if (result) announceOrganization(result.operationId);
+    setBusy(false);
+    if (result) { announceOrganization(result.operationId); if (details.current) details.current.open = false; setOpen(false); }
   };
-  return <details className="move-picker" onToggle={(event) => setOpen(event.currentTarget.open)}><summary aria-label="移动到其他分类或调整顺序" title="移动到其他分类或调整顺序">移动到…</summary>{open && <>
-    <input aria-label="搜索移动目标" placeholder="搜索分类路径" value={query} onChange={(event) => setQuery(event.target.value)} />
-    <select aria-label="移动目标分类" value={target} onChange={(event) => { setTarget(event.target.value); setAnchorId(''); }}>
-      <option value="">根级 / 未分类</option>
-      {data.categories.filter((row) => categoryPath(data.categories, row.id).toLowerCase().includes(query.toLowerCase())).map((row) => <option key={row.id} value={row.id}>{categoryPath(data.categories, row.id)}</option>)}
-    </select>
-    <select aria-label="移动后的顺序" value={position} onChange={(event) => setPosition(event.target.value as typeof position)}><option value="last">放到最后</option><option value="first">放到最前</option><option value="before">放到指定项目之前</option><option value="after">放到指定项目之后</option></select>
-    {(position === 'before' || position === 'after') && <><input aria-label="搜索排序目标" placeholder="搜索目标项目" value={anchorQuery} onChange={(event) => setAnchorQuery(event.target.value)} /><select aria-label="排序目标" value={anchorId} onChange={(event) => setAnchorId(event.target.value)}><option value="">选择目标项目</option>{anchors.filter((row) => ('title' in row ? row.title : row.name).includes(anchorQuery)).map((row) => <option value={row.id} key={row.id}>{'title' in row ? row.title : row.name}</option>)}</select></>}
-    <button className="btn small" disabled={(position === 'before' || position === 'after') && !anchorId} onClick={() => void move()}>移动 {items.length} 项</button></>}
+  const targetName = target ? categoryPath(data.categories, target) : isCategory ? '最外层（顶层分类）' : '未分类';
+  const anchorName = anchors.find((row) => row.id === anchorId);
+  const anchorLabel = anchorName ? ('name' in anchorName ? anchorName.name : anchorName.title) : '尚未选择的项目';
+  const orderText = position === 'first' ? '最前面' : position === 'last' ? '最后面' : `「${anchorLabel}」${position === 'before' ? '前面' : '后面'}`;
+  const sameParent = currentParents.every((id) => (id ?? '') === target);
+  return <details ref={details} className="move-picker" onToggle={(event) => { const next = event.currentTarget.open; if (next && !open) { setTarget(sharedParent); setPosition('last'); setAnchorId(''); setQuery(''); setAnchorQuery(''); } setOpen(next); }}>
+    <summary aria-label="移动分类或调整顺序" title="移动分类或调整顺序">移动 / 排序…</summary>
+    {open && createPortal(<div className="modalshade move-shade" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); close(); } }}>
+      <section className="modal move-dialog" role="dialog" aria-modal="true" aria-labelledby={headingId}>
+        <div className="modalheader"><h2 id={headingId}>移动与排序</h2><button className="iconbtn" aria-label="关闭移动面板" disabled={busy} onClick={close}>×</button></div>
+        <p className="move-subject">{subject}</p>
+        <p className="micro">只想换顺序？保持{isCategory ? '上级分类' : '所属分类'}不变，选择下方位置。选择其他分类则会改变归属。{isCategory ? '子分类和其中的收藏会一起移动。' : ''}</p>
+        <label className="field"><span>1 · {isCategory ? '放在哪个上级分类下' : '保存到哪个分类'}</span>
+          <input aria-label="搜索移动目标" placeholder="搜索完整分类路径…" value={query} onChange={(event) => setQuery(event.target.value)} disabled={busy} />
+          <select aria-label="移动目标分类" value={target} disabled={busy} onChange={(event) => { setTarget(event.target.value); setAnchorId(''); }}>
+            <option value="">{isCategory ? '最外层（成为顶层分类）' : '未分类'}</option>
+            {data.categories.filter((row) => !forbidden.has(row.id) && (row.id === target || categoryPath(data.categories, row.id).toLowerCase().includes(query.toLowerCase()))).map((row) => <option key={row.id} value={row.id}>{categoryPath(data.categories, row.id)}</option>)}
+          </select>
+        </label>
+        <label className="field"><span>2 · 在这个位置如何排列</span><select aria-label="移动后的顺序" disabled={busy} value={position} onChange={(event) => setPosition(event.target.value as typeof position)}><option value="last">放到同级最后</option><option value="first">放到同级最前</option><option value="before">放到某一项前面…</option><option value="after">放到某一项后面…</option></select></label>
+        {(position === 'before' || position === 'after') && <label className="field"><span>选择参照项目（同一层级）</span><input aria-label="搜索排序目标" placeholder="搜索参照项目…" disabled={busy} value={anchorQuery} onChange={(event) => setAnchorQuery(event.target.value)} /><select aria-label="排序目标" disabled={busy} value={anchorId} onChange={(event) => setAnchorId(event.target.value)}><option value="">请选择参照项目</option>{anchors.filter((row) => row.id === anchorId || ('title' in row ? row.title : row.name).includes(anchorQuery)).map((row) => <option value={row.id} key={row.id}>{'title' in row ? row.title : row.name}</option>)}</select>{!anchors.length && <small>这个位置没有其他项目，可改选“最前”或“最后”。</small>}</label>}
+        <div className="move-preview" role="status"><b>确认后会发生什么</b><p>将「{subject}」放到「{targetName}」的{orderText}。</p><small>{sameParent ? '所属分类保持不变，只调整同级顺序。' : isCategory ? '上级分类会改变，子分类和收藏随之移动。' : '收藏会归入所选分类。'} 完成后可在左侧撤销上次移动。</small></div>
+        <div className="actions"><button className="btn" disabled={busy} onClick={close}>取消</button><button className="btn primary" disabled={busy || ((position === 'before' || position === 'after') && !anchorId)} onClick={() => void move()}>{busy ? '正在调整…' : sameParent ? '确认调整顺序' : '确认移动'}</button></div>
+      </section>
+    </div>, document.body)}
   </details>;
 }
 

@@ -28,6 +28,24 @@ try {
  await page.reload(); await page.waitForSelector('.category-drop');
  await drag('C','A',.5); const stored=await rows(); assert.equal(stored.find(r=>r.name==='C').parentId,stored.find(r=>r.name==='A').id);
  await page.reload(); await page.waitForSelector('.category-drop'); assert.equal(await page.$$('.category-drop').then(r=>r.length),2);
+ await page.evaluate(()=>document.querySelector('[aria-label="展开 A"]').click());
+ await page.waitForFunction(()=>[...document.querySelectorAll('.category-drop')].some(n=>n.title==='A / C'));
+ await page.evaluate(()=>[...document.querySelectorAll('.category-drop')].find(n=>n.title==='A / C').querySelector('.move-picker summary').click());
+ await page.waitForSelector('.move-dialog');
+ const parentId=(await rows()).find(r=>r.name==='A').id;
+ assert.equal(await page.$eval('[aria-label="移动目标分类"]',n=>n.value),parentId);
+ assert.ok(await page.$eval('.move-preview',n=>n.textContent.includes('只调整同级顺序')));
+ const invalid=await page.$$eval('[aria-label="移动目标分类"] option',ns=>ns.map(n=>n.textContent)); assert.ok(!invalid.includes('A / C'));
+ await page.screenshot({path:path.join(dir,'move-dialog.png')});
+ await page.keyboard.press('Escape'); await page.waitForFunction(()=>!document.querySelector('.move-dialog'));
+ assert.equal((await rows()).find(r=>r.name==='C').parentId,parentId);
+ await page.evaluate(()=>[...document.querySelectorAll('.category-drop')].find(n=>n.title==='A / C').querySelector('.move-picker summary').click());
+ await page.waitForSelector('.move-dialog'); await page.select('[aria-label="移动目标分类"]','');
+ assert.ok(await page.$eval('.move-preview',n=>n.textContent.includes('上级分类会改变')));
+ await page.evaluate(()=>[...document.querySelectorAll('.move-dialog button')].find(n=>n.textContent==='确认移动').click());
+ await page.waitForFunction(()=>!document.querySelector('.move-dialog'));
+ assert.equal((await rows()).find(r=>r.name==='C').parentId,null);
+ console.log('PASS Edge: 移动面板默认保留上级、过滤自身、预览归属变化、Escape 取消、确认后持久化');
  assert.deepEqual(errors,[]); console.log('PASS Edge: 前移、末尾、移入分类、刷新后排序与默认折叠（真实扩展 + IndexedDB）');
  await page.screenshot({path:path.join(dir,'result.png')});
 } finally { await browser.close(); }
