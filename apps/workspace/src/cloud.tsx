@@ -7,6 +7,7 @@ import { requestOrigin } from '../../../packages/adapters/browser/src/index.js';
 import { PageHeader, Pager } from './components.js';
 import { useWorkspace } from './state.js';
 import { CloudInbox } from './cloud-inbox.js';
+import { TwoWayPanel } from './two-way.js';
 
 export function CloudPage() {
   const { service, data, setPageSize } = useWorkspace();
@@ -91,7 +92,7 @@ export function CloudPage() {
     });
   };
   const clear = () => {
-    if (!info || !window.confirm('清空云端已发布镜像及未完成上传？本机收藏保留；手机页面将无法读取旧镜像。')) return;
+    if (!info || !window.confirm('清空旧版镜像及未完成上传？本机收藏和双机共享收藏保留；手机待看镜像会清空。')) return;
     void execute(async (signal, current) => {
       const next = await client().clear(info, signal);
       if (publication) await service.removeCloudPublication(publication.snapshot.id, true).catch(() => undefined);
@@ -104,7 +105,7 @@ export function CloudPage() {
   try { matches = Boolean(publication && info && publication.snapshot.baseUrl === mirrorBase(address).href && sameIdentity(info, publication.status.identity)); } catch { /* An incomplete address is expected while typing. */ }
   const commands = ['npm run cloud:prepare', 'npm run cloud:login', 'npm run cloud:deploy'];
   return <>
-    <PageHeader title="你的 Cloudflare，连接你的收藏。" description="总机发布，其他设备查看和提交；总机手动接收后统一整理。" />
+    <PageHeader title="你的 Cloudflare，连接你的收藏。" description="家里与工作电脑轮流使用，手动合并收藏变化；手机仍可查看和提交。" action={<span className="date">手动连接 · 确认后同步</span>} />
     <details className="panel"><summary>还没部署？三步准备自己的 Cloudflare 后端</summary>
       <p>在拾页项目目录中依次执行。准备步骤只生成本地配置和独立凭据；部署步骤会在你登录的 Cloudflare 账号创建 D1、Worker 和只读页面，按你的账号方案计费。</p>
       <ol>{commands.map((command) => <li key={command}><code>{command}</code> <button className="btn small" onClick={async () => { try { await navigator.clipboard.writeText(command); setMessage('命令已复制，请在项目目录的终端执行。'); } catch { setMessage('请直接选中命令复制。'); } }}>复制命令</button></li>)}</ol>
@@ -117,15 +118,16 @@ export function CloudPage() {
         <button className="btn" onClick={() => { cancel(); setToken(''); setInfo(null); setMessage('已断开并清除本页凭据。发布快照和云端已有内容保留，没有自动续传。'); }}>断开并清除凭据</button>
         {busy && <button className="btn" onClick={() => { cancel(); setMessage('已停止等待，快照保留，结果可能未知；重新连接后可核对或续传。没有自动重试。'); }}>取消请求</button>}
       </div>
-      {info && <div className="notice"><span>库 {info.libraryId} · 云端版本 {info.revision}</span><span>{info.publishedAt ? `最后发布 ${new Date(info.publishedAt).toLocaleString('zh-CN')}` : '尚未发布'}</span><a href={mirrorBase(address).href} target="_blank" rel="noreferrer noopener">打开手机收藏与提交页 ↗</a></div>}
+      {info && <div className="notice"><span>库 {info.libraryId} · 待看镜像版本 {info.revision}</span><span>{info.publishedAt ? `待看镜像最后发布 ${new Date(info.publishedAt).toLocaleString('zh-CN')}` : '待看镜像尚未发布'}</span><a href={mirrorBase(address).href} target="_blank" rel="noreferrer noopener">打开手机收藏与提交页 ↗</a></div>}
       <p role="status">{message}</p><p className="micro">{progress}</p>
     </div>
+    {info && <TwoWayPanel key={JSON.stringify([address, info.serverId, info.libraryId, info.epoch])} address={address} token={token} execute={execute} busy={busy} />}
     {info && <CloudInbox key={JSON.stringify([address, info.serverId, info.libraryId, info.epoch])} client={client} info={info} busy={busy} execute={execute} />}
     {publication && !matches && <div className="panel"><h2>本机保存了一份发布快照</h2><p>{publication.snapshot.baseUrl} · {publication.snapshot.plan.declaration.recordCount} 项 · 本机已记录 {publication.status.confirmedChunks}/{publication.status.totalChunks} 片确认。</p>
       <p>请输入原地址和发布凭据并测试连接，再核对或续传。不会把旧快照自动发到新地址，确认分片以服务器实际状态为准。</p>
       <button className="btn" disabled={busy} onClick={() => changeAddress(publication.snapshot.baseUrl)}>填入快照原地址</button>
     </div>}
-    {info && <div className="panel"><h2>发布记录镜像</h2><p>仅收藏标题、网址、分类、标签、置顶/未读标志及待看标题和网址。排除本地专用、删除项、备注、摘录、AI 材料、Key、暂存和日志。</p>
+    {info && <details className="panel"><summary>待看与旧版镜像（高级）</summary><h2>发布记录镜像</h2><p>双机同步启用后，新版手机收藏直接读取共享库；下面仅维护待看与旧版镜像，不会替换双机共享收藏。</p><p>仅收藏标题、网址、分类、标签、置顶/未读标志及待看标题和网址。排除本地专用、删除项、备注、摘录、AI 材料、Key、暂存和日志。</p>
       <p className="micro">删除或转为本地专用后，需要再次成功发布才能从云端撤回；离线时旧镜像仍然可读。上传前逐片复核，发布前再次检查完整快照。</p>
       <div className="toolbar"><button className="btn" disabled={busy} onClick={() => void prepare()}>准备发布预览</button><button className="btn danger" disabled={busy} onClick={clear}>清空云端镜像</button></div>
       {publication && matches && <><h3>发送预览</h3><p>目标 {publication.snapshot.baseUrl} · 共 {records.length} 项（含必要目录和标签）· {publication.status.totalChunks} 片 · 约 {(publication.snapshot.plan.bytes / 1024).toFixed(1)} KB</p>
@@ -137,7 +139,7 @@ export function CloudPage() {
           {publication.status.state !== 'published' && <button className="btn" disabled={busy} onClick={cancelUpload}>取消未发布上传</button>}
         </div>
       </>}
-    </div>}
-    <div className="panel"><h2>使用方式</h2><p>正式库由总机维护，其他设备只新增提交，不远程修改或删除正式收藏。手机用 submitter.txt 登录即可提交，reader.txt 仍然只读。提交设备保留临时列表，刷新云端后核对是否已发布，手动清理副本。AI 独立直连自己的模型服务。</p></div>
+    </details>}
+    <div className="panel"><h2>使用方式</h2><p>两台电脑使用同一地址和发布凭据，先检查、再确认同步收藏；首次合并，之后交换变化。手机用 submitter.txt 提交、reader.txt 查看。任意一台电脑接收手机收藏后同步即可进入共享库；待看仍单独发布镜像。提交设备保留临时副本，AI 仍独立直连。</p></div>
   </>;
 }

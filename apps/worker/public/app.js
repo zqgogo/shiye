@@ -44,7 +44,22 @@ async function load() {
       const after = await api('/v1/info'); if (after.activeGeneration !== info.activeGeneration || after.epoch !== info.epoch || after.serverId !== info.serverId) throw new Error('读取期间镜像已切换，请重新载入。');
     }
     if (version !== operation) return;
-    cloudInfo = info; canSubmit = (await api('/v1/capabilities')).canSubmit;
+    const capabilities = await api('/v1/capabilities'); canSubmit = capabilities.canSubmit; let sharedInfo = null;
+    if (capabilities.syncEnabled) {
+      let cursor = null; const shared = []; let revision = null;
+      do {
+        const part = await api(`/v2/public?${revision === null ? '' : `revision=${revision}&`}${cursor ? `cursor=${encodeURIComponent(cursor)}` : ''}`);
+        if (version !== operation) return;
+        if (!Array.isArray(part.rows) || part.rows.length > 50 || (revision !== null && part.info.revision !== revision) || part.info.serverId !== info.serverId || part.info.libraryId !== info.libraryId || part.info.epoch !== info.epoch) throw new Error('共享收藏版本变化，请重新载入。');
+        revision = part.info.revision; sharedInfo = part.info;
+        for (const row of part.rows) if (row.data) shared.push(row.data);
+        if (part.next && (part.next === cursor || !part.rows.length)) throw new Error('共享收藏分页异常。'); cursor = part.next;
+        if (shared.length > 50000) throw new Error('共享收藏超过容量。');
+      } while (cursor);
+      const after = await api(`/v2/public?revision=${revision}`); if (after.info.revision !== revision) throw new Error('共享收藏版本变化，请重新载入。');
+      const readings = all.filter((row) => row.kind === 'reading'); all.splice(0, all.length, ...shared, ...readings);
+    }
+    cloudInfo = info;
     if (version !== operation) return;
     records = all; const categories = new Map(all.filter((row) => row.kind === 'category').map((row) => [row.id, row])); paths = new Map();
     for (const row of categories.values()) { const names = [row.name], seen = new Set([row.id]); let parent = row.parentId;
@@ -53,7 +68,7 @@ async function load() {
     $('capture-category').replaceChildren(new Option('未分类', '')); for (const [id, name] of [...paths].sort((a, b) => a[1].localeCompare(b[1], 'zh-CN'))) $('capture-category').append(new Option(name, id));
     $('capture-tags').replaceChildren(); for (const tag of records.filter((row) => row.kind === 'tag')) $('capture-tags').append(new Option(tag.name, tag.id));
     $('submit-access').textContent = canSubmit ? '当前凭据可提交。先保存在本机，再手动发送给总机。' : '当前凭据只读，仍可保存本机草稿；要发送请退出后使用 submitter.txt 登录。';
-    $('published').textContent = info.publishedAt ? `发布于 ${new Date(info.publishedAt).toLocaleString()} · 版本 ${info.revision}` : '还没有发布镜像，请回电脑端发布。';
+    $('published').textContent = sharedInfo ? `共享收藏 · 同步版本 ${sharedInfo.revision}；待看来自单独镜像` : info.publishedAt ? `发布于 ${new Date(info.publishedAt).toLocaleString()} · 版本 ${info.revision}` : '还没有发布镜像，请回电脑端发布。';
     $('login').hidden = true; $('logout').hidden = false; $('library').hidden = false; page = 1; render(); reconcileLocal(); renderLocal(); status('');
   } catch (error) { if (version !== operation) return; reset(); status(error.message); }
 }

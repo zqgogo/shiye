@@ -14,13 +14,15 @@ export function createCloudInbox(db: ShiyeDB, bookmarks: BookmarkRepository, rea
       const previous = (await db.meta.get(key))?.value as { hash: string; receipt: InboxReceipt } | undefined;
       if (previous) { if (previous.hash !== hash) throw new AppError('REVISION_CONFLICT', '提交编号对应的内容变化，未重复接收。'); return previous.receipt; }
       const p = entry.payload; let receipt: InboxReceipt;
+      const sync = (await db.meta.where('key').startsWith('cloud-sync:').toArray()).map((row) => row.value as import('../../sync/src/two-way-local.js').SharedState).find((value) => value.localLibraryId === libraryId && value.identity.serverId === entry.identity.serverId && value.identity.libraryId === entry.identity.libraryId && value.identity.epoch === entry.identity.epoch);
       if (p.destination === 'bookmark') {
         const existing = await bookmarks.findAnyByCanonical(checked.canonicalUrl);
         if (existing?.deletedAt) throw new AppError('TOMBSTONED', '此网址在回收站中，请先明确恢复，或退回这份提交。');
-        if (existing) receipt = { status: 'received', recordKind: 'bookmark', recordId: existing.id, message: '已有相同网址，保留总机原内容，未覆盖分类、备注或隐私。' };
+        if (existing) { const shared = sync?.baseline.find((row) => sync.maps[row.key] === existing.id && row.data?.kind === 'bookmark')?.data;
+          receipt = { status: 'received', recordKind: 'bookmark', recordId: shared?.kind === 'bookmark' ? shared.publicId : existing.id, message: '已有相同网址，保留总机原内容，未覆盖分类、备注或隐私。' }; }
         else {
-          const category = p.categoryId ? await db.categories.get(p.categoryId) : undefined;
-          const tagIds = []; for (const id of p.tagIds) if (await db.tags.get(id)) tagIds.push(id);
+          const category = p.categoryId ? await db.categories.get(sync?.maps[p.categoryId] ?? p.categoryId) : undefined;
+          const tagIds = []; for (const id of p.tagIds) { const localId = sync?.maps[id] ?? id; if (await db.tags.get(localId)) tagIds.push(localId); }
           const bookmark = await bookmarks.create({ originalUrl: p.url, title: p.title, sourceDescription: p.sourceDescription, note: p.note,
             categoryId: category?.id ?? null, tagIds, pinned: p.pinned, inboxUnread: p.unread, privacy: { localOnly: false, aiBlocked: p.aiBlocked }, sourceType: 'manual', sourceFolder: p.categoryPath });
           receipt = { status: 'received', recordKind: 'bookmark', recordId: bookmark.id, message: (p.categoryId && !category) || tagIds.length !== p.tagIds.length ? '已接收；失效分类移至未分类，失效标签已跳过。' : '已按所选分类接收。' };

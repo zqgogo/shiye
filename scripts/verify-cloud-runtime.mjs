@@ -83,5 +83,26 @@ try {
   await client.acknowledge(pending.entries[0], receipt, controller.signal); await client.acknowledge(pending.entries[0], receipt, controller.signal);
   const saved = await env.DB.prepare('SELECT payload,status FROM capture_inbox WHERE id=?').bind(inbound.id).first();
   check('真实 D1 回执重试幂等且清除正文', saved.payload === null && saved.status === 'received' && (await client.inbox(controller.signal)).entries.length === 0);
+  const sharedInfo = await (await server.fetch('https://mirror.test/v2/info', { headers: { Authorization: `Bearer ${publisher}` } })).json();
+  check('真实 D1 新同步库独立初始化，未自动迁移个人镜像内容', sharedInfo.protocol === 2 && sharedInfo.revision === 0 && !sharedInfo.enabled);
+  const sharedIdentity = { serverId: sharedInfo.serverId, libraryId: sharedInfo.libraryId, epoch: sharedInfo.epoch };
+  let sharedRevision = 0, firstOperation;
+  const sharedRows = [];
+  for (let index = 0; index < 120; index++) sharedRows.push({ key: `b:${hash(`https://example.com/shared/${index}`)}`, expected: 0, data: { kind: 'bookmark', publicId: `runtime-${index}`, url: `https://example.com/shared/${index}`, title: `共享${index}`, sourceDescription: '', note: '同步正文不向手机暴露', selectedText: '', aiPurpose: '', category: null, tags: [], pinned: false, unread: true, aiBlocked: false, lockedFields: [], order: index } });
+  for (let index = 0; index < sharedRows.length; index += 50) {
+    const value = { identity: sharedIdentity, deviceId: crypto.randomUUID(), operationId: crypto.randomUUID(), baseRevision: sharedRevision, changes: sharedRows.slice(index, index + 50) };
+    firstOperation ??= value;
+    const response = await tokenRequest('/v2/changes', value); assert.equal(response.status, 200); sharedRevision = (await response.json()).revision;
+  }
+  check('真实 D1 分批同步 120 条，丢确认同编号重试不推进版本', (await env.DB.prepare('SELECT COUNT(*) AS n FROM shared_entities').first()).n === 120 && (await (await tokenRequest('/v2/changes', firstOperation)).json()).revision === 1 && (await env.DB.prepare('SELECT revision FROM shared_state').first()).revision === 3);
+  const publicRows = await server.fetch('https://mirror.test/v2/public', { headers: { Authorization: `Bearer ${reader}` } }); const publicText = await publicRows.text();
+  const privateRows = await server.fetch('https://mirror.test/v2/changes', { headers: { Authorization: `Bearer ${reader}` } });
+  check('真实 D1 手机只能读取同步白名单，不读取备注正文', publicRows.status === 200 && !publicText.includes('同步正文不向手机暴露') && privateRows.status === 401);
+  const changed = { ...sharedRows[0], expected: 1, data: { ...sharedRows[0].data, title: '另一台修改' } };
+  const sharedWrite = () => ({ identity: sharedIdentity, deviceId: crypto.randomUUID(), operationId: crypto.randomUUID(), baseRevision: sharedRevision, changes: [changed] });
+  const sharedRace = await Promise.all([tokenRequest('/v2/changes', sharedWrite()), tokenRequest('/v2/changes', sharedWrite())]);
+  check('真实 D1 双机相同基线并发只成功一次，提交凭据不能同步', sharedRace.filter((response) => response.status === 200).length === 1 && (await tokenRequest('/v2/changes', sharedWrite(), submitter)).status === 401);
+  await client.clear(await client.info(controller.signal), controller.signal);
+  check('旧镜像清空不会删除双机同步收藏', (await env.DB.prepare('SELECT COUNT(*) AS n FROM shared_entities WHERE body IS NOT NULL').first()).n === 120);
 } catch (error) { report.failure = String(error); throw error; }
 finally { fs.mkdirSync(path.join(root, '.verify/reports'), { recursive: true }); fs.writeFileSync(path.join(root, '.verify/reports/cloud-runtime.json'), JSON.stringify(report, null, 2)); await server.close(); }

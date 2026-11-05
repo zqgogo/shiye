@@ -66,7 +66,7 @@ try {
     await new Promise((resolve) => { tx.oncomplete = resolve; }); db.close();
   });
   await setReactInput(page, 'input[placeholder="https://shiye.example.com"]', 'https://mirror.test'); await connect();
-  await click('准备发布预览'); await waitText('预览已准备');
+  await page.evaluate(() => { const summary = [...document.querySelectorAll('summary')].find((node) => node.textContent === '待看与旧版镜像（高级）'); if (summary) summary.parentElement.open = true; }); await click('准备发布预览'); await waitText('预览已准备');
   let data = await local(); const originalId = data.meta.find((row) => row.key === 'cloud-publication:data').value.id;
   check('发布快照在本机保存 120 条，准备预览不上传记录', data.meta.some((row) => row.key === 'cloud-publication:state') && harness.db.prepare('SELECT COUNT(*) AS n FROM mirror_chunks').get().n === 0);
   await click('查看完整发送内容（分页）');
@@ -88,14 +88,14 @@ try {
   check('换地址清除旧凭据，快照仍绑定原地址且无自动请求', await page.$eval('input[type=password]', (node) => node.value === '') && report.requests.every((request) => request.path.startsWith('/v1/')));
   await setReactInput(page, 'input[placeholder="https://shiye.example.com"]', 'https://mirror.test'); await connect();
   const firstPrivate = (await local()).books[0].id; await makePrivate(firstPrivate);
-  await click('准备发布预览'); await waitText('预览已准备'); data = await local();
+  await page.evaluate(() => { const summary = [...document.querySelectorAll('summary')].find((node) => node.textContent === '待看与旧版镜像（高级）'); if (summary) summary.parentElement.open = true; }); await click('准备发布预览'); await waitText('预览已准备'); data = await local();
   const snapshot = data.meta.find((row) => row.key === 'cloud-publication:data').value;
   const secondPrivate = snapshot.plan.parts[1].records[0].id; privacyTarget = secondPrivate;
   await click('确认上传并发布镜像'); await waitText('待上传记录已修改');
   check('上传期间变为本地专用的待发记录被逐片拦截', !JSON.stringify(harness.db.prepare('SELECT body FROM mirror_chunks WHERE generation_id=?').all(snapshot.id)).includes(secondPrivate) && harness.db.prepare('SELECT active_generation FROM mirror_library').get().active_generation === originalId);
   await click('取消未发布上传'); await waitText('原已发布镜像保留');
   check('取消未发布上传实际清掉暂存，已发布镜像保留', harness.db.prepare('SELECT COUNT(*) AS n FROM mirror_generations WHERE id=?').get(snapshot.id).n === 0 && harness.db.prepare('SELECT active_generation FROM mirror_library').get().active_generation === originalId);
-  await click('准备发布预览'); await waitText('预览已准备'); await click('确认上传并发布镜像'); await waitText('镜像已发布');
+  await page.evaluate(() => { const summary = [...document.querySelectorAll('summary')].find((node) => node.textContent === '待看与旧版镜像（高级）'); if (summary) summary.parentElement.open = true; }); await click('准备发布预览'); await waitText('预览已准备'); await click('确认上传并发布镜像'); await waitText('镜像已发布');
   const bodies = JSON.stringify(harness.db.prepare('SELECT body FROM mirror_chunks').all());
   check('重新发布后云端实际排除两条本地专用记录，并删除旧版本', !bodies.includes(firstPrivate) && !bodies.includes(secondPrivate) && harness.db.prepare('SELECT COUNT(*) AS n FROM mirror_generations').get().n === 1);
   await click('清空云端镜像'); await waitText('云端镜像与暂存上传已清空');

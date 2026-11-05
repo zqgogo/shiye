@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { sharedRequest } from './shared.js';
 import { InboxDeviceSchema, InboxSubmitSchema, InboxReceiptSchema } from '../../../packages/sync/src/inbox.js';
 import { ChunkSchema, ClearMirrorSchema, CreateGenerationSchema, MIRROR_LIMITS, MIRROR_PROTOCOL, PublishSchema,
   byteLength, digest, sameIdentity, validateMirror, type MirrorIdentity, type MirrorInfo, type MirrorRecord } from '../../../packages/sync/src/protocol.js';
@@ -125,6 +126,7 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       if (!isSubmit && !constantEqual(await tokenHash(input.token), env.READ_TOKEN_SHA256)) fail(403, '手机页面请使用独立只读或提交凭据。');
       return json({ ok: true, canSubmit: isSubmit }, 200, { 'Set-Cookie': cookie(input.token, 8 * 3600) });
     }
+    if (path.startsWith('/v2/')) return await sharedRequest(request, env, { auth: authenticate, body, json, fail, identity: async () => identityOf(await library(db)) });
     if (!path.startsWith('/v1/')) {
       if (!env.ASSETS) return new Response('拾页私有记录镜像', { headers: { ...headers, 'Content-Type': 'text/plain; charset=utf-8' } });
       const response = await env.ASSETS.fetch(request);
@@ -134,7 +136,8 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     if (path === '/v1/capabilities' && request.method === 'GET') {
       await authenticate(request, env);
       const token = /^Bearer ([^\s]{24,256})$/.exec(request.headers.get('Authorization') ?? '')?.[1] ?? /(?:^|;\s*)__Host-shiye_reader=([^;]+)/.exec(request.headers.get('Cookie') ?? '')?.[1];
-      return json({ canSubmit: Boolean(token && /^[a-f0-9]{64}$/.test(env.SUBMIT_TOKEN_SHA256 ?? '') && constantEqual(await digest(token), env.SUBMIT_TOKEN_SHA256!)) });
+      const shared = await db.prepare('SELECT enabled FROM shared_state WHERE singleton=1').first<{ enabled: number }>();
+      return json({ syncEnabled: Boolean(shared?.enabled), canSubmit: Boolean(token && /^[a-f0-9]{64}$/.test(env.SUBMIT_TOKEN_SHA256 ?? '') && constantEqual(await digest(token), env.SUBMIT_TOKEN_SHA256!)) });
     }
     if (path.startsWith('/v1/inbox')) return await inboxRequest(request, env, path);
     await authenticate(request, env, write);
@@ -230,7 +233,9 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       const gen = await generation(db, id); const chunk = await db.prepare(`SELECT body FROM mirror_chunks WHERE generation_id=? AND part=?
         AND generation_id=(SELECT active_generation FROM mirror_library WHERE singleton=1)`).bind(id, index).first<{ body: string }>();
       if (!chunk) fail(409, '镜像分片不存在或版本已变化。');
-      return json({ generationId: id, index, chunkCount: gen.chunk_count, records: JSON.parse(chunk.body) });
+      const shared = await db.prepare('SELECT enabled FROM shared_state WHERE singleton=1').first<{ enabled: number }>();
+      const records = JSON.parse(chunk.body) as MirrorRecord[];
+      return json({ generationId: id, index, chunkCount: gen.chunk_count, records: shared?.enabled ? records.filter((row) => row.kind === 'reading') : records });
     }
     if (path === '/v1/mirror' && request.method === 'DELETE') {
       const input = ClearMirrorSchema.parse(await body(request)); const lib = await library(db); guard(lib, input.identity);

@@ -27,5 +27,5 @@
   "optional_host_permissions": [
     "https://*/*"
   ],
-  "version_name": "0.2.0-preview.4"
+  "version_name": "0.2.0-preview.5"
 }

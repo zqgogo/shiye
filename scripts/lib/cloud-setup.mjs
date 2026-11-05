@@ -105,6 +105,10 @@ export async function verifyCloud(url, publisher, reader, fetcher = fetch, submi
     if ((await send('/v1/generations', submitter, { method: 'POST', body: '{}' })).status !== 401 ||
         (await send('/v1/inbox', reader, { method: 'POST', body: '{}' })).status !== 401 ||
         (await send('/v1/inbox', submitter, { method: 'POST', body: '{}' })).status !== 400) throw new Error('提交与只读/发布权限隔离检查未通过。');
+    const sync = await send('/v2/info', publisher);
+    if (!sync.ok || (await sync.json()).protocol !== 2 ||
+        (await send('/v2/info', reader)).status !== 401 ||
+        (await send('/v2/changes', submitter, { method: 'POST', body: '{}' })).status !== 401) throw new Error('双机同步协议或权限隔离检查未通过。');
   }
   return { url: base.origin, serverId: first.serverId, libraryId: first.libraryId, epoch: first.epoch, revision: first.revision };
 }

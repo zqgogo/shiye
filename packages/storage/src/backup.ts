@@ -590,6 +590,7 @@ async function performRestore(
       db.aiTasks.clear(),
       db.meta.where('key').startsWith('ai-organize-plan:').delete(),
       db.meta.where('key').startsWith('cloud-publication:').delete(),
+      db.meta.where('key').startsWith('cloud-sync:').delete(),
     ]);
   }
 
@@ -835,6 +836,7 @@ async function performRestore(
   if (adoptSettings && beforeLibraryId && afterLibraryId && beforeLibraryId !== afterLibraryId) {
     result.librarySwitch = { from: beforeLibraryId, to: afterLibraryId };
     await db.meta.where('key').startsWith('cloud-publication:').delete();
+    await db.meta.where('key').startsWith('cloud-sync:').delete();
   }
   if (result.handoffInvalidated > 0) {
     warnings.add(

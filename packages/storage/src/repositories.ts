@@ -1,5 +1,6 @@
 import { createMirrorPublications } from './mirror-publication.js';
 import { createCloudInbox } from './cloud-inbox.js';
+import { createTwoWayRepository } from './two-way.js';
 import { createOrganizePlans } from './organize-plans.js';
 import { DexieOrganizationRepository, resolveImportCategory, assertCategoryTree, collectCategoryDependencies } from './organization.js';
 import { ImportDraftSchema, categoryFingerprint } from '@shiye/core';
@@ -1930,6 +1931,7 @@ export function createRepositories(
   const handoff = new DexieHandoffRepository(db);
   const bookmarks = new DexieBookmarkRepository(db, hooks), reading = new DexieReadingRepository(db, hooks);
   return {
+    twoWay: createTwoWayRepository(db),
     cloudInbox: createCloudInbox(db, bookmarks, reading),
     publications: createMirrorPublications(db),
     organizePlans: createOrganizePlans(db, handoff),

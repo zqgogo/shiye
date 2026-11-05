@@ -23,7 +23,7 @@ let transport: typeof fetch; let client: MirrorClient; const signal = () => new 
 const sample = (title: string): MirrorRecord[] => [{ kind: 'bookmark', id: 'book', title, url: 'https://example.com', categoryId: null, tagIds: [], pinned: false, unread: true }];
 beforeEach(async () => {
   sqlite = new DatabaseSync(':memory:');
-  for (const name of ['0001_mirror.sql', '0002_inbox.sql']) sqlite.exec(readFileSync(new URL(`../../../apps/worker/migrations/${name}`, import.meta.url), 'utf8'));
+  for (const name of ['0001_mirror.sql', '0002_inbox.sql', '0003_two_way.sql']) sqlite.exec(readFileSync(new URL(`../../../apps/worker/migrations/${name}`, import.meta.url), 'utf8'));
   const db: Database = { prepare: (sql) => new LocalStatement(sqlite, sql), async batch(statements) {
     sqlite.exec('BEGIN IMMEDIATE'); try { const results = statements.map((statement) => (statement as LocalStatement).syncRun()); sqlite.exec('COMMIT'); return results; }
     catch (cause) { sqlite.exec('ROLLBACK'); throw cause; }

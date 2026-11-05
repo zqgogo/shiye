@@ -491,6 +491,12 @@ export interface MirrorPublicationRepository {
 }
 
 export interface Repositories {
+  twoWay: {
+    read(address: string): Promise<import('../../sync/src/two-way-local.js').SharedLocal>;
+    assert(plan: import('../../sync/src/two-way-local.js').SharedPlan, keys?: string[]): Promise<void>;
+    apply(plan: import('../../sync/src/two-way-local.js').SharedPlan, remote: import('../../sync/src/two-way.js').SharedRow[], revision: number): Promise<void>;
+    disconnect(address: string): Promise<void>;
+  };
   cloudInbox: { receive(entry: unknown, expectedLibraryId: string): Promise<import('../../sync/src/inbox.js').InboxReceipt> };
   publications: MirrorPublicationRepository;
   organizePlans: OrganizePlanRepository;

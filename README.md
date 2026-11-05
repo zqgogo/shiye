@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-当前为 **v0.2 预览版**：Chrome / Edge 扩展中的本地收藏工作台、弹窗快速访问、自配模型的问答/全范围分片整理，以及用户自有 Cloudflare 的私有镜像与其他设备新增提交/总机收件箱。双向同步、真实服务和 Safari 发布仍有后续验收；不把本地模拟验证当作云端/真机验收。**逐阶段进度与证据只以 [开发进度规划](docs/ROADMAP.md) 为准**。下一版方案见 [v0.2 计划](docs/v0.2-cloudflare-ai-plan.md)，部署自己后端见 [Cloudflare 说明](docs/deployment/cloudflare-s1.md)。
+当前为 **v0.2 预览版**：Chrome / Edge 扩展中的本地收藏工作台、弹窗快速访问、自配模型的问答/全范围分片整理，以及用户自有 Cloudflare 的双机收藏同步、手机只读视图与其他设备提交收件箱。真实双机使用、大库配额和 Safari 发布仍有后续验收；不把本地模拟验证当作云端/真机验收。**逐阶段进度与证据只以 [开发进度规划](docs/ROADMAP.md) 为准**。下一版方案见 [v0.2 计划](docs/v0.2-cloudflare-ai-plan.md)，部署自己后端见 [Cloudflare 说明](docs/deployment/cloudflare-s1.md)。
 
 产品与技术依据位于 `resource/拾页开发交付包_v2_1/`。开发前先读其中的 `00_先读我.md`、`02_产品与技术实现说明_v2_1.md`、`03_AI开发任务书_v2_1.md`。该目录只作为输入资料归档，其中的原型、参考类型和 SQL 不作为正式实现代码。
 
@@ -41,6 +41,7 @@ npm install
 | `npm run cloud:deploy` | 创建/复用 D1 并部署 Worker 与手机查看/提交页，不上传收藏 |
 | `npm run cloud:verify` | 在线只做鉴权及身份检查，不上传记录 |
 | `npm run verify:cloud-runtime` | 官方 workerd / D1 本地集成测试 |
+| `npm run verify:two-way` | 两个独立浏览器验证收藏合并、删除、冲突和隐私撤回 |
 | `npm run verify:cloud-inbox` | 手机提交、本机临时列表、总机接收和发布核对验证 |
 | `npm run verify:cloud-publication` | 镜像续传、刷新、隐私和取消专项浏览器验证 |
 | `npm run cloud:credentials` | 在 Git 忽略目录生成独立的发布/只读/提交凭据，不打印凭据 |
@@ -103,3 +104,5 @@ docs/                    进度规划、安装说明、技术决定、未解决�
 - **内存紧张的机器上跑验证**：`npm test` 已把 V8 老生代限制在 768 MB（`--max-old-space-size=768`），进一步吃紧时用 `npm run test:lowmem`（384 MB 堆 + 小 semi-space）。浏览器回归一次只跑一套，不要把 `build` 与验证串成一条命令。若 Windows 提交量打满，进程会被系统终止，表现为「闪退」或 `Fatal process out of memory: Zone` 而非用例失败；常见原因是 `PagefileOnOsVolume` 这个注册表值把分页文件锁在系统盘（详见 [docs/ROADMAP.md](docs/ROADMAP.md) 的 2026-10-31 记录）。
 
 未解决的问题、数据风险与下一步见 [docs/open-issues.md](docs/open-issues.md)，验收清单的逐项对照见 [docs/verification/delivery-acceptance.md](docs/verification/delivery-acceptance.md)。
+
+家里与工作电脑同步收藏的使用步骤与范围见 [双机同步说明](docs/two-computer-sync.md)。

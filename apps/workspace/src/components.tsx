@@ -174,7 +174,7 @@ export function Topbar() {
       <div className="topright">
         <span className="micro">
           <span className="statusdot" />
-          仅本地
+          本地主库
         </span>
         <button className="btn" onClick={() => navigate('capture')}>
           粘贴 / 导入

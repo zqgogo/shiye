@@ -284,6 +284,11 @@ export class WorkspaceService {
     return this.repos.cloudInbox.receive(entry, expectedLibraryId);
   }
 
+  async readTwoWay(address: string) { return this.repos.twoWay.read(mirrorBase(address).href); }
+  async assertTwoWay(plan: import('../../sync/src/two-way-local.js').SharedPlan, keys?: string[]) { await this.repos.twoWay.assert(plan, keys); }
+  async applyTwoWay(plan: import('../../sync/src/two-way-local.js').SharedPlan, rows: import('../../sync/src/two-way.js').SharedRow[], revision: number) { await this.repos.twoWay.apply(plan, rows, revision); }
+  async disconnectTwoWay(address: string) { await this.repos.twoWay.disconnect(mirrorBase(address).href); }
+
   async updateBookmark(
     id: string,
     expectedLocalRevision: number,
