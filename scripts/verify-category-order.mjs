@@ -106,6 +106,25 @@ try {
  await page.waitForFunction(()=>document.body.innerText.includes('新增 55 条')&&document.body.innerText.includes('已在待看 2 条'));
  const queueCount=await page.evaluate(async()=>{const q=indexedDB.open('shiye'); const db=await new Promise(r=>q.onsuccess=()=>r(q.result));const req=db.transaction('readingItems').objectStore('readingItems').count();const n=await new Promise(r=>req.onsuccess=()=>r(req.result));db.close();return n;});
  assert.equal(queueCount,57); console.log('PASS Edge: 跨页勾选 2 条批量待看，全选 57 条时新增 55 条并跳过 2 条重复');
+ await drag('C','A',.9);
+ await page.evaluate(()=>{const [from,to]=document.querySelectorAll('.bookmark'); const dt=new DataTransfer();from.querySelector('.drag-handle').dispatchEvent(new DragEvent('dragstart',{bubbles:true,dataTransfer:dt}));const rect=to.getBoundingClientRect();to.dispatchEvent(new DragEvent('drop',{bubbles:true,dataTransfer:dt,clientY:rect.bottom-2}));});
+ await page.waitForSelector('[data-undo-scope^="records:"]');
+ assert.ok(await page.$('[data-undo-scope="categories"]'));
+ const beforeClose=await rows();
+ await page.click('[aria-label="关闭分类撤销提示"]');
+ assert.equal(await page.$('[data-undo-scope="categories"]'),null);
+ assert.deepEqual(await rows(),beforeClose);
+ assert.ok(await page.$('[data-undo-scope^="records:"]'));
+ await page.evaluate(()=>[...document.querySelectorAll('.category-drop')].find(n=>n.title==='B').querySelector('.nav').click());
+ await page.waitForFunction(()=>!document.querySelector('[data-undo-scope^="records:"]'));
+ await page.evaluate(()=>[...document.querySelectorAll('.category-drop')].find(n=>n.title==='A').querySelector('.nav').click());
+ await page.waitForSelector('[data-undo-scope^="records:"]');
+ await clickText('撤销本页记录移动 / 排序');
+ await page.waitForFunction(()=>!document.querySelector('[data-undo-scope^="records:"]'));
+ assert.deepEqual(await rows(),beforeClose);
+ await drag('C','A',.1);
+ assert.ok(await page.$('.organization-undo'));
+ console.log('PASS Edge: 分类与记录撤销互不覆盖，各列表独立，关闭不改数据，记录撤销不影响分类');
  assert.deepEqual(errors,[]); console.log('PASS Edge: 前移、末尾、移入分类、刷新后排序与默认折叠（真实扩展 + IndexedDB）');
  await page.screenshot({path:path.join(dir,'result.png')});
 } finally { await browser.close(); }

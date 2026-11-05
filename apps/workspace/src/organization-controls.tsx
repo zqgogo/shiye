@@ -22,12 +22,28 @@ async function moveWithMerge(service: WorkspaceService, input: OrganizationMove)
 }
 
 export const ORGANIZATION_DRAG = 'application/x-shiye-organization';
-export function announceOrganization(id: string) {
-  window.dispatchEvent(new CustomEvent('shiye-organization', { detail: id }));
+const undoOperations = new Map<string, string>();
+export function announceOrganization(id: string, scope = 'categories') {
+  undoOperations.set(scope, id);
+  window.dispatchEvent(new Event('shiye-organization'));
+}
+export function OrganizationUndo({ scope }: { scope: string }) {
+  const { service, run } = useWorkspace();
+  const [, refresh] = useState(0);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { const listener = () => refresh((value) => value + 1); window.addEventListener('shiye-organization', listener); return () => window.removeEventListener('shiye-organization', listener); }, []);
+  const operationId = undoOperations.get(scope);
+  if (!operationId) return null;
+  const categories = scope === 'categories';
+  const dismiss = () => { if (undoOperations.get(scope) === operationId) undoOperations.delete(scope); window.dispatchEvent(new Event('shiye-organization')); };
+  return <div className="organization-undo" data-undo-scope={scope} role="status"><span>{categories ? '分类移动 / 排序已完成' : '本页记录移动 / 排序已完成'}</span><button className="iconbtn" aria-label={categories ? '关闭分类撤销提示' : '关闭记录撤销提示'} title="关闭提示，保留当前结果" disabled={busy} onClick={dismiss}>×</button><button className="btn small" disabled={busy} onClick={async () => {
+    setBusy(true);
+    try { const done = await run(async () => { await service.undoOrganization(operationId); return true; }, categories ? '已撤销分类操作。' : '已撤销本页记录操作。'); if (done) dismiss(); } finally { setBusy(false); }
+  }}>{categories ? '撤销上次移动 / 排序' : '撤销本页记录移动 / 排序'}</button><small>{categories ? '仅管理分类树最近一次操作。' : '仅管理本页收藏记录最近一次操作。'} 后续被修改时会停止撤销。</small></div>;
 }
 
 export function MovePicker({ items }: { items: OrganizationTarget[] }) {
-  const { data, run, service } = useWorkspace();
+  const { data, run, service, route } = useWorkspace();
   const [target, setTarget] = useState('');
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -56,9 +72,9 @@ export function MovePicker({ items }: { items: OrganizationTarget[] }) {
     if ((position === 'before' || position === 'after') && !anchor) return;
     setBusy(true);
     const result = await run(() => moveWithMerge(service, { items, ...(position !== 'last' && anchor ? { ...(position === 'after' ? { afterId: anchor.id } : { beforeId: anchor.id }), anchorRevision: 'localRevision' in anchor ? anchor.localRevision : anchor.revision } : {}), categoryFingerprint: categoryFingerprint(data.categories), parentId: target || null,
-      ...(category ? { parentRevision: category.revision } : {}) }), '已移动，可在左侧目录树撤销。');
+      ...(category ? { parentRevision: category.revision } : {}) }), isCategory ? '已移动，可在左侧分类树撤销。' : '已移动，可在本页撤销记录操作。');
     setBusy(false);
-    if (result) { announceOrganization(result.operationId); if (details.current) details.current.open = false; setOpen(false); }
+    if (result) { announceOrganization(result.operationId, isCategory ? 'categories' : `records:${route}`); if (details.current) details.current.open = false; setOpen(false); }
   };
   const targetName = target ? categoryPath(data.categories, target) : isCategory ? '最外层（顶层分类）' : '未分类';
   const anchorName = anchors.find((row) => row.id === anchorId);
@@ -81,7 +97,7 @@ export function MovePicker({ items }: { items: OrganizationTarget[] }) {
         </label>
         <label className="field"><span>2 · 在这个位置如何排列</span><select aria-label="移动后的顺序" disabled={busy} value={position} onChange={(event) => setPosition(event.target.value as typeof position)}><option value="last">放到同级最后</option><option value="first">放到同级最前</option><option value="before">放到某一项前面…</option><option value="after">放到某一项后面…</option></select></label>
         {(position === 'before' || position === 'after') && <label className="field"><span>选择参照项目（同一层级）</span><input aria-label="搜索排序目标" placeholder="搜索参照项目…" disabled={busy} value={anchorQuery} onChange={(event) => setAnchorQuery(event.target.value)} /><select aria-label="排序目标" disabled={busy} value={anchorId} onChange={(event) => setAnchorId(event.target.value)}><option value="">请选择参照项目</option>{anchors.filter((row) => row.id === anchorId || ('title' in row ? row.title : row.name).includes(anchorQuery)).map((row) => <option value={row.id} key={row.id}>{'title' in row ? row.title : row.name}</option>)}</select>{!anchors.length && <small>这个位置没有其他项目，可改选“最前”或“最后”。</small>}</label>}
-        <div className="move-preview" role="status"><b>确认后会发生什么</b><p>将「{subject}」放到「{targetName}」的{orderText}。</p><small>{sameParent ? '所属分类保持不变，只调整同级顺序。' : isCategory ? '上级分类会改变，子分类和收藏随之移动。' : '收藏会归入所选分类。'} 完成后可在左侧撤销上次移动。</small></div>
+        <div className="move-preview" role="status"><b>确认后会发生什么</b><p>将「{subject}」放到「{targetName}」的{orderText}。</p><small>{sameParent ? '所属分类保持不变，只调整同级顺序。' : isCategory ? '上级分类会改变，子分类和收藏随之移动。' : '收藏会归入所选分类。'} 完成后可在{isCategory ? '左侧分类树' : '本页记录列表'}撤销本次操作。</small></div>
         <div className="actions"><button className="btn" disabled={busy} onClick={close}>取消</button><button className="btn primary" disabled={busy || ((position === 'before' || position === 'after') && !anchorId)} onClick={() => void move()}>{busy ? '正在调整…' : sameParent ? '确认调整顺序' : '确认移动'}</button></div>
       </section>
     </div>, document.body)}
@@ -94,7 +110,6 @@ export function OrganizationTree() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const hoverTimer = useRef<number | null>(null);
   useEffect(() => () => { if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current); }, []);
-  const [operationId, setOperationId] = useState<string | null>(null);
   const [target, setTarget] = useState<string | null>(null);
   const categoryDrag = useRef(false);
   const [placement, setPlacement] = useState<'before' | 'inside' | 'after'>('inside');
@@ -105,18 +120,14 @@ export function OrganizationTree() {
     return fraction < .25 ? 'before' as const : fraction > .75 ? 'after' as const : 'inside' as const;
   };
   const clearHover = () => { if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current); hoverTimer.current = null; };
-  useEffect(() => {
-    const listener = (event: Event) => setOperationId((event as CustomEvent<string>).detail);
-    window.addEventListener('shiye-organization', listener);
-    return () => window.removeEventListener('shiye-organization', listener);
-  }, []);
+
 
   const apply = async (items: OrganizationTarget[], parent: Category | null, beforeId?: string, afterId?: string) => {
     const anchor = data.categories.find((row) => row.id === (beforeId ?? afterId));
     const input: OrganizationMove = { items, categoryFingerprint: categoryFingerprint(data.categories), parentId: parent?.id ?? null,
       ...(parent ? { parentRevision: parent.revision } : {}), ...(beforeId ? { beforeId } : {}), ...(afterId ? { afterId } : {}), ...(anchor ? { anchorRevision: anchor.revision } : {}) };
     const result = await run(() => moveWithMerge(service, input), '已移动。');
-    if (result) announceOrganization(result.operationId);
+    if (result) announceOrganization(result.operationId, items[0]?.kind === 'category' ? 'categories' : `records:${route}`);
   };
   const drop = (event: React.DragEvent, parent: Category | null, beforeId?: string, afterId?: string) => {
     const readingId = event.dataTransfer.getData('application/x-shiye-reading');
@@ -170,9 +181,6 @@ export function OrganizationTree() {
     <div className="category-root-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => drop(event, null)}>拖到这里提升到根级 / 移至未分类</div>
     <div className="category-drop-hint" role="status">{target ? placement === 'inside' ? '移入分类：' : placement === 'before' ? '放在前面：' : '放在后面：' : ''}{data.categories.find((row) => row.id === target)?.name}{!target && '拖动：上下边缘排序，中间移入'}</div>
     {children(null)}
-    {operationId && <button className="btn small" onClick={async () => {
-      const result = await run(async () => { await service.undoOrganization(operationId); return true; }, '已撤销移动。');
-      if (result) setOperationId(null);
-    }}>撤销上次移动 / 排序</button>}
+    <OrganizationUndo scope="categories" />
   </div>;
 }

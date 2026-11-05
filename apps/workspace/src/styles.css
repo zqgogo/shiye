@@ -545,3 +545,8 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .bookmark-drop-before::before { top:0; }
 .bookmark-drop-after::after { bottom:0; }
 @media(max-width:760px) { .list-sort-hint { flex-wrap:wrap; } }
+
+.organization-undo { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; padding:12px; margin-top:12px; border:1px solid var(--line); background:var(--accent-soft); border-radius:10px; }
+.organization-undo > span { align-self:center; color:var(--accent); font-size:12px; }
+.organization-undo > .btn,.organization-undo > small { grid-column:1 / -1; }
+.organization-undo > small { font-size:10px; color:var(--muted); line-height:1.6; }

@@ -1,4 +1,5 @@
 import { categoryPath } from '@shiye/core';
+import { OrganizationUndo } from './organization-controls.js';
 import { ConnectionsOverview } from './connection-status.js';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -221,7 +222,7 @@ const LIST_TITLES: Record<string, [string, string]> = {
 };
 
 export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES | 'category'; categoryId?: string }) {
-  const { data, navigate, openModal, run, service, toast, setPageSize: applyPageSize } = useWorkspace();
+  const { data, navigate, openModal, run, service, toast, route, setPageSize: applyPageSize } = useWorkspace();
   const sortKey = `shiye:list-sort:${mode}:${categoryId ?? ''}`;
   const readSort = (): 'recent' | 'title' | 'manual' => { try { const value = localStorage.getItem(sortKey); if (value === 'title' || value === 'recent' || value === 'manual' && (mode === 'category' || mode === 'uncategorized')) return value; } catch { /* Use the default when storage is unavailable. */ } return 'recent'; };
   const [sort, setSortState] = useState<'recent' | 'title' | 'manual'>(readSort);
@@ -756,6 +757,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
         </Notice>
       ) : null}
 
+      <OrganizationUndo scope={`records:${route}`} />
       {(mode === 'category' || mode === 'uncategorized') && <div className="list-sort-hint"><span>{sort === 'manual' ? '手动排序：拖动记录左侧的点阵，上半部放到前面，下半部放到后面。' : '当前按' + (sort === 'recent' ? '新增时间' : '标题') + '显示；拖动调整位置后会自动切换为手动排序。'}</span>{sort !== 'manual' && <button className="btn small" onClick={() => setSort('manual')}>切换手动排序</button>}</div>}
       <BookmarkList
         items={view.rows}

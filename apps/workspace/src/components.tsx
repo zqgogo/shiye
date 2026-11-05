@@ -261,7 +261,7 @@ export function BookmarkRow({
   mode?: 'trash' | 'inbox' | 'normal' | undefined;
   onSelect?: ((checked: boolean) => void) | undefined;
 }) {
-  const { data, openBookmark, openModal, run, service, toast } = useWorkspace();
+  const { data, openBookmark, openModal, run, service, toast, route } = useWorkspace();
   const deleted = Boolean(bookmark.deletedAt);
   const [dropSide, setDropSide] = useState<'before' | 'after' | null>(null);
   const canReorder = !deleted && (manualSort || Boolean(onReorder));
@@ -311,7 +311,7 @@ export function BookmarkRow({
           if (items.some((row) => row.id === bookmark.id || row.kind !== 'bookmark')) return;
           const parent = data.categories.find((row) => row.id === bookmark.categoryId);
           const result = await run(() => service.moveOrganization({ items, categoryFingerprint: categoryFingerprint(data.categories), parentId: bookmark.categoryId, ...(after ? { afterId: bookmark.id } : { beforeId: bookmark.id }), anchorRevision: bookmark.localRevision, ...(parent ? { parentRevision: parent.revision } : {}) }));
-          if (result) { announceOrganization(result.operationId); onReorder?.(); toast('已调整顺序，当前按手动顺序显示。'); }
+          if (result) { announceOrganization(result.operationId, `records:${route}`); onReorder?.(); toast('已调整顺序，当前按手动顺序显示。'); }
         } catch { toast('无法完成排序，请重试。', 'error'); }
       }}>
       {selectable ? (
