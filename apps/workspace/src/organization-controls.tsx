@@ -60,7 +60,8 @@ export function MovePicker({ items }: { items: OrganizationTarget[] }) {
 
 export function OrganizationTree() {
   const { data, service, run, navigate, route, toast, openModal } = useWorkspace();
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Only explicit user expansion opens a branch; newly imported IDs stay closed.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const hoverTimer = useRef<number | null>(null);
   useEffect(() => () => { if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current); }, []);
   const [operationId, setOperationId] = useState<string | null>(null);
@@ -114,15 +115,15 @@ export function OrganizationTree() {
             onDragOver={(event) => {
               if (!event.dataTransfer.types.some((type) => [ORGANIZATION_DRAG, 'application/x-shiye-reading', 'application/x-shiye-draft-rows'].includes(type))) return;
               event.preventDefault(); event.stopPropagation(); setTarget(row.id);
-              if (collapsed.has(row.id) && hoverTimer.current === null) hoverTimer.current = window.setTimeout(() => { setCollapsed((current) => { const next = new Set(current); next.delete(row.id); return next; }); hoverTimer.current = null; }, 650);
+              if (!expanded.has(row.id) && hoverTimer.current === null) hoverTimer.current = window.setTimeout(() => { setExpanded((current) => { const next = new Set(current); next.add(row.id); return next; }); hoverTimer.current = null; }, 650);
             }}
             onDragLeave={(event) => { if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return; setTarget(null); if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current); hoverTimer.current = null; }} onDrop={(event) => drop(event, row)} title={categoryPath(data.categories, row.id)}>
             <button className="iconbtn drag-handle" draggable aria-label={`拖动分类 ${row.name}`} title="拖到分类内部改变层级，拖到插入线调整顺序">⋮</button>
-            <button className="iconbtn" aria-label={`${collapsed.has(row.id) ? '展开' : '折叠'} ${row.name}`}
-              onClick={() => setCollapsed((current) => { const value = new Set(current); value.has(row.id) ? value.delete(row.id) : value.add(row.id); return value; })}>{hasChildren ? collapsed.has(row.id) ? '▸' : '▾' : '·'}</button>
+            <button className="iconbtn" aria-expanded={hasChildren ? expanded.has(row.id) : undefined} aria-label={`${!expanded.has(row.id) ? '展开' : '折叠'} ${row.name}`}
+              onClick={() => setExpanded((current) => { const value = new Set(current); value.has(row.id) ? value.delete(row.id) : value.add(row.id); return value; })}>{hasChildren ? !expanded.has(row.id) ? '▸' : '▾' : '·'}</button>
             <button className={`nav ${route === `cat:${row.id}` ? 'active' : ''}`} onClick={() => navigate(`cat:${row.id}`)}><span className="category-label">{seen.size >= 4 && <small className="category-depth" title={`第 ${seen.size + 1} 层`}>{seen.size + 1}</small>}{row.name}</span></button>
           <MovePicker items={[{ kind: 'category', id: row.id, revision: row.revision }]} /></div>
-          {!collapsed.has(row.id) && hasChildren && <div className={`category-children ${seen.size >= 3 ? 'category-deep' : ''}`}>{children(row.id, next)}</div>}
+          {expanded.has(row.id) && hasChildren && <div className={`category-children ${seen.size >= 3 ? 'category-deep' : ''}`}>{children(row.id, next)}</div>}
         </div>;
       });
 
