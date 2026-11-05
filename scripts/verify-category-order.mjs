@@ -70,6 +70,28 @@ try {
  await page.select('[aria-label="筛选分类"]','top');
  assert.equal(await page.$$eval('[aria-labelledby="cat-title"] .rule-row',ns=>ns.length),3);
  console.log('PASS Edge: 分类管理默认折叠、上级创建、展开树、顶层筛选、整树删除范围与迁移目标过滤');
+ await page.evaluate(()=>[...document.querySelectorAll('[aria-labelledby="cat-title"] button')].find(n=>n.textContent.trim()==='完成').click());
+ for (const name of ['排序一','排序二']) {
+  await page.click('.topright .btn.primary'); await page.waitForSelector('[aria-labelledby="new-title"]');
+  await page.type('[aria-labelledby="new-title"] input[placeholder="https://"]',`https://sort.example/${encodeURIComponent(name)}`);
+  await page.type('[aria-labelledby="new-title"] input[placeholder="给它一个容易找回的名字"]',name);
+  await page.select('[aria-label="选择分类"]',parentId);
+  await page.click('[aria-labelledby="new-title"] .actions .primary');
+  await page.waitForFunction(()=>!document.querySelector('[aria-labelledby="new-title"]'));
+ }
+ await page.evaluate(()=>[...document.querySelectorAll('.category-drop')].find(n=>n.title==='A').querySelector('.nav').click());
+ await page.waitForSelector('[aria-label="排序"]'); await page.select('[aria-label="排序"]','recent');
+ await page.evaluate(()=>{
+  const from=[...document.querySelectorAll('.bookmark')].find(n=>n.textContent.includes('排序二'));
+  const to=[...document.querySelectorAll('.bookmark')].find(n=>n.textContent.includes('排序一'));
+  const dt=new DataTransfer(); from.querySelector('.drag-handle').dispatchEvent(new DragEvent('dragstart',{bubbles:true,dataTransfer:dt}));
+  const rect=to.getBoundingClientRect(); const init={bubbles:true,dataTransfer:dt,clientY:rect.bottom-2};
+  to.dispatchEvent(new DragEvent('dragover',init));to.dispatchEvent(new DragEvent('drop',init));
+ });
+ await page.waitForFunction(()=>document.querySelector('[aria-label="排序"]').value==='manual');
+ assert.deepEqual(await page.$$eval('.bookmark h3',ns=>ns.map(n=>n.textContent.trim())),['排序一','排序二']);
+ await page.reload(); await page.waitForSelector('[aria-label="排序"]'); assert.equal(await page.$eval('[aria-label="排序"]',n=>n.value),'manual');
+ console.log('PASS Edge: 最近新增下拖放可生效，自动切换手动排序并显示目标顺序');
  assert.deepEqual(errors,[]); console.log('PASS Edge: 前移、末尾、移入分类、刷新后排序与默认折叠（真实扩展 + IndexedDB）');
  await page.screenshot({path:path.join(dir,'result.png')});
 } finally { await browser.close(); }

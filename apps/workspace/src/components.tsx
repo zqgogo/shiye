@@ -246,6 +246,7 @@ export function BookmarkRow({
   selectable,
   dragIds,
   manualSort,
+  onReorder,
   mode,
   onSelect,
 }: {
@@ -255,12 +256,15 @@ export function BookmarkRow({
   selected?: boolean | undefined;
   dragIds?: string[] | undefined;
   manualSort?: boolean | undefined;
+  onReorder?: (() => void) | undefined;
   selectable?: boolean | undefined;
   mode?: 'trash' | 'inbox' | 'normal' | undefined;
   onSelect?: ((checked: boolean) => void) | undefined;
 }) {
   const { data, openBookmark, openModal, run, service, toast } = useWorkspace();
   const deleted = Boolean(bookmark.deletedAt);
+  const [dropSide, setDropSide] = useState<'before' | 'after' | null>(null);
+  const canReorder = !deleted && (manualSort || Boolean(onReorder));
 
   const addToReading = async () => {
     const result = await run(
@@ -282,7 +286,7 @@ export function BookmarkRow({
   };
 
   return (
-    <article className="bookmark"
+    <article className={`bookmark ${dropSide ? `bookmark-drop-${dropSide}` : ''}`}
       onDragStart={(event) => {
         if (!(event.target as Element).closest('.drag-handle')) return;
         const ids = dragIds ?? [bookmark.id];
@@ -290,18 +294,24 @@ export function BookmarkRow({
         event.dataTransfer.setData(ORGANIZATION_DRAG, JSON.stringify(items));
         event.dataTransfer.setData('text/plain', `移动 ${items.length} 条收藏`);
       }}
-      onDragOver={(event) => { if (manualSort) event.preventDefault(); }}
+      onDragOver={(event) => { if (canReorder && event.dataTransfer.types.includes(ORGANIZATION_DRAG)) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); setDropSide(event.clientY < rect.top + rect.height / 2 ? 'before' : 'after'); } }}
+      onDragLeave={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setDropSide(null); }}
+      onDragEnd={() => setDropSide(null)}
       onDrop={async (event) => {
-        if (!manualSort) return;
+        setDropSide(null);
+        if (!canReorder) return;
         const raw = event.dataTransfer.getData(ORGANIZATION_DRAG);
         if (!raw) return;
         event.preventDefault();
+        event.stopPropagation();
+        const rect = event.currentTarget.getBoundingClientRect();
+        const after = event.clientY >= rect.top + rect.height / 2;
         try {
           const items = JSON.parse(raw) as import('@shiye/core').OrganizationTarget[];
           if (items.some((row) => row.id === bookmark.id || row.kind !== 'bookmark')) return;
           const parent = data.categories.find((row) => row.id === bookmark.categoryId);
-          const result = await run(() => service.moveOrganization({ items, categoryFingerprint: categoryFingerprint(data.categories), parentId: bookmark.categoryId, beforeId: bookmark.id, ...(parent ? { parentRevision: parent.revision } : {}) }));
-          if (result) announceOrganization(result.operationId);
+          const result = await run(() => service.moveOrganization({ items, categoryFingerprint: categoryFingerprint(data.categories), parentId: bookmark.categoryId, ...(after ? { afterId: bookmark.id } : { beforeId: bookmark.id }), anchorRevision: bookmark.localRevision, ...(parent ? { parentRevision: parent.revision } : {}) }));
+          if (result) { announceOrganization(result.operationId); onReorder?.(); toast('已调整顺序，当前按手动顺序显示。'); }
         } catch { toast('无法完成排序，请重试。', 'error'); }
       }}>
       {selectable ? (
@@ -312,7 +322,7 @@ export function BookmarkRow({
           onChange={(event) => onSelect?.(event.target.checked)}
         />
       ) : null}
-      {!deleted && <button className="iconbtn drag-handle" draggable aria-label={`拖动 ${bookmark.title}`} title="拖动到分类，或在手动排序时拖到记录前面">⋮⋮</button>}
+      {!deleted && <button className="iconbtn drag-handle" draggable aria-label={`拖动 ${bookmark.title}`} title={canReorder ? '拖到记录上半部放到前面，下半部放到后面；完成后按手动顺序显示' : '拖到左侧分类可修改归属；此列表不支持拖动排序'}>⋮⋮</button>}
       {!deleted && <MovePicker items={[{ kind: 'bookmark', id: bookmark.id, revision: bookmark.localRevision }]} />}
       <div className="favicon" aria-hidden="true">
         {[...bookmark.title][0] ?? '书'}

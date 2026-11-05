@@ -31,6 +31,7 @@ function BookmarkList({
   onSelect,
   summary,
   manualSort,
+  onReorder,
 }: {
   items: Bookmark[];
   mode?: 'trash' | 'inbox' | 'normal' | undefined;
@@ -41,6 +42,7 @@ function BookmarkList({
   onSelect?: (id: string, checked: boolean) => void;
   /** 列表头右侧的统计文案：分页后要写清「第几页、本页第几条到第几条」。 */
   manualSort?: boolean | undefined;
+  onReorder?: (() => void) | undefined;
   summary?: string | undefined;
 }) {
   const { data } = useWorkspace();
@@ -68,6 +70,7 @@ function BookmarkList({
           selected={selected?.has(bookmark.id)}
           dragIds={selected?.has(bookmark.id) ? [...selected] : [bookmark.id]}
           manualSort={manualSort}
+          onReorder={onReorder}
           onSelect={(checked) => onSelect?.(bookmark.id, checked)}
         />
       ))}
@@ -219,7 +222,11 @@ const LIST_TITLES: Record<string, [string, string]> = {
 
 export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES | 'category'; categoryId?: string }) {
   const { data, navigate, openModal, run, service, toast, setPageSize: applyPageSize } = useWorkspace();
-  const [sort, setSort] = useState<'recent' | 'title' | 'manual'>('recent');
+  const sortKey = `shiye:list-sort:${mode}:${categoryId ?? ''}`;
+  const readSort = (): 'recent' | 'title' | 'manual' => { try { const value = localStorage.getItem(sortKey); if (value === 'title' || value === 'recent' || value === 'manual' && (mode === 'category' || mode === 'uncategorized')) return value; } catch { /* Use the default when storage is unavailable. */ } return 'recent'; };
+  const [sort, setSortState] = useState<'recent' | 'title' | 'manual'>(readSort);
+  useEffect(() => { setSortState(readSort()); }, [sortKey]);
+  const setSort = (value: 'recent' | 'title' | 'manual') => { setSortState(value); try { localStorage.setItem(sortKey, value); } catch { /* Sorting still works in memory. */ } };
   const [trash, setTrash] = useState<Bookmark[] | null>(null);
   const [confirmPurge, setConfirmPurge] = useState(false);
   const [purgeCounts, setPurgeCounts] = useState<PurgeCounts | null>(null);
@@ -731,6 +738,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
         </Notice>
       ) : null}
 
+      {(mode === 'category' || mode === 'uncategorized') && <div className="list-sort-hint"><span>{sort === 'manual' ? '手动排序：拖动记录左侧的点阵，上半部放到前面，下半部放到后面。' : '当前按' + (sort === 'recent' ? '新增时间' : '标题') + '显示；拖动调整位置后会自动切换为手动排序。'}</span>{sort !== 'manual' && <button className="btn small" onClick={() => setSort('manual')}>切换手动排序</button>}</div>}
       <BookmarkList
         items={view.rows}
         summary={
@@ -742,6 +750,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
         selectable={selectMode}
         selected={selectedSet}
         manualSort={sort === 'manual'}
+        onReorder={mode === 'category' || mode === 'uncategorized' ? () => setSort('manual') : undefined}
         onSelect={toggleSelected}
         empty={
           mode === 'trash'
