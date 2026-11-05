@@ -11,3 +11,5 @@
 报告与截图：`.verify/reports/cloud-inbox.json`、`.verify/reports/cloud-runtime.json`、`.verify/cloud-inbox/mobile.png`、`.verify/cloud-inbox/desktop.png`（本机忽略文件）。
 
 2026-11-05 中断后收尾：复核最终专项测试 21 项通过，扩展产物为 preview.4，浏览器专项与本地运行时报告均无失败。本地已生成第三份提交凭据，保留原发布和只读凭据。真实 `cloud:deploy` 在启动前被自动审批拒绝，未执行远端迁移、代码部署或 secret 更新；需用户明确授权后才能继续真实部署。原云端服务保持上一版。
+
+2026-11-05 用户明确授权后，已运行 `cloud:doctor` 与真实 `cloud:deploy`，退出码均为 0。现有 D1 已执行增量迁移，Worker/Assets 与三种认证哈希已更新；在线身份握手、匿名隔离、只读不可提交、提交不可发布以及空提交拒绝检查通过。没有自动发布真实收藏或提交测试记录，未执行清空镜像。真实手机/iOS/Safari 端到端使用仍待用户验收；本次在线检查只确认部署与协议权限，不等同于真机测试。
