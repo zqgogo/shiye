@@ -46,6 +46,25 @@ try {
  await page.waitForFunction(()=>!document.querySelector('.move-dialog'));
  assert.equal((await rows()).find(r=>r.name==='C').parentId,null);
  console.log('PASS Edge: 移动面板默认保留上级、过滤自身、预览归属变化、Escape 取消、确认后持久化');
+ await page.click('.nav-more'); await page.waitForSelector('[aria-labelledby="cat-title"]');
+ assert.equal(await page.$$eval('[aria-labelledby="cat-title"] .rule-row',ns=>ns.length),3);
+ await page.select('[aria-label="新分类的上级"]',parentId);
+ await page.type('.category-create-form input','D 子分类');
+ await page.click('.category-create-form .btn');
+ await page.waitForFunction(()=>document.body.innerText.includes('已创建分类'));
+ assert.equal((await rows()).find(r=>r.name==='D 子分类').parentId,parentId);
+ assert.equal(await page.$$eval('[aria-labelledby="cat-title"] .rule-row',ns=>ns.length),3);
+ await page.click('[aria-label="展开或收起 A"]');
+ await page.waitForFunction(()=>document.querySelectorAll('[aria-labelledby="cat-title"] .rule-row').length===4);
+ await page.screenshot({path:path.join(dir,'category-manager.png')});
+ await page.evaluate(()=>[...document.querySelectorAll('[aria-labelledby="cat-title"] .rule-row')].find(n=>n.querySelector('strong')?.textContent.startsWith('A')).querySelector('.danger').click());
+ await page.select('[aria-label="删除分类范围"]','tree');
+ assert.ok(await page.$eval('[aria-labelledby="cat-title"] .notice',n=>n.textContent.includes('将删除 2 个分类')));
+ assert.ok(!await page.$$eval('[aria-label="迁移到"] option',ns=>ns.some(n=>n.textContent.includes('D 子分类'))));
+ await page.evaluate(()=>[...document.querySelectorAll('[aria-labelledby="cat-title"] .notice button')].find(n=>n.textContent.trim()==='取消').click());
+ await page.select('[aria-label="筛选分类"]','top');
+ assert.equal(await page.$$eval('[aria-labelledby="cat-title"] .rule-row',ns=>ns.length),3);
+ console.log('PASS Edge: 分类管理默认折叠、上级创建、展开树、顶层筛选、整树删除范围与迁移目标过滤');
  assert.deepEqual(errors,[]); console.log('PASS Edge: 前移、末尾、移入分类、刷新后排序与默认折叠（真实扩展 + IndexedDB）');
  await page.screenshot({path:path.join(dir,'result.png')});
 } finally { await browser.close(); }

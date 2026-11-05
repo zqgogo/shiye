@@ -1136,16 +1136,17 @@ export class DexieCategoryRepository implements CategoryRepository {
     return rows.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
   }
 
-  async create(name: string, description = ''): Promise<Category> {
+  async create(name: string, description = '', parentId: string | null = null): Promise<Category> {
     const cleanName = requireText(name, '分类名称', LIMITS.categoryName);
     const cleanDesc = optionalText(description, '分类说明', LIMITS.categoryDescription);
     return this.db.transaction('rw', this.db.categories, async () => {
-      const sameName = (await this.db.categories.where('name').equals(cleanName).toArray()).find((row) => !row.parentId);
+      if (parentId && !await this.db.categories.get(parentId)) throw new AppError('NOT_FOUND', '上级分类不存在，请重新选择。');
+      const sameName = (await this.db.categories.where('name').equals(cleanName).toArray()).find((row) => (row.parentId ?? null) === parentId);
       if (sameName) throw new AppError('DUPLICATE', '已经有同名分类。');
       const now = nowIso();
       const category: Category = {
         id: newId(),
-        parentId: null,
+        parentId,
         sortOrder: Math.max(0, ...(await this.db.categories.toArray()).map((row) => row.sortOrder ?? 0)) + 1024,
         name: cleanName,
         description: cleanDesc,
@@ -1184,20 +1185,24 @@ export class DexieCategoryRepository implements CategoryRepository {
     });
   }
 
-  async remove(id: string, migrateTo: string | null): Promise<{ movedBookmarks: number }> {
+  async remove(id: string, migrateTo: string | null, options?: { includeDescendants?: boolean; fingerprint?: string }): Promise<{ movedBookmarks: number }> {
     return this.db.transaction(
       'rw',
       [this.db.categories, this.db.bookmarks, this.db.settings],
       async () => {
         const current = await this.db.categories.get(id);
         if (!current) throw new AppError('NOT_FOUND', '没有找到这个分类。');
+        const allCategories = await this.db.categories.toArray();
+        if (options?.fingerprint && options.fingerprint !== categoryFingerprint(allCategories)) throw new AppError('REVISION_CONFLICT', '分类结构已变化，请重新核对删除范围。');
+        const removed = new Set([id]);
+        if (options?.includeDescendants) { let changed = true; while (changed) { changed = false; for (const row of allCategories) if (row.parentId && removed.has(row.parentId) && !removed.has(row.id)) { removed.add(row.id); changed = true; } } }
         if (migrateTo) {
           const target = await this.db.categories.get(migrateTo);
-          if (!target || migrateTo === id) {
+          if (!target || removed.has(migrateTo)) {
             throw new AppError('INVALID_INPUT', '迁移目标分类无效。');
           }
         }
-        const affected = await this.db.bookmarks.where('categoryKey').equals(id).toArray();
+        const affected = await this.db.bookmarks.where('categoryKey').anyOf([...removed]).toArray();
         for (const bookmark of affected) {
           const next: Bookmark = {
             ...bookmark,
@@ -1209,16 +1214,16 @@ export class DexieCategoryRepository implements CategoryRepository {
           Object.assign(next, deriveIndexFields(next));
           await this.db.bookmarks.put(next);
         }
-        const children = (await this.db.categories.toArray()).filter((row) => row.parentId === id);
+        const children = options?.includeDescendants ? [] : allCategories.filter((row) => row.parentId === id);
         for (const child of children) {
           await this.db.categories.put({ ...child, parentId: current.parentId ?? null, revision: child.revision + 1, updatedAt: nowIso() });
         }
-        await this.db.categories.delete(id);
+        await this.db.categories.bulkDelete([...removed]);
         assertCategoryTree(await this.db.categories.toArray());
         const settingsRow = await this.db.settings.get('app');
         if (settingsRow) {
           const value = settingsRow.value as { pinnedCategoryIds?: string[] };
-          const pinned = (value.pinnedCategoryIds ?? []).filter((cid) => cid !== id);
+          const pinned = (value.pinnedCategoryIds ?? []).filter((cid) => !removed.has(cid));
           await this.db.settings.put({
             key: 'app',
             value: { ...value, pinnedCategoryIds: pinned },

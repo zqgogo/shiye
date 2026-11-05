@@ -174,9 +174,9 @@ export interface ReadingRepository {
 
 export interface CategoryRepository {
   list(): Promise<Category[]>;
-  create(name: string, description?: string): Promise<Category>;
+  create(name: string, description?: string, parentId?: string | null): Promise<Category>;
   rename(id: string, patch: { name?: string; description?: string }): Promise<Category>;
-  remove(id: string, migrateTo: string | null): Promise<{ movedBookmarks: number }>;
+  remove(id: string, migrateTo: string | null, options?: { includeDescendants?: boolean; fingerprint?: string }): Promise<{ movedBookmarks: number }>;
 }
 
 export interface TagRepository {

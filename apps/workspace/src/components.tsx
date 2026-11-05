@@ -120,6 +120,7 @@ export function Sidebar() {
       <div className="navgroup" style={{ marginTop: 24 }}>
         <small>我的分类 · COLLECTIONS</small>
         <OrganizationTree />
+        {pinned.length > 0 && <small className="pinned-caption">置顶快捷入口 · 最多 8 个</small>}
         {pinned.map((category) => (
           <button
             key={category.id}

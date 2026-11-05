@@ -249,3 +249,39 @@ it('一万条 HTML 完整解析、暂存、同目录入库并整批撤回，超�
   expect(await db.categories.count()).toBe(0);
   expect((await db.purgeSnapshots.toArray())[0]?.counts.bookmarks).toBe(10_000);
 }, 60_000);
+
+it('按上级创建分类，仅同级重名冲突，失效上级不创建孤儿', async () => {
+ const a=await repos.categories.create('大类 A'), b=await repos.categories.create('大类 B');
+ const child=await repos.categories.create('子类','',a.id);
+ expect(child.parentId).toBe(a.id);
+ await expect(repos.categories.create('子类','',a.id)).rejects.toMatchObject({code:'DUPLICATE'});
+ expect((await repos.categories.create('子类','',b.id)).parentId).toBe(b.id);
+ await expect(repos.categories.create('孤儿','',newId())).rejects.toMatchObject({code:'NOT_FOUND'});
+});
+it('删除大类整树保留并迁移收藏，拒绝树内目标，清理置顶引用', async () => {
+ const root=await repos.categories.create('大类'), child=await repos.categories.create('子类','',root.id), target=await repos.categories.create('迁移目标');
+ const bookmark=await repos.bookmarks.create({originalUrl:'https://category.example/keep',title:'保留',categoryId:child.id});
+ await expect(repos.categories.remove(root.id,child.id,{includeDescendants:true})).rejects.toMatchObject({code:'INVALID_INPUT'});
+ expect(await db.categories.count()).toBe(3);
+ await repos.settings.updateApp({pinnedCategoryIds:[root.id,child.id,target.id]});
+ const result=await repos.categories.remove(root.id,target.id,{includeDescendants:true});
+ expect(result.movedBookmarks).toBe(1); expect(await db.categories.count()).toBe(1);
+ expect((await db.bookmarks.get(bookmark.id))?.categoryId).toBe(target.id);
+ expect((await repos.settings.getApp()).pinnedCategoryIds).toEqual([target.id]);
+});
+it('只删当前层提升子类；预览结构过期则拒绝整树删除', async () => {
+ const root=await repos.categories.create('大类'), child=await repos.categories.create('子类','',root.id);
+ await expect(repos.categories.remove(root.id,null,{includeDescendants:true,fingerprint:'old'})).rejects.toMatchObject({code:'REVISION_CONFLICT'});
+ await repos.categories.remove(root.id,null);
+ expect((await db.categories.get(child.id))?.parentId).toBe(null);
+});
+
+it('删一层遇同级重名时回滚，子分类和收藏均保留', async () => {
+ const root=await repos.categories.create('大类'), child=await repos.categories.create('重名','',root.id);
+ await repos.categories.create('重名');
+ const bookmark=await repos.bookmarks.create({originalUrl:'https://category.example/rollback',title:'保留',categoryId:root.id});
+ await expect(repos.categories.remove(root.id,null)).rejects.toThrow();
+ expect(await db.categories.get(root.id)).toBeDefined();
+ expect((await db.categories.get(child.id))?.parentId).toBe(root.id);
+ expect((await db.bookmarks.get(bookmark.id))?.categoryId).toBe(root.id);
+});

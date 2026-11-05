@@ -383,8 +383,8 @@ export class WorkspaceService {
     return deleted.find((row) => row.canonicalUrl === checked.canonicalUrl);
   }
 
-  async createCategory(name: string, description?: string): Promise<Category> {
-    return this.repos.categories.create(name, description ?? '');
+  async createCategory(name: string, description?: string, parentId: string | null = null): Promise<Category> {
+    return this.repos.categories.create(name, description ?? '', parentId);
   }
 
   async renameCategory(id: string, patch: { name?: string; description?: string }): Promise<Category> {
@@ -394,8 +394,8 @@ export class WorkspaceService {
     return renamed;
   }
 
-  async removeCategory(id: string, migrateTo: string | null): Promise<{ movedBookmarks: number }> {
-    return this.repos.categories.remove(id, migrateTo);
+  async removeCategory(id: string, migrateTo: string | null, options?: { includeDescendants?: boolean; fingerprint?: string }): Promise<{ movedBookmarks: number }> {
+    return this.repos.categories.remove(id, migrateTo, options);
   }
 
   async setPinnedCategories(ids: string[]): Promise<AppSettings> {

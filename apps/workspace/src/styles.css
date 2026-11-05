@@ -527,3 +527,10 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .move-preview b { font-size:12px; color:var(--accent); }
 .move-preview p { margin:6px 0; }
 .move-preview small { color:var(--muted); }
+
+.category-create-form { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; gap:12px; align-items:end; }
+.category-create-form .field { margin:0; min-width:0; }
+.category-create-form .btn { white-space:nowrap; height:44px; }
+[aria-labelledby="cat-title"] .rule-row strong small { overflow-wrap:anywhere; }
+[aria-labelledby="cat-title"] .notice select { width:100%; max-width:100% !important; }
+@media(max-width:760px) { .category-create-form { grid-template-columns:1fr; } }

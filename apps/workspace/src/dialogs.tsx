@@ -1,4 +1,4 @@
-import { categoryPath } from '@shiye/core';
+import { categoryPath, categoryFingerprint, paginate } from '@shiye/core';
 import { useEffect, useMemo, useState } from 'react';
 import {
   LIMITS,
@@ -25,7 +25,7 @@ import {
 } from '@shiye/core';
 import { notifyDataChanged } from '@shiye/application';
 import { useWorkspace } from './state.js';
-import { BATCH_STATE_LABEL, ICONS, NO_FOLDER } from './components.js';
+import { BATCH_STATE_LABEL, ICONS, NO_FOLDER, Pager } from './components.js';
 
 function CategoryPicker({
   value,
@@ -860,9 +860,17 @@ function toggleLock(
 export function CategoriesModal() {
   const { data, service, closeModal, run, navigate, toast } = useWorkspace();
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<'all' | 'pinned' | 'nonempty'>('all');
-  const [sort, setSort] = useState<'name' | 'count'>('name');
+  const [filter, setFilter] = useState<'all' | 'top' | 'branch' | 'leaf' | 'pinned' | 'nonempty' | 'empty'>('all');
+  const [sort, setSort] = useState<'manual' | 'name' | 'count'>('manual');
   const [newName, setNewName] = useState('');
+  const [newParent, setNewParent] = useState('');
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(1);
+  const [deleteTree, setDeleteTree] = useState(false);
+  const [deleteFingerprint, setDeleteFingerprint] = useState('');
+  useEffect(() => setPage(1), [search, filter, sort]);
+  const descendants = (id: string) => { const ids = new Set([id]); let changed = true; while (changed) { changed = false; for (const row of data.categories) if (row.parentId && ids.has(row.parentId) && !ids.has(row.id)) { ids.add(row.id); changed = true; } } return ids; };
+
   const [editing, setEditing] = useState<{ id: string; name: string; description: string } | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [migrateTo, setMigrateTo] = useState<string>('');
@@ -874,16 +882,25 @@ export function CategoriesModal() {
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
 
-  let rows = data.categories.filter((category) =>
-    category.name.toLowerCase().includes(search.trim().toLowerCase())
-  );
-  if (filter === 'pinned') rows = rows.filter((category) => pinned.includes(category.id));
-  if (filter === 'nonempty') rows = rows.filter((category) => (counts.get(category.id) ?? 0) > 0);
-  rows = [...rows].sort((a, b) =>
-    sort === 'count'
-      ? (counts.get(b.id) ?? 0) - (counts.get(a.id) ?? 0) || a.name.localeCompare(b.name, 'zh-CN')
-      : a.name.localeCompare(b.name, 'zh-CN')
-  );
+  const totals = new Map(data.categories.map((row) => [row.id, [...descendants(row.id)].reduce((sum, id) => sum + (counts.get(id) ?? 0), 0)]));
+  const matched = data.categories.filter((category) => {
+    const branch = data.categories.some((row) => row.parentId === category.id);
+    return categoryPath(data.categories, category.id).toLowerCase().includes(search.trim().toLowerCase()) &&
+      (filter === 'all' || filter === 'top' && !category.parentId || filter === 'branch' && branch || filter === 'leaf' && !branch || filter === 'pinned' && pinned.includes(category.id) || filter === 'nonempty' && (totals.get(category.id) ?? 0) > 0 || filter === 'empty' && (totals.get(category.id) ?? 0) === 0);
+  });
+  const visible = new Set(matched.map((row) => row.id));
+  const filtered = Boolean(search.trim()) || filter !== 'all';
+  if (filtered) for (const category of matched) { let id = category.parentId; const seen = new Set<string>(); while (id && !seen.has(id)) { seen.add(id); visible.add(id); id = data.categories.find((row) => row.id === id)?.parentId; } }
+  const rows: (Category & { depth: number })[] = [];
+  const visit = (parent: string | null, depth = 0, seen = new Set<string>()) => {
+    const siblings = data.categories.filter((row) => (row.parentId ?? null) === parent && visible.has(row.id) && !seen.has(row.id));
+    siblings.sort((a,b) => sort === 'count' ? (totals.get(b.id) ?? 0) - (totals.get(a.id) ?? 0) || a.name.localeCompare(b.name) : sort === 'name' ? a.name.localeCompare(b.name, 'zh-CN') : (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name));
+    for (const row of siblings) { rows.push({ ...row, depth }); if (filtered || expanded.has(row.id)) visit(row.id, depth + 1, new Set([...seen, row.id])); }
+  };
+  visit(null);
+  const paged = paginate(rows, page, data.settings.pageSize);
+  const removedIds = deleting ? deleteTree ? descendants(deleting) : new Set([deleting]) : new Set<string>();
+  const deletionCount = [...removedIds].reduce((sum, id) => sum + (counts.get(id) ?? 0), 0);
 
   const togglePin = async (categoryId: string) => {
     const isPinned = pinned.includes(categoryId);
@@ -909,7 +926,7 @@ export function CategoriesModal() {
   const createCategory = async () => {
     const name = newName.trim();
     if (!name) return;
-    const created = await run(() => service.createCategory(name), '已创建分类。');
+    const created = await run(() => service.createCategory(name, '', newParent || null), '已创建分类。');
     if (created) setNewName('');
   };
 
@@ -925,7 +942,7 @@ export function CategoriesModal() {
           </button>
         </div>
         <p className="micro">
-          搜索分类，点击进入；置顶后显示在左侧，最多 {LIMITS.pinnedCategories} 个。删除分类需要先迁移引用，不会连带删除收藏。
+          左侧目录树显示全部分类，默认折叠，无数量上限；置顶另提供最多 {LIMITS.pinnedCategories} 个快捷入口。这里按层级管理，删除分类会保留收藏。
         </p>
         <div className="toolbar">
           <input
@@ -937,11 +954,11 @@ export function CategoriesModal() {
           />
           <select aria-label="筛选分类" value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>
             <option value="all">全部分类</option>
-            <option value="pinned">已置顶</option>
-            <option value="nonempty">非空分类</option>
+            <option value="top">顶层大类</option><option value="branch">含子分类</option><option value="leaf">末级分类</option><option value="empty">空分类（含子级无收藏）</option><option value="pinned">已置顶</option>
+            <option value="nonempty">有收藏（含子级）</option>
           </select>
           <select aria-label="分类排序" value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}>
-            <option value="name">按名称</option>
+            <option value="manual">按手动顺序</option><option value="name">按名称</option>
             <option value="count">按收藏数</option>
           </select>
           <span className="spacer" />
@@ -949,9 +966,9 @@ export function CategoriesModal() {
 
         <div style={{ maxHeight: '46vh', overflow: 'auto' }}>
           {rows.length === 0 ? <p className="micro">没有匹配的分类。</p> : null}
-          {rows.map((category) => (
+          {paged.rows.map((category) => (
             <div className="rule-row" key={category.id}>
-              <span className="category-dot" />
+              <button className="iconbtn" style={{ marginLeft: Math.min(category.depth, 5) * 14 }} aria-label={`展开或收起 ${category.name}`} aria-expanded={expanded.has(category.id)} disabled={!data.categories.some((row) => row.parentId === category.id) || filtered} onClick={() => setExpanded((current) => { const next = new Set(current); next.has(category.id) ? next.delete(category.id) : next.add(category.id); return next; })}>{data.categories.some((row) => row.parentId === category.id) ? expanded.has(category.id) || filtered ? '▾' : '▸' : '·'}</button>
               <strong>
                 {editing?.id === category.id ? (
                   <input
@@ -961,12 +978,12 @@ export function CategoriesModal() {
                   />
                 ) : (
                   <>
-                    {categoryPath(data.categories, category.id)}
-                    <small>{category.description || '暂无说明'}</small>
+                    {category.name}
+                    <small title={categoryPath(data.categories, category.id)}>{category.parentId ? `上级：${categoryPath(data.categories, category.parentId)}` : '顶层分类'} · {data.categories.filter((row) => row.parentId === category.id).length} 个子分类</small>
                   </>
                 )}
               </strong>
-              <small>{counts.get(category.id) ?? 0} 条</small>
+              <small title="包含子分类中的收藏">{totals.get(category.id) ?? 0} 条（含子级）</small>
               {editing?.id === category.id ? (
                 <>
                   <button
@@ -1012,7 +1029,7 @@ export function CategoriesModal() {
                   >
                     进入
                   </button>
-                  <button className="btn small danger" onClick={() => setDeleting(category.id)}>
+                  <button className="btn small danger" onClick={() => { setDeleting(category.id); setDeleteFingerprint(categoryFingerprint(data.categories)); setDeleteTree(false); setMigrateTo(''); }}>
                     删除
                   </button>
                 </>
@@ -1021,10 +1038,12 @@ export function CategoriesModal() {
           ))}
         </div>
 
+        <Pager page={paged.page} pageCount={paged.pageCount} total={paged.total} from={paged.from} to={paged.to} pageSize={data.settings.pageSize} onPage={setPage} onPageSize={(size) => { setPage(1); void run(() => service.setPageSize(size)); }} />
         {deleting ? (
           <div className="notice danger">
             <strong>删除「{data.categories.find((category) => category.id === deleting)?.name}」</strong>
-            <span>该分类下的 {(counts.get(deleting) ?? 0)} 条收藏不会被删除，请选择迁移目标。</span>
+            <label className="field"><span>删除范围</span><select aria-label="删除分类范围" value={deleteTree ? 'tree' : 'single'} onChange={(event) => { setDeleteTree(event.target.value === 'tree'); setMigrateTo(''); }}><option value="single">只删除这一层，子分类提升一级</option><option value="tree">删除整个大类及所有子分类（保留收藏）</option></select></label>
+            <p>将删除 {removedIds.size} 个分类；其中 {deletionCount} 条现有收藏迁移到下方目标，回收站中的引用也会迁移。收藏不会删除。{!deleteTree && '子分类及其内容保留，提升至当前分类的上级。'}</p><p>分类结构删除不能通过回收站恢复，建议先导出备份。只删一层时如出现同级重名，整次操作会停止。</p>{deleteFingerprint !== categoryFingerprint(data.categories) && <p role="alert">分类结构已变化，请取消后重新选择删除范围。</p>}
             <select
               aria-label="迁移到"
               value={migrateTo}
@@ -1033,7 +1052,7 @@ export function CategoriesModal() {
             >
               <option value="">迁移到未分类</option>
               {data.categories
-                .filter((category) => category.id !== deleting)
+                .filter((category) => !removedIds.has(category.id))
                 .map((category) => (
                   <option key={category.id} value={category.id}>
                     {categoryPath(data.categories, category.id)}
@@ -1042,9 +1061,10 @@ export function CategoriesModal() {
             </select>
             <button
               className="btn small danger"
+              disabled={deleteFingerprint !== categoryFingerprint(data.categories)}
               onClick={async () => {
                 const done = await run(
-                  () => service.removeCategory(deleting, migrateTo || null),
+                  () => service.removeCategory(deleting, migrateTo || null, { includeDescendants: deleteTree, fingerprint: deleteFingerprint }),
                   '分类已删除，收藏已迁移。'
                 );
                 if (done) {
@@ -1062,18 +1082,18 @@ export function CategoriesModal() {
         ) : null}
 
         <h3>新建分类</h3>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div className="category-create-form"><label className="field"><span>上级分类</span><select aria-label="新分类的上级" value={newParent} onChange={(event) => setNewParent(event.target.value)}><option value="">最外层（顶层分类）</option>{data.categories.map((row) => <option value={row.id} key={row.id}>{categoryPath(data.categories, row.id)}</option>)}</select></label><label className="field"><span>分类名称</span>
           <input
             value={newName}
             onChange={(event) => setNewName(event.target.value)}
             placeholder="分类名称"
             maxLength={LIMITS.categoryName}
           />
-          <button className="btn primary" onClick={() => void createCategory()}>
+          </label><button className="btn primary" onClick={() => void createCategory()}>
             创建
           </button>
         </div>
-        <p className="micro">分类可通过左侧目录树调整层级；跨分类的主题请使用标签。</p>
+        <p className="micro">创建后归入所选上级；同一上级下名称不能重复。跨分类的主题请使用标签。</p>
       </div>
     </div>
   );
