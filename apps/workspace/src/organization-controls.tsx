@@ -46,7 +46,7 @@ export function MovePicker({ items }: { items: OrganizationTarget[] }) {
       ...(category ? { parentRevision: category.revision } : {}) }), '已移动，可在左侧目录树撤销。');
     if (result) announceOrganization(result.operationId);
   };
-  return <details className="move-picker" onToggle={(event) => setOpen(event.currentTarget.open)}><summary>移动到…</summary>{open && <>
+  return <details className="move-picker" onToggle={(event) => setOpen(event.currentTarget.open)}><summary aria-label="移动到其他分类或调整顺序" title="移动到其他分类或调整顺序">移动到…</summary>{open && <>
     <input aria-label="搜索移动目标" placeholder="搜索分类路径" value={query} onChange={(event) => setQuery(event.target.value)} />
     <select aria-label="移动目标分类" value={target} onChange={(event) => { setTarget(event.target.value); setAnchorId(''); }}>
       <option value="">根级 / 未分类</option>
@@ -120,9 +120,9 @@ export function OrganizationTree() {
             <button className="iconbtn drag-handle" draggable aria-label={`拖动分类 ${row.name}`} title="拖到分类内部改变层级，拖到插入线调整顺序">⋮</button>
             <button className="iconbtn" aria-label={`${collapsed.has(row.id) ? '展开' : '折叠'} ${row.name}`}
               onClick={() => setCollapsed((current) => { const value = new Set(current); value.has(row.id) ? value.delete(row.id) : value.add(row.id); return value; })}>{hasChildren ? collapsed.has(row.id) ? '▸' : '▾' : '·'}</button>
-            <button className={`nav ${route === `cat:${row.id}` ? 'active' : ''}`} onClick={() => navigate(`cat:${row.id}`)}>{row.name}</button>
+            <button className={`nav ${route === `cat:${row.id}` ? 'active' : ''}`} onClick={() => navigate(`cat:${row.id}`)}><span className="category-label">{seen.size >= 4 && <small className="category-depth" title={`第 ${seen.size + 1} 层`}>{seen.size + 1}</small>}{row.name}</span></button>
           <MovePicker items={[{ kind: 'category', id: row.id, revision: row.revision }]} /></div>
-          {!collapsed.has(row.id) && hasChildren && <div className="category-children">{children(row.id, next)}</div>}
+          {!collapsed.has(row.id) && hasChildren && <div className={`category-children ${seen.size >= 3 ? 'category-deep' : ''}`}>{children(row.id, next)}</div>}
         </div>;
       });
 

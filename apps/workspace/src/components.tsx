@@ -1,6 +1,6 @@
 import { categoryFingerprint } from '@shiye/core';
 import { MovePicker, OrganizationTree, ORGANIZATION_DRAG, announceOrganization } from './organization-controls.js';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useConnectionStatus } from './connection-status.js';
 import type { BatchEntryState, Bookmark, Category, ImportUndoItem, ImportUndoReason } from '@shiye/core';
 import { PAGE_SIZE_OPTIONS, domainOf, formatDateTime, isHttpUrl } from '@shiye/core';
@@ -61,6 +61,15 @@ export function PageHeader({
 export function Sidebar() {
   const { data, route, navigate, openModal } = useWorkspace();
   const { aiStatus, cloudStatus } = useConnectionStatus();
+  const limitWidth = (value: number) => Math.max(220, Math.min(480, window.innerWidth - 520, value));
+  const [width, setWidth] = useState(() => { try { const saved = Number(localStorage.getItem('shiye:sidebar-width')); return Number.isFinite(saved) && saved >= 220 ? saved : 260; } catch { return 260; } });
+  const dragStart = useRef<{ x: number; width: number } | null>(null);
+  const [viewport, setViewport] = useState(window.innerWidth);
+  const actualWidth = limitWidth(width);
+  useEffect(() => { const resize = () => setViewport(window.innerWidth); window.addEventListener('resize', resize); return () => window.removeEventListener('resize', resize); }, []);
+  useEffect(() => { document.documentElement.style.setProperty('--sidebar-width', `${actualWidth}px`); }, [actualWidth, viewport]);
+  const rememberWidth = (value: number) => { const next = limitWidth(value); setWidth(next); try { localStorage.setItem('shiye:sidebar-width', String(next)); } catch { /* Layout remains usable without storage. */ } };
+
   const extraRoutes = ['uncategorized', 'capture:file', 'trash'];
   const [moreOpen, setMoreOpen] = useState(() => extraRoutes.includes(route));
   useEffect(() => { if (extraRoutes.includes(route)) setMoreOpen(true); }, [route]);
@@ -85,7 +94,7 @@ export function Sidebar() {
   );
 
   return (
-    <aside>
+    <div className="sidebar-shell"><aside>
       <div className="brand">
         <div className="brand-mark">拾</div>
         <div>
@@ -150,6 +159,16 @@ export function Sidebar() {
         </div>
       </div>
     </aside>
+    <div className="sidebar-resizer" role="separator" aria-label="调整左侧栏宽度" aria-orientation="vertical" tabIndex={0}
+      aria-valuemin={220} aria-valuemax={Math.max(220, Math.min(480, viewport - 520))} aria-valuenow={actualWidth}
+      title="拖动调整宽度；双击恢复默认；方向键微调"
+      onDoubleClick={() => rememberWidth(260)}
+      onKeyDown={(event) => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) { event.preventDefault(); rememberWidth(event.key === 'Home' ? 220 : event.key === 'End' ? 480 : actualWidth + (event.key === 'ArrowRight' ? 10 : -10)); } }}
+      onPointerDown={(event) => { if (event.button !== 0) return; event.preventDefault(); dragStart.current = { x: event.clientX, width: actualWidth }; event.currentTarget.setPointerCapture(event.pointerId); }}
+      onPointerMove={(event) => { if (dragStart.current) rememberWidth(dragStart.current.width + event.clientX - dragStart.current.x); }}
+      onPointerUp={(event) => { dragStart.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
+      onPointerCancel={() => { dragStart.current = null; }} onLostPointerCapture={() => { dragStart.current = null; }} />
+    </div>
   );
 }
 
