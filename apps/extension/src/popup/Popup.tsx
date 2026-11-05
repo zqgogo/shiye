@@ -3,12 +3,14 @@ import { useEffect, useState } from 'react';
 import { isAppError, LIMITS, newId, toUserMessage, type Category } from '@shiye/core';
 import type { WorkspaceService } from '@shiye/application';
 import { notifyDataChanged } from '@shiye/application';
+import { extensionApi } from '../../../../packages/adapters/browser/src/index.js';
 
-const hasChrome = typeof chrome !== 'undefined' && Boolean(chrome.tabs);
+const browserApi = extensionApi();
+const hasExtension = Boolean(browserApi?.tabs);
 
 async function currentTab(): Promise<{ url: string; title: string; tabId: number | null; restricted: boolean }> {
-  if (!hasChrome) return { url: '', title: '', tabId: null, restricted: false };
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!hasExtension) return { url: '', title: '', tabId: null, restricted: false };
+  const tabs = await browserApi!.tabs.query({ active: true, currentWindow: true });
   const tab = tabs[0];
   const url = tab?.url ?? '';
   const restricted = !/^https?:/i.test(url);
@@ -54,7 +56,7 @@ export function Popup({ service }: { service: WorkspaceService }) {
 
   const readSelection = async () => {
     setError('');
-    if (!hasChrome) {
+    if (!hasExtension) {
       setError('仅在选择网页文字后、于扩展弹窗中可用。');
       return;
     }
@@ -66,7 +68,7 @@ export function Popup({ service }: { service: WorkspaceService }) {
     try {
       // 在页面上下文里按码点切：.slice 走 UTF-16，遇到 emoji 会在代理对中间断开，
       // 也会比真实字符数更早到达上限。超出时要告诉用户被截了，不能悄悄丢。
-      const results = await chrome.scripting.executeScript({
+      const results = await browserApi!.scripting.executeScript({
         target: { tabId: tab.tabId },
         args: [LIMITS.selectedText],
         func: (limit: number) => {
@@ -152,8 +154,8 @@ export function Popup({ service }: { service: WorkspaceService }) {
   };
 
   const openWorkspace = (route = 'home') => {
-    if (!hasChrome) return;
-    void chrome.tabs.create({ url: chrome.runtime.getURL(`workspace.html#${route}`) });
+    if (!hasExtension) return;
+    void browserApi!.tabs.create({ url: browserApi!.runtime.getURL(`workspace.html#${route}`) });
     window.close();
   };
 

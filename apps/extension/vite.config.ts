@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const path = (relative: string) => fileURLToPath(new URL(relative, import.meta.url));
 const repoRoot = path('../../');
+const safari = process.env['SHIYE_PLATFORM'] === 'safari';
 
 export default defineConfig({
   root: path('.'),
@@ -22,9 +23,9 @@ export default defineConfig({
     fs: { allow: [repoRoot] },
   },
   build: {
-    outDir: path('./dist'),
+    outDir: safari ? path('../safari/dist/webextension') : path('./dist'),
     emptyOutDir: true,
-    target: 'chrome110',
+    target: safari ? 'safari17' : 'chrome110',
     sourcemap: false,
     rollupOptions: {
       input: {

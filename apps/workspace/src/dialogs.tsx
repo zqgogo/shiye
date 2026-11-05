@@ -1073,7 +1073,7 @@ export function CategoriesModal() {
             创建
           </button>
         </div>
-        <p className="micro">分类只有一级；跨分类的主题请使用标签。</p>
+        <p className="micro">分类可通过左侧目录树调整层级；跨分类的主题请使用标签。</p>
       </div>
     </div>
   );

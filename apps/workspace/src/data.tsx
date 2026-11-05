@@ -1434,7 +1434,7 @@ export function DataPage({ focus }: { focus?: 'cleanup' } = {}) {
       </div>
 
       <Notice>
-        云同步（v1b）尚未启用。单机使用不依赖登录或服务器，本版本不会建立任何远程服务。
+        单机使用不依赖登录或服务器。可在「云端与收件箱」配置自己的 Cloudflare，手动同步收藏。
       </Notice>
     </>
   );

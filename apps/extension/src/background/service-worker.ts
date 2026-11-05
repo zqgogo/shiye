@@ -8,6 +8,10 @@ import {
 } from '@shiye/core';
 import { createWorkspaceService, notifyDataChanged } from '@shiye/application';
 import { createShiyeStore } from '@shiye/storage';
+import { extensionApi, isTrustedExtensionSender } from '../../../../packages/adapters/browser/src/index.js';
+const browserApi = extensionApi();
+if (!browserApi) throw new Error('请在已安装的拾页扩展中运行。');
+const api: typeof chrome = browserApi;
 
 /**
  * MV3 service worker：只处理用户主动触发的收集动作与受控消息。
@@ -18,7 +22,7 @@ const MENU_READING = 'shiye-save-reading';
 const MENU_LIBRARY = 'shiye-save-library';
 
 function isFromOwnExtension(sender: chrome.runtime.MessageSender): boolean {
-  return sender.id === chrome.runtime.id;
+  return isTrustedExtensionSender(sender);
 }
 
 let service: ReturnType<typeof createWorkspaceService> | null = null;
@@ -32,10 +36,11 @@ function getService(): ReturnType<typeof createWorkspaceService> {
 }
 
 function flashBadge(text: string, color: string): void {
-  void chrome.action.setBadgeBackgroundColor({ color });
-  void chrome.action.setBadgeText({ text });
+  if (!api.action?.setBadgeText) return;
+  void Promise.resolve(api.action.setBadgeBackgroundColor?.({ color })).catch(() => undefined);
+  void Promise.resolve(api.action.setBadgeText({ text })).catch(() => undefined);
   setTimeout(() => {
-    void chrome.action.setBadgeText({ text: '' });
+    void Promise.resolve(api.action.setBadgeText({ text: '' })).catch(() => undefined);
   }, 4000);
 }
 
@@ -80,30 +85,31 @@ async function saveFromMenu(
   }
 }
 
-function ensureMenus(): void {
-  chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({
+async function ensureMenus(): Promise<void> {
+  await api.contextMenus.removeAll();
+  {
+    await api.contextMenus.create({
       id: MENU_READING,
       title: '加入拾页待看',
       contexts: ['page', 'link', 'selection'],
     });
-    chrome.contextMenus.create({
+    await api.contextMenus.create({
       id: MENU_LIBRARY,
       title: '保存到拾页收藏',
       contexts: ['page', 'link', 'selection'],
     });
-  });
+  }
 }
 
-chrome.runtime.onInstalled.addListener(() => {
-  ensureMenus();
+api.runtime.onInstalled.addListener(() => {
+  void ensureMenus().catch(() => flashBadge('!', '#a44b40'));
 });
 
-chrome.runtime.onStartup.addListener(() => {
-  ensureMenus();
+api.runtime.onStartup.addListener(() => {
+  void ensureMenus().catch(() => flashBadge('!', '#a44b40'));
 });
 
-chrome.contextMenus.onClicked.addListener((info, tab) => {
+api.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId !== MENU_READING && info.menuItemId !== MENU_LIBRARY) return;
   const destination = info.menuItemId === MENU_READING ? 'reading' : 'library';
   // 点击即视为用户授权；不申请常驻主机权限。
@@ -113,10 +119,10 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 async function handleMessage(message: ExtensionMessage): Promise<unknown> {
   switch (message.type) {
     case 'PING':
-      return { ok: true, version: chrome.runtime.getManifest().version };
+      return { ok: true, version: api.runtime.getManifest().version };
     case 'OPEN_WORKSPACE': {
       const route = message.route ?? 'home';
-      await chrome.tabs.create({ url: chrome.runtime.getURL(`workspace.html#${route}`) });
+      await api.tabs.create({ url: api.runtime.getURL(`workspace.html#${route}`) });
       return { ok: true };
     }
     case 'CAPTURE_LINK': {
@@ -144,7 +150,7 @@ async function handleMessage(message: ExtensionMessage): Promise<unknown> {
   }
 }
 
-chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
+api.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
   if (!isFromOwnExtension(sender)) {
     sendResponse({ ok: false, error: '来源校验失败' });
     return false;

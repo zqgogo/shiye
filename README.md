@@ -33,6 +33,7 @@ npm install
 | 命令 | 作用 |
 | --- | --- |
 | `npm run dev` | 以开发模式打开工作台页面 |
+| `npm run build:safari` | 在 macOS + Xcode 上生成 Safari 原生开发 App 与 ZIP；见 [安装说明](apps/safari/INSTALL.md) |
 | `npm run build` | 产出 `apps/extension/dist`（页面 + 自包含 service worker） |
 | `npm run build:worker` | 本地打包 Worker 与手机页面，不部署 |
 | `npm run cloud:prepare` | 本地准备自有后端配置和独立应用凭据 |
@@ -81,7 +82,7 @@ apps/extension/          弹窗、service worker、manifest 与受控消息
 packages/core/           领域类型与纯规则（URL、隐私、校验、导入解析、快照生成）
 packages/application/    用例与仓储端口、本地搜索、跨上下文变更广播
 packages/storage/        IndexedDB / Dexie 实现、schema 迁移、备份恢复
-packages/adapters/ai/    AI 服务适配器（P7，默认关闭，尚未实现）
+packages/adapters/ai/    自配 AI 服务适配器（默认关闭，Key 仅内存）
 fixtures/                脱敏测试样例（书签 HTML、旧版备份）
 scripts/                 真实浏览器验证脚本
 docs/                    进度规划、安装说明、技术决定、未解决问题与验证记录
@@ -97,10 +98,10 @@ docs/                    进度规划、安装说明、技术决定、未解决�
 
 ## 已知限制
 
-- P7 内置 AI 未实现，界面明示并禁用；接真实模型需要供应商凭据与显式授权。
+- 内置 AI 已支持自配服务；接真实模型需要供应商凭据与显式授权。
 - 手机只读快照只在桌面浏览器的移动视口下验证过，真机打开（P6.4）仍列为未验证。
 - 右键菜单真实点击、正常页面划词读取、读屏播报尚未实测。
-- 没有自动备份；数据只在一个浏览器 profile 内共享，两个 profile 之间不同步。
+- 没有自动备份；本地库按浏览器 profile 隔离，跨电脑收藏可连接同一 Cloudflare 同步。
 - 验证记录里的未验证项一律标注「未验证」，不当作通过。
 - **内存紧张的机器上跑验证**：`npm test` 已把 V8 老生代限制在 768 MB（`--max-old-space-size=768`），进一步吃紧时用 `npm run test:lowmem`（384 MB 堆 + 小 semi-space）。浏览器回归一次只跑一套，不要把 `build` 与验证串成一条命令。若 Windows 提交量打满，进程会被系统终止，表现为「闪退」或 `Fatal process out of memory: Zone` 而非用例失败；常见原因是 `PagefileOnOsVolume` 这个注册表值把分页文件锁在系统盘（详见 [docs/ROADMAP.md](docs/ROADMAP.md) 的 2026-10-31 记录）。
 
@@ -109,3 +110,5 @@ docs/                    进度规划、安装说明、技术决定、未解决�
 家里与工作电脑同步收藏的使用步骤与范围见 [双机同步说明](docs/two-computer-sync.md)。
 
 配置状态、修改入口与保存边界见 [配置管理说明](docs/verification/connection-status-2026-11-05.md)。
+
+Safari 原生本地开发包、权限与迁移步骤见 [Safari 安装说明](apps/safari/INSTALL.md)。当前验证范围见 [Safari 验证记录](docs/verification/safari-2026-11-05.md)。

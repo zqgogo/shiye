@@ -357,7 +357,7 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .phone-inner .mobileitem { padding: 17px 0; border-bottom: 1px solid var(--line); }
 .phone-inner .mobileitem b { display: block; font-size: 13px; }
 
-.popupframe { max-width: 370px; margin: 0 auto; padding: 22px; background: #fff; }
+.popupframe { max-width: 370px; max-height: 600px; overflow-y: auto; margin: 0 auto; padding: 22px; background: #fff; }
 .popupframe h2 { font: 23px var(--serif); margin: 0 0 4px; }
 .popupframe .btn { width: 100%; margin-top: 10px; }
 

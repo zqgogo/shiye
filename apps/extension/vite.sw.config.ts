@@ -2,10 +2,11 @@ import { defineConfig } from 'vite';
 import { fileURLToPath } from 'node:url';
 
 const path = (relative: string) => fileURLToPath(new URL(relative, import.meta.url));
+const safari = process.env['SHIYE_PLATFORM'] === 'safari';
 
 /**
  * service worker 单独构建：不引用页面 chunk，避免在 worker 里加载 UI 代码。
- * 输出为自包含的 ESM，manifest 声明 type: module。
+ * Chrome 输出自包含 ESM；Safari 输出经典 IIFE，不依赖模块型后台支持。
  */
 export default defineConfig({
   root: path('.'),
@@ -20,14 +21,15 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: path('./dist'),
+    outDir: safari ? path('../safari/dist/webextension') : path('./dist'),
     emptyOutDir: false,
     copyPublicDir: false,
-    target: 'chrome110',
+    target: safari ? 'safari17' : 'chrome110',
     minify: 'esbuild',
     lib: {
       entry: path('./src/background/service-worker.ts'),
-      formats: ['es'],
+      name: 'ShiyeBackground',
+      formats: [safari ? 'iife' : 'es'],
       fileName: () => 'service-worker.js',
     },
     rollupOptions: {
