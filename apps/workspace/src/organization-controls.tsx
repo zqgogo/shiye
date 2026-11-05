@@ -66,19 +66,29 @@ export function OrganizationTree() {
   useEffect(() => () => { if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current); }, []);
   const [operationId, setOperationId] = useState<string | null>(null);
   const [target, setTarget] = useState<string | null>(null);
+  const categoryDrag = useRef(false);
+  const [placement, setPlacement] = useState<'before' | 'inside' | 'after'>('inside');
+  const positionAt = (event: React.DragEvent) => {
+    if (!categoryDrag.current) return 'inside' as const;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const fraction = (event.clientY - rect.top) / rect.height;
+    return fraction < .25 ? 'before' as const : fraction > .75 ? 'after' as const : 'inside' as const;
+  };
+  const clearHover = () => { if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current); hoverTimer.current = null; };
   useEffect(() => {
     const listener = (event: Event) => setOperationId((event as CustomEvent<string>).detail);
     window.addEventListener('shiye-organization', listener);
     return () => window.removeEventListener('shiye-organization', listener);
   }, []);
 
-  const apply = async (items: OrganizationTarget[], parent: Category | null, beforeId?: string) => {
+  const apply = async (items: OrganizationTarget[], parent: Category | null, beforeId?: string, afterId?: string) => {
+    const anchor = data.categories.find((row) => row.id === (beforeId ?? afterId));
     const input: OrganizationMove = { items, categoryFingerprint: categoryFingerprint(data.categories), parentId: parent?.id ?? null,
-      ...(parent ? { parentRevision: parent.revision } : {}), ...(beforeId ? { beforeId } : {}) };
+      ...(parent ? { parentRevision: parent.revision } : {}), ...(beforeId ? { beforeId } : {}), ...(afterId ? { afterId } : {}), ...(anchor ? { anchorRevision: anchor.revision } : {}) };
     const result = await run(() => moveWithMerge(service, input), '已移动。');
     if (result) announceOrganization(result.operationId);
   };
-  const drop = (event: React.DragEvent, parent: Category | null, beforeId?: string) => {
+  const drop = (event: React.DragEvent, parent: Category | null, beforeId?: string, afterId?: string) => {
     const readingId = event.dataTransfer.getData('application/x-shiye-reading');
     if (readingId) {
       event.preventDefault(); event.stopPropagation(); setTarget(null);
@@ -97,7 +107,7 @@ export function OrganizationTree() {
     const raw = event.dataTransfer.getData(ORGANIZATION_DRAG);
     if (!raw) return;
     event.preventDefault(); event.stopPropagation(); setTarget(null);
-    try { void apply(JSON.parse(raw) as OrganizationTarget[], parent, beforeId); }
+    try { const items = JSON.parse(raw) as OrganizationTarget[]; if (items.some((item) => item.id === (beforeId ?? afterId))) return; void apply(items, parent, beforeId, afterId); }
     catch { toast('无法读取拖动内容，请重新拖动。', 'error'); }
   };
   const children = (parentId: string | null, seen = new Set<string>()): React.ReactNode =>
@@ -107,18 +117,17 @@ export function OrganizationTree() {
         const next = new Set(seen); next.add(row.id);
         const hasChildren = data.categories.some((child) => child.parentId === row.id);
         return <div key={row.id} className="category-node">
-          <div className="category-insert" aria-label={`移到 ${row.name} 前面`}
-            onDragOver={(event) => event.preventDefault()}
-            onDrop={(event) => drop(event, data.categories.find((parent) => parent.id === parentId) ?? null, row.id)} />
-          <div className={`category-drop ${target === row.id ? 'drop-active' : ''}`}
-            onDragStart={(event) => { if (!(event.target as Element).closest('.drag-handle')) return; event.stopPropagation(); event.dataTransfer.setData(ORGANIZATION_DRAG, JSON.stringify([{ kind: 'category', id: row.id, revision: row.revision }])); }}
+          <div className={`category-drop ${target === row.id ? `drop-${placement}` : ''}`}
+            onDragStart={(event) => { if (!(event.target as Element).closest('.drag-handle')) return; event.stopPropagation(); categoryDrag.current = true; event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData(ORGANIZATION_DRAG, JSON.stringify([{ kind: 'category', id: row.id, revision: row.revision }])); }}
+            onDragEnd={() => { categoryDrag.current = false; setTarget(null); clearHover(); }}
             onDragOver={(event) => {
               if (!event.dataTransfer.types.some((type) => [ORGANIZATION_DRAG, 'application/x-shiye-reading', 'application/x-shiye-draft-rows'].includes(type))) return;
-              event.preventDefault(); event.stopPropagation(); setTarget(row.id);
-              if (!expanded.has(row.id) && hoverTimer.current === null) hoverTimer.current = window.setTimeout(() => { setExpanded((current) => { const next = new Set(current); next.add(row.id); return next; }); hoverTimer.current = null; }, 650);
+              event.preventDefault(); event.stopPropagation(); const position = positionAt(event); setTarget(row.id); setPlacement(position);
+              if (position !== 'inside') clearHover();
+              if (position === 'inside' && hasChildren && !expanded.has(row.id) && hoverTimer.current === null) hoverTimer.current = window.setTimeout(() => { setExpanded((current) => { const next = new Set(current); next.add(row.id); return next; }); hoverTimer.current = null; }, 650);
             }}
-            onDragLeave={(event) => { if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return; setTarget(null); if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current); hoverTimer.current = null; }} onDrop={(event) => drop(event, row)} title={categoryPath(data.categories, row.id)}>
-            <button className="iconbtn drag-handle" draggable aria-label={`拖动分类 ${row.name}`} title="拖到分类内部改变层级，拖到插入线调整顺序">⋮</button>
+            onDragLeave={(event) => { if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return; setTarget(null); if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current); hoverTimer.current = null; }} onDrop={(event) => { clearHover(); const position = positionAt(event); const parent = data.categories.find((item) => item.id === parentId) ?? null; drop(event, position === 'inside' ? row : parent, position === 'before' ? row.id : undefined, position === 'after' ? row.id : undefined); categoryDrag.current = false; }} title={categoryPath(data.categories, row.id)}>
+            <button className="iconbtn drag-handle" draggable aria-label={`拖动分类 ${row.name}`} title="拖到行上缘或下缘调整顺序；拖到行中间移入分类">⋮</button>
             <button className="iconbtn" aria-expanded={hasChildren ? expanded.has(row.id) : undefined} aria-label={`${!expanded.has(row.id) ? '展开' : '折叠'} ${row.name}`}
               onClick={() => setExpanded((current) => { const value = new Set(current); value.has(row.id) ? value.delete(row.id) : value.add(row.id); return value; })}>{hasChildren ? !expanded.has(row.id) ? '▸' : '▾' : '·'}</button>
             <button className={`nav ${route === `cat:${row.id}` ? 'active' : ''}`} onClick={() => navigate(`cat:${row.id}`)}><span className="category-label">{seen.size >= 4 && <small className="category-depth" title={`第 ${seen.size + 1} 层`}>{seen.size + 1}</small>}{row.name}</span></button>
@@ -129,6 +138,7 @@ export function OrganizationTree() {
 
   return <div className="organization-tree">
     <div className="category-root-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => drop(event, null)}>拖到这里提升到根级 / 移至未分类</div>
+    <div className="category-drop-hint" role="status">{target ? placement === 'inside' ? '移入分类：' : placement === 'before' ? '放在前面：' : '放在后面：' : ''}{data.categories.find((row) => row.id === target)?.name}{!target && '拖动：上下边缘排序，中间移入'}</div>
     {children(null)}
     {operationId && <button className="btn small" onClick={async () => {
       const result = await run(async () => { await service.undoOrganization(operationId); return true; }, '已撤销移动。');

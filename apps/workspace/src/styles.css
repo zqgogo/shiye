@@ -515,3 +515,9 @@ main { min-width: 0; display: flex; flex-direction: column; }
   .sidebar-shell aside { position:fixed; width:min(300px, 88vw); height:100vh; }
   .sidebar-resizer { display:none; }
 }
+
+.category-drop.drop-inside { background:var(--accent-soft); outline:1px solid var(--accent); }
+.category-drop.drop-before::before,.category-drop.drop-after::after { content:''; position:absolute; left:0; right:0; height:3px; background:var(--accent); border-radius:3px; pointer-events:none; z-index:2; }
+.category-drop.drop-before::before { top:-2px; }
+.category-drop.drop-after::after { bottom:-2px; }
+.category-drop-hint { position:sticky; top:0; z-index:3; padding:7px; background:var(--accent-soft); color:var(--accent); font-size:11px; height:32px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
