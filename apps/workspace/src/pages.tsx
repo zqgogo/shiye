@@ -1,4 +1,5 @@
 import { categoryPath } from '@shiye/core';
+import { ConnectionsOverview } from './connection-status.js';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   LIMITS,
@@ -1434,7 +1435,8 @@ export function SettingsPage() {
   );
   return (
     <>
-      <PageHeader title="设置与管理" description="备份、分类策略和已删除内容集中在这里。" />
+      <PageHeader title="设置与管理" description="连接状态、备份、分类策略和已删除内容集中在这里。" action={<span className="date">本机设置 · 手动连接</span>} />
+      <ConnectionsOverview />
       <div className="hubgrid">
         {card('⇅', '数据与备份', '完整 JSON 备份恢复、手机只读快照', 'data')}
         {card('☷', '分类与策略', '管理分类、标签和 AI 整理规则', 'rules')}

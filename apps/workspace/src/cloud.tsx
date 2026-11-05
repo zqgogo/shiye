@@ -8,13 +8,20 @@ import { PageHeader, Pager } from './components.js';
 import { useWorkspace } from './state.js';
 import { CloudInbox } from './cloud-inbox.js';
 import { TwoWayPanel } from './two-way.js';
+import { useCloudConnection } from './cloud-connection.js';
+import { ConnectionCard, safeHost, useConnectionStatus } from './connection-status.js';
+import { TwoWayClient } from '../../../packages/sync/src/two-way-client.js';
 
 export function CloudPage() {
   const { service, data, setPageSize } = useWorkspace();
-  const [address, setAddress] = useState(() => { try { return localStorage.getItem('shiye:mirror-address') ?? ''; } catch { return ''; } });
-  const [token, setToken] = useState(''), [info, setInfo] = useState<MirrorInfo | null>(null);
+  const cloud = useCloudConnection(), { cloudStatus } = useConnectionStatus();
+  const { address, token, info, setInfo } = cloud;
+  const [editorOpen, setEditorOpen] = useState(!info);
+  const [connecting, setConnecting] = useState(false);
   const [publication, setPublication] = useState<SavedPublication | null>(null);
-  const [busy, setBusy] = useState(false), [progress, setProgress] = useState(''), [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false), [progress, setProgress] = useState(''), [message, setMessageState] = useState('');
+  const messageVersion = useRef(cloud.version.current);
+  const setMessage = (text: string) => { messageVersion.current = cloud.version.current; setMessageState(text); };
   const [previewOpen, setPreviewOpen] = useState(false), [previewPage, setPreviewPage] = useState(1);
   const active = useRef<AbortController | null>(null), version = useRef(0);
   useEffect(() => {
@@ -22,28 +29,36 @@ export function CloudPage() {
     void service.savedCloudPublication().then((saved) => { if (alive) setPublication(saved); }).catch((cause) => { if (alive) setMessage(toUserMessage(cause)); });
     return () => { alive = false; active.current?.abort(); };
   }, [service]);
-  const cancel = () => { version.current++; active.current?.abort(); active.current = null; setBusy(false); setProgress(''); };
-  const changeAddress = (next: string) => { cancel(); setAddress(next); setToken(''); setInfo(null); setMessage('地址已变化，请重新输入此服务的应用凭据并连接。旧快照仍绑定原地址，不会自动发送。'); };
+  const cancel = () => { version.current++; active.current?.abort(); active.current = null; setBusy(false); setProgress(''); setConnecting(false); };
+  const changeAddress = (next: string) => { cancel(); cloud.changeAddress(next); setMessage('地址已变化，原连接立即失效。请重新输入此服务的凭据并验证；旧快照不会自动发送。'); };
+  useEffect(() => { cancel(); }, [cloud.address, cloud.token, cloud.version.current]);
   const client = () => new MirrorClient(mirrorBase(address).href, token);
   const execute = async (action: (signal: AbortSignal, current: () => boolean) => Promise<void>, remote = true) => {
     if (active.current) return;
-    const controller = new AbortController(); active.current = controller; const stamp = version.current;
-    const current = () => stamp === version.current && !controller.signal.aborted;
+    const controller = new AbortController(); active.current = controller; const stamp = version.current, connectionVersion = cloud.version.current;
+    const current = () => stamp === version.current && connectionVersion === cloud.version.current && !controller.signal.aborted;
     setBusy(true); setMessage(''); const timer = setTimeout(() => controller.abort(), 300000);
     try {
       if (remote) await requestOrigin(address);
       if (!current()) throw new Error('操作已取消或连接已变化。');
       await action(controller.signal, current);
     } catch (cause) {
-      if (stamp === version.current) setMessage(controller.signal.aborted ? '请求超时，发布结果可能未知；快照保留在本机，请重新连接核对。没有自动重试。' : toUserMessage(cause));
+      if (stamp === version.current && connectionVersion === cloud.version.current) setMessage(controller.signal.aborted ? '请求超时，发布结果可能未知；快照保留在本机，请重新连接核对。没有自动重试。' : toUserMessage(cause));
     } finally { clearTimeout(timer); if (active.current === controller) { active.current = null; setBusy(false); } }
   };
   const connect = () => execute(async (signal, current) => {
-    const next = await client().info(signal), saved = await service.savedCloudPublication();
-    if (!current()) return;
-    setInfo(next); setPublication(saved);
-    setMessage(saved ? '连接通过，已读取本机发布快照。续传仍需你确认，不会自动上传。' : '连接通过，没有发送任何收藏。请准备并检查发布预览。');
-    try { localStorage.setItem('shiye:mirror-address', mirrorBase(address).href); } catch { /* Optional preference. */ }
+    const expectedVersion = cloud.version.current;
+    cloud.failed(''); setConnecting(true);
+    try {
+      const next = await client().info(signal); if (!current()) return;
+      const shared = await new TwoWayClient(address, token).info(signal), saved = await service.savedCloudPublication();
+      if (!sameIdentity(next, shared)) throw new Error('镜像与同步库身份不一致，请核对后端地址。');
+      if (!current()) return;
+      if (!cloud.connected(next, shared, expectedVersion)) return;
+      setPublication(saved); setEditorOpen(false);
+      setMessage(saved ? '连接通过，发布权限和同步协议已验证；已读取本机发布快照，不会自动上传。' : '连接通过，发布权限和同步协议已验证，没有发送任何收藏。可检查两台电脑同步。');
+    } catch (cause) { if (current()) cloud.failed(toUserMessage(cause)); throw cause; }
+    finally { if (current()) setConnecting(false); }
   });
   const prepare = () => execute(async (signal, current) => {
     if (!info) throw new Error('请先测试连接。');
@@ -112,17 +127,25 @@ export function CloudPage() {
       <p className="micro">可先用 <code>npm run cloud:doctor</code> 检查本地准备。publisher.txt 用于总机发布和接收；reader.txt 仅查看；submitter.txt 用于其他设备查看和提交。应用里无需填写 Cloudflare 管理 API token，AI Key 也无需交给后端。</p>
     </details>
     <div className="panel"><h2>连接自有后端</h2>
+      <ConnectionCard name="Cloudflare 连接状态" status={connecting ? '正在验证连接与权限' : cloudStatus.label} tone={connecting ? 'pending' : cloudStatus.tone} actions={<button className="btn small" onClick={() => setEditorOpen(true)}>修改地址或凭据</button>}>
+        <p>{address ? safeHost(address) : '尚未填写你的后端地址'}</p><small>{info ? `发布权限与同步协议已验证 · ${cloud.testedAt ? new Date(cloud.testedAt).toLocaleString('zh-CN') : ''}` : cloud.modified ? '修改配置后原连接已失效，重新验证通过后才能同步。' : '只保存地址；应用凭据保留在当前工作台，刷新后需要重新填写。'}</small>
+        {cloud.sharedInfo && <p>共享收藏同步版本 {cloud.sharedInfo.revision} · 待看镜像版本 {info?.revision ?? 0}</p>}
+        {cloud.error && <p className="alert">{cloud.error}</p>}
+      </ConnectionCard>
+      <details className="connection-editor" open={editorOpen} onToggle={(event) => setEditorOpen(event.currentTarget.open)}><summary>连接配置 · 地址与应用凭据</summary>
       <label className="field"><span>后端地址</span><input value={address} placeholder="https://shiye.example.com" onChange={(event) => changeAddress(event.target.value)} /></label>
-      <label className="field"><span>应用发布凭据（仅当前页面）</span><input type="password" autoComplete="off" value={token} onChange={(event) => { cancel(); setToken(event.target.value); setInfo(null); }} /></label>
+      <label className="field"><span>应用发布凭据（当前工作台内存）</span><input type="password" autoComplete="off" value={token} onChange={(event) => { cancel(); cloud.changeToken(event.target.value); setMessage('凭据已修改，原连接已失效，请重新验证。'); }} /><small>{token ? '已填写；不会写入本机配置、备份或同步。' : '未填写。请使用 publisher.txt，不使用 reader.txt 或 submitter.txt。'}</small></label>
+      <div className="toolbar"><button className="btn small" disabled={busy || !address} onClick={() => { try { cloud.saveAddress(); setMessage('后端地址已保存，凭据不会保存；保存不代表连接已验证。'); } catch (cause) { setMessage(toUserMessage(cause)); } }}>保存后端地址</button></div>
+      </details>
       <div className="toolbar"><button className="btn" disabled={busy || !token || !address} onClick={() => void connect()}>测试连接（不上传）</button>
-        <button className="btn" onClick={() => { cancel(); setToken(''); setInfo(null); setMessage('已断开并清除本页凭据。发布快照和云端已有内容保留，没有自动续传。'); }}>断开并清除凭据</button>
+        <button className="btn" onClick={() => { cancel(); cloud.disconnect(); setEditorOpen(true); setMessage('已断开并清除本工作台凭据。地址和发布快照保留，没有自动续传。'); }}>断开并清除凭据</button>
         {busy && <button className="btn" onClick={() => { cancel(); setMessage('已停止等待，快照保留，结果可能未知；重新连接后可核对或续传。没有自动重试。'); }}>取消请求</button>}
       </div>
       {info && <div className="notice"><span>库 {info.libraryId} · 待看镜像版本 {info.revision}</span><span>{info.publishedAt ? `待看镜像最后发布 ${new Date(info.publishedAt).toLocaleString('zh-CN')}` : '待看镜像尚未发布'}</span><a href={mirrorBase(address).href} target="_blank" rel="noreferrer noopener">打开手机收藏与提交页 ↗</a></div>}
-      <p role="status">{message}</p><p className="micro">{progress}</p>
+      <p role="status">{messageVersion.current === cloud.version.current ? message : ''}</p><p className="micro">{progress}</p>
     </div>
-    {info && <TwoWayPanel key={JSON.stringify([address, info.serverId, info.libraryId, info.epoch])} address={address} token={token} execute={execute} busy={busy} />}
-    {info && <CloudInbox key={JSON.stringify([address, info.serverId, info.libraryId, info.epoch])} client={client} info={info} busy={busy} execute={execute} />}
+    {info && <TwoWayPanel key={`sync:${JSON.stringify([address, info.serverId, info.libraryId, info.epoch])}`} address={address} token={token} execute={execute} busy={busy} onSynced={cloud.setSharedInfo} />}
+    {info && <CloudInbox key={`inbox:${JSON.stringify([address, info.serverId, info.libraryId, info.epoch])}`} client={client} info={info} busy={busy} execute={execute} />}
     {publication && !matches && <div className="panel"><h2>本机保存了一份发布快照</h2><p>{publication.snapshot.baseUrl} · {publication.snapshot.plan.declaration.recordCount} 项 · 本机已记录 {publication.status.confirmedChunks}/{publication.status.totalChunks} 片确认。</p>
       <p>请输入原地址和发布凭据并测试连接，再核对或续传。不会把旧快照自动发到新地址，确认分片以服务器实际状态为准。</p>
       <button className="btn" disabled={busy} onClick={() => changeAddress(publication.snapshot.baseUrl)}>填入快照原地址</button>

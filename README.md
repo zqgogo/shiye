@@ -41,6 +41,7 @@ npm install
 | `npm run cloud:deploy` | 创建/复用 D1 并部署 Worker 与手机查看/提交页，不上传收藏 |
 | `npm run cloud:verify` | 在线只做鉴权及身份检查，不上传记录 |
 | `npm run verify:cloud-runtime` | 官方 workerd / D1 本地集成测试 |
+| `npm run verify:connections` | 配置保存/验证/开启/修改/失效、密钥不落盘与小屏状态显示 |
 | `npm run verify:two-way` | 两个独立浏览器验证收藏合并、删除、冲突和隐私撤回 |
 | `npm run verify:cloud-inbox` | 手机提交、本机临时列表、总机接收和发布核对验证 |
 | `npm run verify:cloud-publication` | 镜像续传、刷新、隐私和取消专项浏览器验证 |
@@ -106,3 +107,5 @@ docs/                    进度规划、安装说明、技术决定、未解决�
 未解决的问题、数据风险与下一步见 [docs/open-issues.md](docs/open-issues.md)，验收清单的逐项对照见 [docs/verification/delivery-acceptance.md](docs/verification/delivery-acceptance.md)。
 
 家里与工作电脑同步收藏的使用步骤与范围见 [双机同步说明](docs/two-computer-sync.md)。
+
+配置状态、修改入口与保存边界见 [配置管理说明](docs/verification/connection-status-2026-11-05.md)。

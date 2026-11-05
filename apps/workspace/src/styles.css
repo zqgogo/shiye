@@ -461,3 +461,28 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .sync-record > div { display:grid; grid-template-columns:80px minmax(0,1fr); gap:12px; margin:8px 0; }
 .sync-record dt { color:var(--muted); }
 .sync-record dd { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; }
+.connection-overview { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin:18px 0; }
+.connection-overview-single { grid-template-columns:1fr; }
+.connection-card { border:1px solid var(--line); border-left:4px solid #adb5aa; border-radius:12px; background:var(--surface); padding:18px 20px; margin:12px 0 18px; min-width:0; }
+.connection-overview .connection-card { margin:0; }
+.connection-ready { border-left-color:#4f7758; background:#f5f8f2; }
+.connection-pending { border-left-color:#ba985e; background:#fcfaf3; }
+.connection-error { border-left-color:var(--danger); background:#fcf6f3; }
+.connection-card-head { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; }
+.connection-card-head > strong { font-size:16px; }
+.connection-badge { border-radius:20px; padding:4px 10px; font-size:12px; background:#edf0e9; color:#596257; }
+.connection-badge-ready { background:#deeadc; color:#31583b; }
+.connection-badge-pending { background:#f2e9d5; color:#745c2c; }
+.connection-badge-error { background:#f3dfd8; color:#8a4235; }
+.connection-card-content p { margin:8px 0; overflow-wrap:anywhere; }
+.connection-card-content small { color:var(--muted); display:block; }
+.connection-checks { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+.connection-checks > span { border:1px solid var(--line); border-radius:7px; padding:4px 9px; font-size:12px; color:var(--muted); }
+.connection-checks .check-ready { background:#e7efe2; color:#345f3e; border-color:#c9d9c3; }
+.connection-editor { margin:16px 0; padding:14px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+.connection-editor > summary { cursor:pointer; font-weight:600; }
+.navgroup > small.nav-connection-state { padding:0 10px 7px 40px; letter-spacing:0; line-height:1.5; font-size:10px; margin-top:-4px; }
+.navgroup > small.state-ready { color:#416f49; }
+.navgroup > small.state-pending { color:#8a6a34; }
+.navgroup > small.state-error { color:var(--danger); }
+@media(max-width:700px) { .connection-overview { grid-template-columns:1fr; } .connection-card { padding:15px; } }

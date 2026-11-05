@@ -3,11 +3,11 @@ import { notifyDataChanged } from '@shiye/application';
 import { paginate } from '@shiye/core';
 import { TwoWayClient } from '../../../packages/sync/src/two-way-client.js';
 import { prepareSharedPlan, resolveShared, type SharedPlan } from '../../../packages/sync/src/two-way-local.js';
-import { type SharedData, sameData } from '../../../packages/sync/src/two-way.js';
+import { type SharedData, type SharedInfo, sameData } from '../../../packages/sync/src/two-way.js';
 import { Pager } from './components.js';
 import { useWorkspace } from './state.js';
 type Execute = (action: (signal: AbortSignal, current: () => boolean) => Promise<void>, remote?: boolean) => Promise<void>;
-export function TwoWayPanel({ address, token, execute, busy }: { address: string; token: string; execute: Execute; busy: boolean }) {
+export function TwoWayPanel({ address, token, execute, busy, onSynced }: { address: string; token: string; execute: Execute; busy: boolean; onSynced?: (info: SharedInfo) => void }) {
   const { service, data, reload, setPageSize } = useWorkspace();
   const [previewOpen, setPreviewOpen] = useState(false);
   const [plan, setPlan] = useState<SharedPlan | null>(null), [message, setMessage] = useState('家里和工作电脑填写同一个后端地址与发布凭据，先检查，再确认同步。'), [page, setPage] = useState(1);
@@ -22,6 +22,7 @@ export function TwoWayPanel({ address, token, execute, busy }: { address: string
     const result = await new TwoWayClient(address, token).upload(plan, signal, (keys) => service.assertTwoWay(plan, keys), (done, total) => { if (current()) setMessage(`已确认 ${done} / ${total} 批变更，正在核对同步结果…`); });
     if (!current()) return;
     await service.applyTwoWay(plan, result.rows, result.info.revision); await reload(); notifyDataChanged();
+    if (current()) onSynced?.(result.info);
     if (current()) { setPlan(null); setMessage(`两台电脑同步完成 · 云端版本 ${result.info.revision}。另一台点击检查同步即可接收。手机刷新后读取共享收藏，待看仍使用单独镜像。`); }
   });
   const result = plan ? resolveShared(plan) : null, localRows = new Map(plan?.projection ?? []);

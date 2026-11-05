@@ -1,5 +1,6 @@
 import { useAiConnection } from './ai-connection.js';
 import { AiConnectionSettings } from './ai-settings.js';
+import { ConnectionsOverview } from './connection-status.js';
 import { categoryPath, unknownAskReferences } from '@shiye/core';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -37,7 +38,8 @@ export function AiPage() {
   const eligible = data.bookmarks.filter((bookmark) => isAiEligible(bookmark)).length;
   return (
     <>
-      <PageHeader title="让收藏重新派上用场。" description="默认手动交接；内置 AI 是默认关闭的可选模块。" />
+      <PageHeader title="让收藏重新派上用场。" description="默认手动交接；内置 AI 是默认关闭的可选模块。" action={<span className="date">直连模型 · 确认后发送</span>} />
+      <ConnectionsOverview onlyAi />
       <Notice>
         当前可用 {eligible} 条可发送收藏。本地专用与禁止 AI 的条目不会进入材料包；选全不等于授权发送。
       </Notice>
@@ -71,6 +73,7 @@ export function AiConfigPage() {
           </button>
         }
       />
+      <AiConnectionSettings />
       <Notice><strong>书签导入 AI</strong><span>可在导入页使用 DeepSeek 或自配兼容服务，先检查发送材料，再预览整理建议。密钥仅在该页面内存保存。</span><button className="btn" onClick={() => navigate('capture:file')}>去导入整理</button></Notice>
       <div className="panel">
         <h2>
@@ -81,7 +84,6 @@ export function AiConfigPage() {
           去整理收藏
         </button>
       </div>
-      <AiConnectionSettings />
       <Notice>也可以继续手动交接：生成材料包 → 在外部 AI 使用 → 严格校验后应用。</Notice>
     </>
   );

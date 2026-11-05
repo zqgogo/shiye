@@ -88,7 +88,7 @@ try {
   await click('测试文本连接'); await page.waitForFunction(() => Boolean(window.releaseLate));
   await setReactInput(page, 'input[list=ai-models]', 'final-model');
   await page.evaluate(() => { window.aiLate = false; window.releaseLate(); });
-  await waitText('请求已取消或超时');
+  await waitText('配置已修改');
   check('配置改变后迟到测试不能启用新配置', await page.evaluate(() => [...document.querySelectorAll('button')].find((node) => node.textContent.trim() === '开启内置 AI')?.disabled));
   await click('测试文本连接'); await waitText('文本测试通过'); await click('测试整理输出'); await waitText('整理 JSON 测试通过'); await click('开启内置 AI');
   await route('ask'); await waitText('生成提问包');

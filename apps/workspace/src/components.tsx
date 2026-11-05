@@ -1,6 +1,7 @@
 import { categoryFingerprint } from '@shiye/core';
 import { MovePicker, OrganizationTree, ORGANIZATION_DRAG, announceOrganization } from './organization-controls.js';
 import { useEffect, useState } from 'react';
+import { useConnectionStatus } from './connection-status.js';
 import type { BatchEntryState, Bookmark, Category, ImportUndoItem, ImportUndoReason } from '@shiye/core';
 import { PAGE_SIZE_OPTIONS, domainOf, formatDateTime, isHttpUrl } from '@shiye/core';
 import { useWorkspace } from './state.js';
@@ -59,6 +60,7 @@ export function PageHeader({
 
 export function Sidebar() {
   const { data, route, navigate, openModal } = useWorkspace();
+  const { aiStatus, cloudStatus } = useConnectionStatus();
   const extraRoutes = ['uncategorized', 'capture:file', 'trash'];
   const [moreOpen, setMoreOpen] = useState(() => extraRoutes.includes(route));
   useEffect(() => { if (extraRoutes.includes(route)) setMoreOpen(true); }, [route]);
@@ -132,7 +134,9 @@ export function Sidebar() {
       <div className="navgroup nav-tools">
         <small>工具 · TOOLS</small>
         {item('ai', ICONS.ai, 'AI 助手')}
+        <small className={`nav-connection-state state-${aiStatus.tone}`}>{aiStatus.label}</small>
         {item('cloud', '☁', '云端与收件箱')}
+        <small className={`nav-connection-state state-${cloudStatus.tone}`}>{cloudStatus.label}</small>
         {item('settings', ICONS.settings, '设置与管理')}
       </div>
 
