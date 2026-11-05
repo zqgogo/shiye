@@ -280,6 +280,10 @@ export class WorkspaceService {
     return this.repos.bookmarks.create(params);
   }
 
+  async receiveCloudInbox(entry: unknown, expectedLibraryId: string) {
+    return this.repos.cloudInbox.receive(entry, expectedLibraryId);
+  }
+
   async updateBookmark(
     id: string,
     expectedLocalRevision: number,

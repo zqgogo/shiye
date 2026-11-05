@@ -9,11 +9,12 @@ const directory = path.join(root, '.verify/cloud-runtime'); fs.mkdirSync(directo
 process.env.WRANGLER_SEND_METRICS = 'false'; process.env.WRANGLER_LOG_PATH = path.join(directory, 'wrangler.log');
 const { createTestHarness } = await import('wrangler');
 const publisher = 'runtime_test_publisher_0123456789abcdefghijklmnop', reader = 'runtime_test_reader_0123456789abcdefghijklmnop';
+const submitter = 'runtime_test_submitter_0123456789abcdefghijklmnop';
 const hash = (text) => createHash('sha256').update(text).digest('hex');
 const server = createTestHarness({ root, workers: [{ config: { name: 'shiye-runtime-test', main: path.join(root, 'apps/worker/src/index.ts'), compatibility_date: '2026-11-04',
   d1_databases: [{ binding: 'DB', database_name: 'runtime-test', database_id: 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa', migrations_dir: path.join(root, 'apps/worker/migrations') }],
   assets: { directory: path.join(root, 'apps/worker/public'), binding: 'ASSETS', run_worker_first: true } },
-  secrets: { WRITE_TOKEN_SHA256: hash(publisher), READ_TOKEN_SHA256: hash(reader) } }] });
+  secrets: { WRITE_TOKEN_SHA256: hash(publisher), READ_TOKEN_SHA256: hash(reader), SUBMIT_TOKEN_SHA256: hash(submitter) } }] });
 const report = { generatedAt: new Date().toISOString(), runtime: 'Cloudflare workerd + local D1', steps: [] };
 const check = (name, condition) => { assert.ok(condition, name); report.steps.push({ name, ok: true }); console.log(`PASS ${name}`); };
 const controller = new AbortController();
@@ -67,10 +68,20 @@ try {
   check('只读登录 Cookie 可读且私有响应禁缓存', login.status === 200 && privateRead.status === 200 && privateRead.headers.get('cache-control').includes('no-store'));
   check('Cookie 不能调用写接口', (await server.fetch('https://mirror.test/v1/mirror', { method: 'DELETE', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{}' })).status === 401);
   const page = await server.fetch('https://mirror.test/');
-  check('实际静态绑定提供手机页面和严格 CSP', page.status === 200 && (await page.text()).includes('只读访问凭据') && page.headers.get('content-security-policy').includes("script-src 'self'"));
+  check('实际静态绑定提供手机页面和严格 CSP', page.status === 200 && (await page.text()).includes('只读或提交凭据') && page.headers.get('content-security-policy').includes("script-src 'self'"));
   await assert.rejects(client.clear(before, controller.signal));
   check('过期清空请求不影响当前发布', (await client.info(controller.signal)).activeGeneration !== null);
+  const identity = await client.info(controller.signal);
+  const inbound = { identity: { serverId: identity.serverId, libraryId: identity.libraryId, epoch: identity.epoch }, deviceId: crypto.randomUUID(), deviceKey: 'runtime_device_0123456789abcdefghijklmnop', id: crypto.randomUUID(), payload: { destination: 'bookmark', url: 'https://example.com/mobile', title: '手机提交', sourceDescription: '', note: '暂存笔记', categoryId: null, categoryPath: '', tagIds: [], tagNames: [], pinned: false, unread: true, aiBlocked: false } };
+  const submitted = await Promise.all([tokenRequest('/v1/inbox', inbound, submitter), tokenRequest('/v1/inbox', inbound, submitter)]);
+  check('真实 D1 并发提交同一编号幂等，独立提交凭据不能发布', submitted.every((response) => response.status === 200) && (await env.DB.prepare('SELECT COUNT(*) AS n FROM capture_inbox').first()).n === 1 && (await tokenRequest('/v1/generations', a.declaration, submitter)).status === 401);
   await client.clear(await client.info(controller.signal), controller.signal);
   check('清空当前云库实际删除 D1 数据', (await env.DB.prepare('SELECT COUNT(*) AS n FROM mirror_chunks').first()).n === 0 && !(await client.info(controller.signal)).activeGeneration);
+  const pending = await client.inbox(controller.signal);
+  check('真实 D1 清镜像不会清待接收记录', pending.entries.length === 1 && pending.entries[0].payload.note === '暂存笔记');
+  const receipt = { status: 'received', recordKind: 'bookmark', recordId: 'runtime-local', message: '已接收' };
+  await client.acknowledge(pending.entries[0], receipt, controller.signal); await client.acknowledge(pending.entries[0], receipt, controller.signal);
+  const saved = await env.DB.prepare('SELECT payload,status FROM capture_inbox WHERE id=?').bind(inbound.id).first();
+  check('真实 D1 回执重试幂等且清除正文', saved.payload === null && saved.status === 'received' && (await client.inbox(controller.signal)).entries.length === 0);
 } catch (error) { report.failure = String(error); throw error; }
 finally { fs.mkdirSync(path.join(root, '.verify/reports'), { recursive: true }); fs.writeFileSync(path.join(root, '.verify/reports/cloud-runtime.json'), JSON.stringify(report, null, 2)); await server.close(); }

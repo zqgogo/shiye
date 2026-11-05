@@ -491,6 +491,7 @@ export interface MirrorPublicationRepository {
 }
 
 export interface Repositories {
+  cloudInbox: { receive(entry: unknown, expectedLibraryId: string): Promise<import('../../sync/src/inbox.js').InboxReceipt> };
   publications: MirrorPublicationRepository;
   organizePlans: OrganizePlanRepository;
   aiTasks: AiTaskRepository;

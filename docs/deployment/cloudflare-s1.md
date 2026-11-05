@@ -1,6 +1,6 @@
 # 部署自己的 Cloudflare 私有记录镜像（S1）
 
-当前是「电脑手动发布、手机只读」的私有镜像，不是双向同步。**AI 由扩展直接访问用户配置的模型服务，Cloudflare 不代理 AI，也不接收 AI Key。**
+当前支持「总机手动发布、其他设备查看与新增提交」，正式库仍由总机维护，不是已有收藏多端编辑的双向同步。**AI 由扩展直接访问用户配置的模型服务，Cloudflare 不代理 AI，也不接收 AI Key。**
 
 ## 三步部署
 
@@ -12,11 +12,11 @@ npm run cloud:login
 npm run cloud:deploy
 ```
 
-- `prepare`：只在本机生成独立项目名称、配置及两份随机应用凭据；不连接云端。已有配置和凭据不会被重复生成覆盖。
+- `prepare`：只在本机生成独立项目名称、配置及三份随机应用凭据；不连接云端。已有配置和凭据不会被重复生成覆盖。
 - `login`：打开 Cloudflare 官方登录流程，登录你自己的账号。账号管理凭据由 Wrangler 管理，不填进拾页插件。
-- `deploy`：核对账号 → 核对/创建独立 D1 → 执行迁移 → 部署 Worker 和手机页 → 设置两份应用凭据的 SHA256 → 在线握手验证。会创建你账号中的资源，费用取决于你的 Cloudflare 方案；不会自动上传任何收藏。
+- `deploy`：核对账号 → 核对/创建独立 D1 → 执行迁移 → 部署 Worker 和手机页 → 设置三份应用凭据的 SHA256 → 在线握手验证。会创建你账号中的资源，费用取决于你的 Cloudflare 方案；不会自动上传任何收藏。
 
-部署结束会给出 HTTPS 地址。把它填进插件「Cloudflare 镜像」页，再从本机的 `publisher.txt` 读取应用发布凭据。手机使用 `reader.txt`。**两份应用凭据均与 DeepSeek / 其他模型的 API Key 无关。**
+部署结束会给出 HTTPS 地址。把它填进插件「Cloudflare 镜像」页，再从本机的 `publisher.txt` 读取应用发布凭据。手机只查看用 `reader.txt`，需要添加记录用 `submitter.txt`。**三份应用凭据均与 DeepSeek / 其他模型的 API Key 无关。**
 
 ## 本地文件和检查
 
@@ -27,7 +27,8 @@ npm run cloud:deploy
 | `apps/worker/wrangler.local.jsonc` | 用户自己的 Worker / D1 配置 |
 | `.verify/cloudflare-setup/publisher.txt` | 插件发布镜像时输入，不能交给只读设备 |
 | `.verify/cloudflare-setup/reader.txt` | 手机只读登录时输入 |
-| `.verify/cloudflare-setup/*_TOKEN_SHA256.txt` | 后端仅存两种凭据的哈希 |
+| `.verify/cloudflare-setup/submitter.txt` | 其他设备查看和新增提交，不能发布或清库 |
+| `.verify/cloudflare-setup/*_TOKEN_SHA256.txt` | 后端仅存三种凭据的哈希 |
 | `.verify/cloudflare-setup/deployment.json` | 部署阶段与服务地址，不含原始凭据 |
 
 ```sh
@@ -57,7 +58,7 @@ npm run cloud:deploy -- --account 你的32位账户编号
 
 - 同名 D1 会先查询再复用；“创建成功但响应丢失”不会盲目重复创建。
 - 已应用的迁移由 Wrangler 记录并跳过；不会清空现有数据库。
-- 只设置本工具的两项认证哈希，不删除其他 secret；部署时复用原来的随机凭据，不自动轮换密码。
+- 只设置本工具的三项认证哈希，不删除其他 secret；部署时复用原来的随机凭据，不自动轮换密码。
 - 未能从本次 Wrangler 输出确认地址时，不把凭据发往旧缓存地址。可以从控制台核对地址后手动验证：
 
 ```sh
@@ -98,3 +99,16 @@ npm run cloud:verify -- --url https://你的Worker地址
 - Chrome 本地自动化、官方 workerd / D1 本地验证不等于真实 Cloudflare 账号部署或 Safari 真机支持。Safari 扩展包与 S2 双向同步仍单列后续工作。
 
 官方依据：[Wrangler API / Test Harness](https://developers.cloudflare.com/workers/wrangler/api/)、[D1 batch](https://developers.cloudflare.com/d1/worker-api/d1-database/)。工具锁定 Wrangler 4.157.0，升级时需复跑部署工具与本地运行时验证。
+
+## 从已部署版本升级云端收件箱
+
+```sh
+npm run cloud:prepare
+npm run cloud:deploy
+```
+
+prepare 会补一份独立的 submitter.txt，保留已有项目、D1、发布和只读凭据。deploy 原地执行新增收件表迁移并更新后端、网页和提交 secret；不清空已有镜像、不自动发布真实收藏。若登录已过期，先 cloud:login。
+
+重新加载扩展；手机刷新网页并退出旧只读登录，改用 submitter.txt 登录。手机「添加记录」先保存本机，再发送；总机进入「云端与收件箱」检查并接收，整理后重新发布。手机「本机临时」刷新提交与发布状态，可手动清理已发布副本。分类和标签只来自总机最近发布的共享目录。
+
+与正式镜像不同，提交时填写的备注和来源说明会暂存在自己的云端，接收确认后云端清除提交正文。临时列表只保存在此浏览器，退出不删除，清站点数据会丢失；删除本机副本不会撤回已发送提交。完整状态、重复网址处理、容量和 90 天回执保留见 [收件箱设计说明](../cloud-inbox-design.md)。

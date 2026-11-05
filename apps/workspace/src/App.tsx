@@ -67,7 +67,7 @@ function FooterHint() {
     rules: '分类与整理策略',
     ai: 'AI 助手 · 手动交接可用',
     aiconfig: 'AI 通道 · 自配模型与手动交接',
-    cloud: 'Cloudflare · 私有只读镜像',
+    cloud: 'Cloudflare · 收藏镜像与云端收件箱',
     organize: '整理 · 人工确认后应用',
     'organize:batch': '分批整理 · 本机计划与人工确认',
     ask: '提问 · 选择不等于授权',

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { InboxDeviceSchema, InboxSubmitSchema, InboxReceiptSchema } from '../../../packages/sync/src/inbox.js';
 import { ChunkSchema, ClearMirrorSchema, CreateGenerationSchema, MIRROR_LIMITS, MIRROR_PROTOCOL, PublishSchema,
   byteLength, digest, sameIdentity, validateMirror, type MirrorIdentity, type MirrorInfo, type MirrorRecord } from '../../../packages/sync/src/protocol.js';
 
@@ -9,7 +10,7 @@ export interface Statement {
   run(): Promise<{ meta: { changes: number } }>;
 }
 export interface Database { prepare(sql: string): Statement; batch(statements: Statement[]): Promise<{ meta: { changes: number } }[]>; }
-export interface Env { DB: Database; WRITE_TOKEN_SHA256: string; READ_TOKEN_SHA256: string; ASSETS?: { fetch(request: Request): Promise<Response> }; }
+export interface Env { DB: Database; WRITE_TOKEN_SHA256: string; READ_TOKEN_SHA256: string; SUBMIT_TOKEN_SHA256?: string; ASSETS?: { fetch(request: Request): Promise<Response> }; }
 interface Library { server_id: string; library_id: string; epoch: string; revision: number; active_generation: string | null; published_at: string | null; }
 interface Generation { id: string; epoch: string; base_revision: number; chunk_count: number; record_count: number; content_hash: string; created_at: number; }
 interface Chunk { part: number; hash: string; body: string; bytes: number; }
@@ -23,11 +24,11 @@ function constantEqual(a: string, b: string): boolean { let diff = a.length ^ b.
 async function authenticate(request: Request, env: Env, write = false): Promise<void> {
   if (!/^[a-f0-9]{64}$/.test(env.WRITE_TOKEN_SHA256 ?? '') || !/^[a-f0-9]{64}$/.test(env.READ_TOKEN_SHA256 ?? '') || constantEqual(env.WRITE_TOKEN_SHA256, env.READ_TOKEN_SHA256)) fail(503, '服务尚未配置独立的发布和只读凭据。');
   const bearer = /^Bearer ([^\s]{24,256})$/.exec(request.headers.get('Authorization') ?? '')?.[1];
-  const cookie = /(?:^|;\s*)__Host-shiye_reader=([^;]+)/.exec(request.headers.get('Cookie') ?? '')?.[1];
+  const cookie = /(?:^|;\s*)__Host-shiye_(?:reader|submit)=([^;]+)/.exec(request.headers.get('Cookie') ?? '')?.[1];
   const token = bearer ?? (!write ? cookie : undefined);
   const hash = await tokenHash(token ?? '');
   if (write ? !bearer || !constantEqual(hash, env.WRITE_TOKEN_SHA256) :
-    !(constantEqual(hash, env.READ_TOKEN_SHA256) || (Boolean(bearer) && constantEqual(hash, env.WRITE_TOKEN_SHA256)))) fail(401, '凭据无效或无此操作权限。');
+    !(constantEqual(hash, env.READ_TOKEN_SHA256) || (/^[a-f0-9]{64}$/.test(env.SUBMIT_TOKEN_SHA256 ?? '') && constantEqual(hash, env.SUBMIT_TOKEN_SHA256!)) || (Boolean(bearer) && constantEqual(hash, env.WRITE_TOKEN_SHA256)))) fail(401, '凭据无效或无此操作权限。');
 }
 async function body(request: Request): Promise<unknown> {
   if (!request.headers.get('Content-Type')?.startsWith('application/json')) fail(415, '仅接受 JSON。');
@@ -46,6 +47,69 @@ const guard = (row: Library, identity: MirrorIdentity) => { if (!sameIdentity(id
 async function generation(db: Database, id: string): Promise<Generation> { const row = await db.prepare('SELECT * FROM mirror_generations WHERE id=?').bind(id).first<Generation>(); if (!row) return fail(404, '未找到上传计划。'); return row; }
 function sameOrigin(request: Request) { if (request.headers.get('Origin') !== new URL(request.url).origin) fail(403, '请从同域的私有页面登录。'); }
 const cookie = (value: string, age: number) => `__Host-shiye_reader=${value}; Path=/; Max-Age=${age}; HttpOnly; Secure; SameSite=Strict`;
+async function authenticateSubmit(request: Request, env: Env) {
+  if (!/^[a-f0-9]{64}$/.test(env.SUBMIT_TOKEN_SHA256 ?? '') || env.SUBMIT_TOKEN_SHA256 === env.WRITE_TOKEN_SHA256 || env.SUBMIT_TOKEN_SHA256 === env.READ_TOKEN_SHA256) fail(503, '请升级部署并配置独立提交凭据。');
+  const bearer = /^Bearer ([^\s]{24,256})$/.exec(request.headers.get('Authorization') ?? '')?.[1];
+  const token = bearer ?? /(?:^|;\s*)__Host-shiye_reader=([^;]+)/.exec(request.headers.get('Cookie') ?? '')?.[1];
+  if (!bearer) sameOrigin(request);
+  if (!constantEqual(await tokenHash(token ?? ''), env.SUBMIT_TOKEN_SHA256!)) fail(401, '请使用独立提交凭据登录；只读凭据不能提交。');
+}
+interface InboxRow { seq: number; id: string; server_id: string; library_id: string; epoch: string; device_id: string; device_hash: string; input_hash: string; payload: string | null; status: string; receipt: string | null; created_at: string; }
+async function inboxRequest(request: Request, env: Env, path: string): Promise<Response> {
+  const db = env.DB, lib = await library(db);
+  if (path === '/v1/inbox' && request.method === 'POST') {
+    await authenticateSubmit(request, env);
+    const input = InboxSubmitSchema.parse(await body(request)); guard(lib, input.identity);
+    const deviceHash = await digest(input.deviceKey), inputHash = await digest(JSON.stringify(input.payload));
+    const previous = await db.prepare('SELECT * FROM capture_inbox WHERE id=?').bind(input.id).first<InboxRow>();
+    if (previous) {
+      if (previous.device_id !== input.deviceId || previous.device_hash !== deviceHash || previous.input_hash !== inputHash) fail(409, '提交编号已用于其他内容。');
+      return json({ id: previous.id, status: previous.status, receipt: previous.receipt ? JSON.parse(previous.receipt) : null });
+    }
+    await db.prepare("DELETE FROM capture_inbox WHERE status<>'pending' AND settled_at<?").bind(new Date(Date.now() - 90 * 86400000).toISOString()).run();
+    const result = await db.prepare(`INSERT INTO capture_inbox(id,server_id,library_id,epoch,device_id,device_hash,input_hash,payload,created_at)
+      SELECT ?,?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM capture_inbox) < 10000 ON CONFLICT(id) DO NOTHING`).bind(input.id, lib.server_id, lib.library_id, lib.epoch, input.deviceId, deviceHash, inputHash, JSON.stringify(input.payload), new Date().toISOString()).run();
+    if (!result.meta.changes) {
+      const raced = await db.prepare('SELECT * FROM capture_inbox WHERE id=?').bind(input.id).first<InboxRow>();
+      if (!raced) fail(429, '云端收件箱已满，请先接收整理；已处理回执保留 90 天后回收。');
+      if (raced.device_id !== input.deviceId || raced.device_hash !== deviceHash || raced.input_hash !== inputHash) fail(409, '提交编号已用于其他内容。');
+      return json({ id: raced.id, status: raced.status, receipt: raced.receipt ? JSON.parse(raced.receipt) : null });
+    }
+    return json({ id: input.id, status: 'pending', receipt: null });
+  }
+  if (path === '/v1/inbox/device' && request.method === 'POST') {
+    await authenticateSubmit(request, env);
+    const input = InboxDeviceSchema.extend({ identity: InboxSubmitSchema.shape.identity, ids: z.array(z.string().uuid()).max(50) }).strict().parse(await body(request)); guard(lib, input.identity);
+    const deviceHash = await digest(input.deviceKey), result = [];
+    for (const id of input.ids) {
+      const row = await db.prepare('SELECT id,status,receipt FROM capture_inbox WHERE id=? AND device_id=? AND device_hash=? AND epoch=?').bind(id, input.deviceId, deviceHash, lib.epoch).first<InboxRow>();
+      if (row) result.push({ id: row.id, status: row.status, receipt: row.receipt ? JSON.parse(row.receipt) : null });
+    }
+    return json({ entries: result });
+  }
+  await authenticate(request, env, true);
+  if (path === '/v1/inbox' && request.method === 'GET') {
+    const raw = new URL(request.url).searchParams.get('after') ?? '0'; const after = z.coerce.number().int().nonnegative().parse(raw);
+    const rows = (await db.prepare("SELECT * FROM capture_inbox WHERE status='pending' AND epoch=? AND seq>? ORDER BY seq LIMIT 51").bind(lib.epoch, after).all<InboxRow>()).results;
+    const entries = []; let bytes = 0;
+    for (const row of rows.slice(0, 50)) {
+      const entry = { seq: row.seq, id: row.id, identity: { serverId: row.server_id, libraryId: row.library_id, epoch: row.epoch }, payload: JSON.parse(row.payload!), createdAt: row.created_at };
+      bytes += byteLength(JSON.stringify(entry)); if (bytes > 800000 && entries.length) break; entries.push(entry);
+    }
+    return json({ entries, hasMore: rows.length > entries.length });
+  }
+  const receiptMatch = /^\/v1\/inbox\/([a-f0-9-]{36})\/receipt$/.exec(path);
+  if (receiptMatch && request.method === 'POST') {
+    const input = z.object({ identity: InboxSubmitSchema.shape.identity, receipt: InboxReceiptSchema }).strict().parse(await body(request)); guard(lib, input.identity);
+    const row = await db.prepare('SELECT * FROM capture_inbox WHERE id=? AND epoch=?').bind(receiptMatch[1]!, lib.epoch).first<InboxRow>();
+    if (!row) fail(404, '未找到提交记录。');
+    const receipt = JSON.stringify(input.receipt);
+    if (row.status !== 'pending') { if (row.receipt === receipt) return json({ ok: true }); fail(409, '提交已经处理或撤回。'); }
+    const result = await db.prepare("UPDATE capture_inbox SET status=?,receipt=?,payload=NULL,settled_at=? WHERE id=? AND status='pending'").bind(input.receipt.status, receipt, new Date().toISOString(), row.id).run();
+    if (!result.meta.changes) fail(409, '另一设备已处理该提交。'); return json({ ok: true });
+  }
+  return json({ error: '未找到接口。' }, 404);
+}
 
 export async function handleRequest(request: Request, env: Env): Promise<Response> {
   try {
@@ -57,8 +121,9 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       const input = z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{24,256}$/) }).strict().parse(await body(request));
       const authRequest = new Request(request.url, { headers: { Authorization: `Bearer ${input.token}` } });
       await authenticate(authRequest, env);
-      if (!constantEqual(await tokenHash(input.token), env.READ_TOKEN_SHA256)) fail(403, '手机页面请使用独立只读凭据。');
-      return json({ ok: true }, 200, { 'Set-Cookie': cookie(input.token, 8 * 3600) });
+      const isSubmit = constantEqual(await tokenHash(input.token), env.SUBMIT_TOKEN_SHA256 ?? '');
+      if (!isSubmit && !constantEqual(await tokenHash(input.token), env.READ_TOKEN_SHA256)) fail(403, '手机页面请使用独立只读或提交凭据。');
+      return json({ ok: true, canSubmit: isSubmit }, 200, { 'Set-Cookie': cookie(input.token, 8 * 3600) });
     }
     if (!path.startsWith('/v1/')) {
       if (!env.ASSETS) return new Response('拾页私有记录镜像', { headers: { ...headers, 'Content-Type': 'text/plain; charset=utf-8' } });
@@ -66,6 +131,12 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       const wrapped = new Response(response.body, response); for (const [key, value] of Object.entries(headers)) wrapped.headers.set(key, value); return wrapped;
     }
     const write = request.method !== 'GET';
+    if (path === '/v1/capabilities' && request.method === 'GET') {
+      await authenticate(request, env);
+      const token = /^Bearer ([^\s]{24,256})$/.exec(request.headers.get('Authorization') ?? '')?.[1] ?? /(?:^|;\s*)__Host-shiye_reader=([^;]+)/.exec(request.headers.get('Cookie') ?? '')?.[1];
+      return json({ canSubmit: Boolean(token && /^[a-f0-9]{64}$/.test(env.SUBMIT_TOKEN_SHA256 ?? '') && constantEqual(await digest(token), env.SUBMIT_TOKEN_SHA256!)) });
+    }
+    if (path.startsWith('/v1/inbox')) return await inboxRequest(request, env, path);
     await authenticate(request, env, write);
     if (path === '/v1/info' && request.method === 'GET') return json(infoOf(await library(db)));
     if (path === '/v1/generations' && request.method === 'POST') {

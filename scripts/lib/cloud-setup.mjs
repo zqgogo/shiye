@@ -9,6 +9,7 @@ export function setupPaths(root) {
   const directory = path.join(root, '.verify/cloudflare-setup');
   return { root, directory, config: path.join(root, 'apps/worker/wrangler.local.jsonc'), state: path.join(directory, 'deployment.json'),
     publisher: path.join(directory, 'publisher.txt'), reader: path.join(directory, 'reader.txt'),
+    submitter: path.join(directory, 'submitter.txt'), submitHash: path.join(directory, 'SUBMIT_TOKEN_SHA256.txt'),
     writeHash: path.join(directory, 'WRITE_TOKEN_SHA256.txt'), readHash: path.join(directory, 'READ_TOKEN_SHA256.txt') };
 }
 export function readConfig(file) {
@@ -43,7 +44,12 @@ export function prepareCloud(root, options = {}) {
   if (!existing) writeJson(files.config, { name, main: 'src/index.ts', compatibility_date: '2026-11-04', workers_dev: true,
     ...(options.account ? { account_id: options.account } : {}), assets: { directory: './public', binding: 'ASSETS', run_worker_first: true },
     d1_databases: options.databaseId ? [{ binding: 'DB', database_name: name, database_id: options.databaseId, migrations_dir: 'migrations' }] : [] }, true);
-  return doctorCloud(root);
+  const submitCount = [files.submitter, files.submitHash].filter((file) => fs.existsSync(file)).length;
+  if (submitCount === 1) throw new Error('本地提交凭据不完整，未自动更换；请恢复原文件。');
+  if (!submitCount) { const submitter = randomBytes(32).toString('base64url'); writePrivate(files.submitter, submitter + '\n', true); writePrivate(files.submitHash, tokenHash(submitter) + '\n', true); }
+  const result = doctorCloud(root);
+  writePrivate(path.join(files.directory, 'local.dev.vars'), `WRITE_TOKEN_SHA256=${result.writeHash}\nREAD_TOKEN_SHA256=${result.readHash}\nSUBMIT_TOKEN_SHA256=${result.submitHash}\n`);
+  return result;
 }
 export function doctorCloud(root) {
   const files = setupPaths(root);
@@ -52,17 +58,19 @@ export function doctorCloud(root) {
   if (!namePattern.test(config.name ?? '') || (config.account_id && !idPattern.test(config.account_id))) throw new Error('本地项目名称或账号编号不合法。');
   if (path.resolve(base, config.main ?? '') !== path.join(root, 'apps/worker/src/index.ts') || path.resolve(base, config.assets?.directory ?? '') !== path.join(root, 'apps/worker/public') || config.assets?.binding !== 'ASSETS' || config.assets?.run_worker_first !== true) throw new Error('部署入口或静态资源路径与拾页工程不一致，请核对本地配置。');
   if (!fs.existsSync(path.resolve(base, config.main)) || !fs.existsSync(path.join(root, 'apps/worker/migrations/0001_mirror.sql'))) throw new Error('缺少 Worker 源码或数据库迁移文件。');
-  for (const file of [files.publisher, files.reader, files.writeHash, files.readHash]) {
+  for (const file of [files.publisher, files.reader, files.writeHash, files.readHash, files.submitter, files.submitHash]) {
     if (!fs.existsSync(file) || fs.lstatSync(file).isSymbolicLink()) throw new Error('缺少正常的凭据文件，或文件是符号链接。');
     if (process.platform !== 'win32' && (fs.statSync(file).mode & 0o077)) throw new Error('凭据文件权限过宽，请设置为仅当前用户可读写。');
   }
   const publisher = fs.readFileSync(files.publisher, 'utf8').trim(), reader = fs.readFileSync(files.reader, 'utf8').trim();
   const writeHash = fs.readFileSync(files.writeHash, 'utf8').trim(), readHash = fs.readFileSync(files.readHash, 'utf8').trim();
   if (!/^[A-Za-z0-9_-]{32,256}$/.test(publisher) || !/^[A-Za-z0-9_-]{32,256}$/.test(reader) || publisher === reader || tokenHash(publisher) !== writeHash || tokenHash(reader) !== readHash) throw new Error('发布/只读凭据的格式、隔离或哈希校验失败，未自动更换凭据。');
+  const submitter = fs.readFileSync(files.submitter, 'utf8').trim(), submitHash = fs.readFileSync(files.submitHash, 'utf8').trim();
+  if (!/^[A-Za-z0-9_-]{32,256}$/.test(submitter) || [publisher, reader].includes(submitter) || tokenHash(submitter) !== submitHash) throw new Error('提交凭据校验失败，需与发布、只读凭据相互独立。');
   if (!Array.isArray(config.d1_databases) || config.d1_databases.length > 1) throw new Error('本向导只部署单个独立 D1，请核对数据库绑定。');
   const database = config.d1_databases[0] ?? null;
   if (database && (database.binding !== 'DB' || !uuidPattern.test(database.database_id ?? '') || !namePattern.test(database.database_name ?? '') || path.resolve(base, database.migrations_dir ?? 'migrations') !== path.join(root, 'apps/worker/migrations'))) throw new Error('数据库编号、绑定或迁移目录不合法。');
-  return { files, config, database, publisher, reader, writeHash, readHash };
+  return { files, config, database, publisher, reader, writeHash, readHash, submitter, submitHash };
 }
 export function chooseAccount(accounts, requested, configured) {
   const id = requested ?? configured ?? (accounts.length === 1 ? accounts[0]?.id : null);
@@ -76,7 +84,7 @@ export function findWorkersUrl(output, name) {
   }
   return null;
 }
-export async function verifyCloud(url, publisher, reader, fetcher = fetch) {
+export async function verifyCloud(url, publisher, reader, fetcher = fetch, submitter) {
   const base = new URL(url);
   if (base.protocol !== 'https:' || base.username || base.password || base.search || base.hash || !['', '/'].includes(base.pathname)) throw new Error('验证地址需为不含认证信息的 HTTPS 根地址。');
   const send = async (path, token, options = {}) => {
@@ -91,6 +99,13 @@ export async function verifyCloud(url, publisher, reader, fetcher = fetch) {
   // Invalid empty declaration is intentional: even a misconfigured server cannot mutate records here.
   const denied = await send('/v1/generations', reader, { method: 'POST', body: '{}' });
   if (denied.status !== 401) throw new Error('只读凭据的写入隔离检查未通过。');
+  if (submitter) {
+    const capabilities = await send('/v1/capabilities', submitter);
+    if (!capabilities.ok || !(await capabilities.json()).canSubmit) throw new Error('提交凭据尚未生效，请重跑部署完成 secret 配置。');
+    if ((await send('/v1/generations', submitter, { method: 'POST', body: '{}' })).status !== 401 ||
+        (await send('/v1/inbox', reader, { method: 'POST', body: '{}' })).status !== 401 ||
+        (await send('/v1/inbox', submitter, { method: 'POST', body: '{}' })).status !== 400) throw new Error('提交与只读/发布权限隔离检查未通过。');
+  }
   return { url: base.origin, serverId: first.serverId, libraryId: first.libraryId, epoch: first.epoch, revision: first.revision };
 }
 export async function deployCloud(root, { run, account, verify = verifyCloud, log = () => {} }) {
@@ -129,10 +144,10 @@ export async function deployCloud(root, { run, account, verify = verifyCloud, lo
   const url = findWorkersUrl(output, config.name);
   checkpoint({ stage: 'code_deployed', url });
   log('配置独立发布/只读凭据哈希…');
-  await run(['secret', 'bulk', ...cli], { input: JSON.stringify({ WRITE_TOKEN_SHA256: ready.writeHash, READ_TOKEN_SHA256: ready.readHash }) });
+  await run(['secret', 'bulk', ...cli], { input: JSON.stringify({ WRITE_TOKEN_SHA256: ready.writeHash, READ_TOKEN_SHA256: ready.readHash, SUBMIT_TOKEN_SHA256: ready.submitHash }) });
   checkpoint({ stage: 'secrets_configured' });
   if (!url) throw new Error('代码及凭据已部署，但未识别服务地址。请从 Cloudflare 控制台获取 HTTPS 地址并运行 cloud:verify -- --url 地址。');
   log('只做在线握手验证，不上传收藏…');
-  const result = await verify(url, ready.publisher, ready.reader); checkpoint({ stage: 'verified', identity: result });
+  const result = await verify(url, ready.publisher, ready.reader, undefined, ready.submitter); checkpoint({ stage: 'verified', identity: result });
   return { files, ...result };
 }

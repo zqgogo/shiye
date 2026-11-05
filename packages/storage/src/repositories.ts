@@ -1,4 +1,5 @@
 import { createMirrorPublications } from './mirror-publication.js';
+import { createCloudInbox } from './cloud-inbox.js';
 import { createOrganizePlans } from './organize-plans.js';
 import { DexieOrganizationRepository, resolveImportCategory, assertCategoryTree, collectCategoryDependencies } from './organization.js';
 import { ImportDraftSchema, categoryFingerprint } from '@shiye/core';
@@ -1927,7 +1928,9 @@ export function createRepositories(
   hooks?: PurgeHooks
 ): Repositories {
   const handoff = new DexieHandoffRepository(db);
+  const bookmarks = new DexieBookmarkRepository(db, hooks), reading = new DexieReadingRepository(db, hooks);
   return {
+    cloudInbox: createCloudInbox(db, bookmarks, reading),
     publications: createMirrorPublications(db),
     organizePlans: createOrganizePlans(db, handoff),
     aiTasks: {
@@ -1936,8 +1939,8 @@ export function createRepositories(
       async recent() { return db.aiTasks.orderBy('createdAt').reverse().limit(20).toArray(); },
     },
     organization: new DexieOrganizationRepository(db),
-    bookmarks: new DexieBookmarkRepository(db, hooks),
-    reading: new DexieReadingRepository(db, hooks),
+    bookmarks,
+    reading,
     categories: new DexieCategoryRepository(db),
     tags: new DexieTagRepository(db),
     settings: new DexieSettingsRepository(db),

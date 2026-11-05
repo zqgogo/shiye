@@ -1,4 +1,5 @@
 import { GenerationStatusSchema } from './protocol.js';
+import { InboxPageSchema, type InboxEntry, type InboxReceipt } from './inbox.js';
 import { validateMirrorPlan, type MirrorPlan } from './publication.js';
 export type { MirrorPlan } from './publication.js';
 import { CreateGenerationSchema, MIRROR_LIMITS, MirrorInfoSchema, byteLength, digest, sameIdentity, validateMirror,
@@ -26,6 +27,10 @@ export class MirrorClient {
     try { return JSON.parse(text); } catch { throw new Error('后端没有返回可识别的数据。'); }
   }
   async info(signal: AbortSignal): Promise<MirrorInfo> { return MirrorInfoSchema.parse(await this.request('v1/info', signal)); }
+  async inbox(signal: AbortSignal, after = 0) { return InboxPageSchema.parse(await this.request(`v1/inbox?after=${after}`, signal)); }
+  async acknowledge(entry: InboxEntry, receipt: InboxReceipt, signal: AbortSignal) {
+    await this.request(`v1/inbox/${entry.id}/receipt`, signal, { identity: entry.identity, receipt });
+  }
   async publish(plan: MirrorPlan, signal: AbortSignal, progress: (done: number, total: number) => void | Promise<void>,
     checks: { beforeChunk?: (index: number, records: readonly MirrorRecord[]) => Promise<void>; beforeCommit?: () => Promise<void> } = {}): Promise<MirrorInfo> {
     plan = await validateMirrorPlan(plan);

@@ -32,6 +32,7 @@ const verified = async (url) => ({ url, serverId: 'test-server', libraryId: 'tes
 test('准备仅写本地私有配置，凭据相互独立，重复执行保持原值', (t) => {
   const root = fixture(t), first = prepareCloud(root), second = prepareCloud(root);
   assert.equal(first.config.name, second.config.name); assert.equal(first.publisher, second.publisher); assert.notEqual(first.publisher, first.reader);
+  assert.notEqual(first.submitter, first.publisher); assert.notEqual(first.submitter, first.reader); assert.equal(tokenHash(first.submitter), first.submitHash); assert.equal(first.submitter, second.submitter);
   assert.equal(tokenHash(first.publisher), first.writeHash); assert.equal(tokenHash(first.reader), first.readHash);
   assert.equal(JSON.stringify(first.config).includes(first.publisher), false); assert.equal(first.config.d1_databases.length, 0);
   if (process.platform !== 'win32') assert.equal(fs.statSync(first.files.publisher).mode & 0o077, 0);
@@ -54,7 +55,7 @@ test('部署按顺序核对账号、创建资源、迁移、发版和设置哈�
   assert.match(result.url, /workers\.dev$/);
   assert.deepEqual(fake.calls.map((call) => call.args.slice(0, 2).join(' ')), ['whoami --json', 'd1 list', 'd1 create', 'd1 migrations', 'deploy --config', 'secret bulk']);
   const bulk = fake.calls.find((call) => call.args[0] === 'secret').input;
-  assert.equal(JSON.parse(bulk).WRITE_TOKEN_SHA256, prepared.writeHash);
+  assert.equal(JSON.parse(bulk).WRITE_TOKEN_SHA256, prepared.writeHash); assert.equal(JSON.parse(bulk).SUBMIT_TOKEN_SHA256, prepared.submitHash); assert.equal(JSON.stringify(fake.calls).includes(prepared.submitter), false);
   assert.equal(JSON.stringify(fake.calls).includes(prepared.publisher), false); assert.equal(JSON.stringify(fake.calls).includes(prepared.reader), false);
   assert.equal(JSON.parse(fs.readFileSync(prepared.files.state)).stage, 'verified');
 });
@@ -83,4 +84,11 @@ test('在线验证只发送握手和无效的只读写入探针，不上传记�
   assert.ok(requests.every((request) => request.redirect === 'error' && !request.url.includes('publisher') && !request.url.includes('reader')));
   await assert.rejects(verifyCloud('http://example.com', 'publisher', 'reader'));
   await assert.rejects(verifyCloud('https://user:pass@example.com', 'publisher', 'reader'));
+});
+
+test('旧部署补提交凭据时保留项目、数据库和原两份凭据', (t) => {
+  const root = fixture(t), first = prepareCloud(root, { account, databaseId });
+  fs.unlinkSync(first.files.submitter); fs.unlinkSync(first.files.submitHash);
+  const upgraded = prepareCloud(root); assert.equal(upgraded.publisher, first.publisher); assert.equal(upgraded.reader, first.reader); assert.deepEqual(upgraded.config, first.config);
+  assert.notEqual(upgraded.submitter, first.submitter); assert.equal(prepareCloud(root).submitter, upgraded.submitter);
 });

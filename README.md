@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-当前为 **v0.2 预览版**：Chrome / Edge 扩展中的本地收藏工作台、弹窗快速访问、自配模型的问答/全范围分片整理，以及用户自有 Cloudflare 的 S1 私有只读镜像。双向同步、真实服务和 Safari 发布仍有后续验收；不把本地模拟验证当作云端/真机验收。**逐阶段进度与证据只以 [开发进度规划](docs/ROADMAP.md) 为准**。下一版方案见 [v0.2 计划](docs/v0.2-cloudflare-ai-plan.md)，部署自己后端见 [Cloudflare 说明](docs/deployment/cloudflare-s1.md)。
+当前为 **v0.2 预览版**：Chrome / Edge 扩展中的本地收藏工作台、弹窗快速访问、自配模型的问答/全范围分片整理，以及用户自有 Cloudflare 的私有镜像与其他设备新增提交/总机收件箱。双向同步、真实服务和 Safari 发布仍有后续验收；不把本地模拟验证当作云端/真机验收。**逐阶段进度与证据只以 [开发进度规划](docs/ROADMAP.md) 为准**。下一版方案见 [v0.2 计划](docs/v0.2-cloudflare-ai-plan.md)，部署自己后端见 [Cloudflare 说明](docs/deployment/cloudflare-s1.md)。
 
 产品与技术依据位于 `resource/拾页开发交付包_v2_1/`。开发前先读其中的 `00_先读我.md`、`02_产品与技术实现说明_v2_1.md`、`03_AI开发任务书_v2_1.md`。该目录只作为输入资料归档，其中的原型、参考类型和 SQL 不作为正式实现代码。
 
@@ -38,11 +38,12 @@ npm install
 | `npm run cloud:prepare` | 本地准备自有后端配置和独立应用凭据 |
 | `npm run cloud:doctor` | 离线检查部署配置与凭据 |
 | `npm run cloud:login` | 登录用户自己的 Cloudflare |
-| `npm run cloud:deploy` | 创建/复用 D1 并部署 Worker 与手机只读页，不上传收藏 |
+| `npm run cloud:deploy` | 创建/复用 D1 并部署 Worker 与手机查看/提交页，不上传收藏 |
 | `npm run cloud:verify` | 在线只做鉴权及身份检查，不上传记录 |
 | `npm run verify:cloud-runtime` | 官方 workerd / D1 本地集成测试 |
+| `npm run verify:cloud-inbox` | 手机提交、本机临时列表、总机接收和发布核对验证 |
 | `npm run verify:cloud-publication` | 镜像续传、刷新、隐私和取消专项浏览器验证 |
-| `npm run cloud:credentials` | 在 Git 忽略目录生成独立的发布/只读凭据，不打印凭据 |
+| `npm run cloud:credentials` | 在 Git 忽略目录生成独立的发布/只读/提交凭据，不打印凭据 |
 | `npm run verify:organize-plan` | 300 条分片、重试、续接和跨页应用/撤销专项验证 |
 | `npm run verify:v02` | 快速访问、AI 与镜像手机页面专项浏览器验证（合成数据） |
 | `npm run typecheck` | TypeScript 全量检查 |

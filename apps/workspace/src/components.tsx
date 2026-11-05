@@ -59,6 +59,9 @@ export function PageHeader({
 
 export function Sidebar() {
   const { data, route, navigate, openModal } = useWorkspace();
+  const extraRoutes = ['uncategorized', 'capture:file', 'trash'];
+  const [moreOpen, setMoreOpen] = useState(() => extraRoutes.includes(route));
+  useEffect(() => { if (extraRoutes.includes(route)) setMoreOpen(true); }, [route]);
   const active = data.bookmarks;
   const readingCount = data.pendingReading.length;
   const inboxCount = active.filter((bookmark) => bookmark.inboxUnread).length;
@@ -94,11 +97,13 @@ export function Sidebar() {
         {item('home', ICONS.home, '首页')}
         {item('reading', ICONS.reading, '待看', readingCount)}
         {item('inbox', ICONS.inbox, '收件箱', inboxCount)}
-        {item('uncategorized', ICONS.uncategorized, '未分类', uncategorized)}
         {item('all', ICONS.all, '全部收藏', active.length)}
-        {item('capture:file', ICONS.all, '导入与待整理')}
-        {/* 删完东西第一反应是找回收站，所以把它从「设置与管理」里提到日常组。 */}
-        {item('trash', ICONS.trash, '回收站', data.trashedCount)}
+        <details className="nav-extra" open={moreOpen} onToggle={(event) => setMoreOpen(event.currentTarget.open)}>
+          <summary>更多入口 <span>未分类 · 导入 · 回收站</span></summary>
+          {item('uncategorized', ICONS.uncategorized, '未分类', uncategorized)}
+          {item('capture:file', ICONS.all, '导入与待整理')}
+          {item('trash', ICONS.trash, '回收站', data.trashedCount)}
+        </details>
       </div>
 
       <div className="navgroup" style={{ marginTop: 24 }}>
@@ -127,7 +132,7 @@ export function Sidebar() {
       <div className="navgroup nav-tools">
         <small>工具 · TOOLS</small>
         {item('ai', ICONS.ai, 'AI 助手')}
-        {item('cloud', '☁', 'Cloudflare 镜像')}
+        {item('cloud', '☁', '云端与收件箱')}
         {item('settings', ICONS.settings, '设置与管理')}
       </div>
 

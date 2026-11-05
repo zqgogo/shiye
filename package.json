@@ -17,7 +17,7 @@
     "verify": "npm run typecheck && npm run test && npm run test:cloud-tools && npm run build",
     "verify:browser": "node scripts/verify-p0.mjs",
     "verify:import": "node scripts/verify-p0-import.mjs",
-    "verify:all": "npm run verify && npm run verify:browser && npm run verify:import && npm run verify:p1 && npm run verify:p2 && npm run verify:p3 && npm run verify:p4 && npm run verify:p5 && npm run verify:p6 && npm run verify:a11y && npm run verify:workbench && npm run verify:v02 && npm run build:worker && npm run verify:organize-plan && npm run verify:cloud-runtime && npm run verify:cloud-publication",
+    "verify:all": "npm run verify && npm run verify:browser && npm run verify:import && npm run verify:p1 && npm run verify:p2 && npm run verify:p3 && npm run verify:p4 && npm run verify:p5 && npm run verify:p6 && npm run verify:a11y && npm run verify:workbench && npm run verify:v02 && npm run build:worker && npm run verify:organize-plan && npm run verify:cloud-runtime && npm run verify:cloud-publication && npm run verify:cloud-inbox",
     "verify:p1": "node scripts/verify-p1.mjs",
     "verify:p2": "node scripts/verify-p2.mjs",
     "verify:p3": "node scripts/verify-p3.mjs",
@@ -38,7 +38,8 @@
     "cloud:verify": "node scripts/cloudflare.mjs verify",
     "test:cloud-tools": "node --test scripts/tests/cloud-setup.test.mjs",
     "verify:cloud-runtime": "node scripts/verify-cloud-runtime.mjs",
-    "verify:cloud-publication": "node scripts/verify-cloud-publication.mjs"
+    "verify:cloud-publication": "node scripts/verify-cloud-publication.mjs",
+    "verify:cloud-inbox": "node scripts/verify-cloud-inbox.mjs"
   },
   "dependencies": {
     "dexie": "4.0.11",

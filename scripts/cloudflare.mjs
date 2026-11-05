@@ -21,7 +21,7 @@ const run = (args, { input } = {}) => new Promise((resolve, reject) => {
 try {
   if (command === 'prepare') {
     const result = prepareCloud(root, { name: values.name, account: values.account, databaseId: values['database-id'] });
-    console.log(`本地准备完成：${result.config.name}\n配置：${path.relative(root, files.config)}\n发布凭据：${path.relative(root, files.publisher)}\n只读凭据：${path.relative(root, files.reader)}\n未打印凭据，也未创建远端资源。下一步：npm run cloud:login，然后 npm run cloud:deploy。`);
+    console.log(`本地准备完成：${result.config.name}\n配置：${path.relative(root, files.config)}\n发布凭据：${path.relative(root, files.publisher)}\n只读凭据：${path.relative(root, files.reader)}\n提交凭据：${path.relative(root, files.submitter)}\n未打印凭据，也未创建远端资源。下一步：npm run cloud:login，然后 npm run cloud:deploy。`);
   } else if (command === 'doctor') {
     const result = doctorCloud(root); console.log(`本地检查通过：${result.config.name}\n凭据隔离、哈希、文件权限和部署路径正常。D1：${result.database ? '已配置' : '将在部署时创建'}。这不是远端部署完成的证明。`);
   } else if (command === 'login') {
@@ -34,6 +34,6 @@ try {
   } else if (command === 'verify') {
     const local = doctorCloud(root), saved = fs.existsSync(files.state) ? JSON.parse(fs.readFileSync(files.state, 'utf8')) : {};
     const url = values.url ?? saved.url; if (!url) throw new Error('请用 --url 提供部署后的 HTTPS 根地址。');
-    const result = await verifyCloud(url, local.publisher, local.reader); console.log(`在线握手与权限隔离通过：${result.url}，版本 ${result.revision}。没有上传收藏。`);
+    const result = await verifyCloud(url, local.publisher, local.reader, undefined, local.submitter); console.log(`在线握手与权限隔离通过：${result.url}，版本 ${result.revision}。没有上传收藏。`);
   } else throw new Error('支持命令：prepare / doctor / login / deploy / verify。');
 } catch (error) { console.error(error.message); process.exitCode = 1; }

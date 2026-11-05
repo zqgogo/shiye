@@ -17,17 +17,18 @@ class LocalStatement implements Statement {
 }
 let sqlite: DatabaseSync; let env: Env;
 const writeToken = 'publisher_0123456789_abcdefghijklmnopqrstuvwxyz';
+const submitToken = 'submitter_0123456789_abcdefghijklmnopqrstuvwxyz';
 const readToken = 'reader_0123456789_abcdefghijklmnopqrstuvwxyz';
 let transport: typeof fetch; let client: MirrorClient; const signal = () => new AbortController().signal;
 const sample = (title: string): MirrorRecord[] => [{ kind: 'bookmark', id: 'book', title, url: 'https://example.com', categoryId: null, tagIds: [], pinned: false, unread: true }];
 beforeEach(async () => {
   sqlite = new DatabaseSync(':memory:');
-  sqlite.exec(readFileSync(new URL('../../../apps/worker/migrations/0001_mirror.sql', import.meta.url), 'utf8'));
+  for (const name of ['0001_mirror.sql', '0002_inbox.sql']) sqlite.exec(readFileSync(new URL(`../../../apps/worker/migrations/${name}`, import.meta.url), 'utf8'));
   const db: Database = { prepare: (sql) => new LocalStatement(sqlite, sql), async batch(statements) {
     sqlite.exec('BEGIN IMMEDIATE'); try { const results = statements.map((statement) => (statement as LocalStatement).syncRun()); sqlite.exec('COMMIT'); return results; }
     catch (cause) { sqlite.exec('ROLLBACK'); throw cause; }
   } };
-  env = { DB: db, WRITE_TOKEN_SHA256: await digest(writeToken), READ_TOKEN_SHA256: await digest(readToken) };
+  env = { DB: db, WRITE_TOKEN_SHA256: await digest(writeToken), READ_TOKEN_SHA256: await digest(readToken), SUBMIT_TOKEN_SHA256: await digest(submitToken) };
   transport = (async (input: RequestInfo | URL, init?: RequestInit) => handleRequest(new Request(input, init), env)) as typeof fetch;
   client = new MirrorClient('https://mirror.test', writeToken, transport);
 });
@@ -142,4 +143,58 @@ it('最后一条共享记录转私密后，可发布空镜像撤回全部旧内�
   const chunks = sqlite.prepare('SELECT body FROM mirror_chunks').all() as { body: string }[];
   expect(chunks.flatMap((row) => JSON.parse(row.body))).toEqual([]);
   expect(await publishedId()).toBe(empty.declaration.generationId);
+});
+
+const device = { deviceId: 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa', deviceKey: 'device_0123456789_abcdefghijklmnopqrstuvwxyz' };
+async function submission() { const info = await client.info(signal()); return { ...device, identity: { serverId: info.serverId, libraryId: info.libraryId, epoch: info.epoch }, id: crypto.randomUUID(), payload: {
+  destination: 'bookmark', url: 'https://example.com/inbound', title: '手机收藏', categoryId: null, categoryPath: '', tagIds: [], tagNames: [], sourceDescription: '', note: '暂存备注', pinned: false, unread: true, aiBlocked: false,
+} }; }
+it('提交凭据仅能提交和查看镜像，不能读取总收件箱或发布；只读不能提交', async () => {
+  const input = await submission();
+  expect((await post('/v1/inbox', input, readToken)).status).toBe(401);
+  expect((await post('/v1/inbox', input, submitToken)).status).toBe(200);
+  expect((await transport('https://mirror.test/v1/inbox', { headers: { Authorization: `Bearer ${submitToken}` } })).status).toBe(401);
+  const plan = await planMirror(sample('内容'), await client.info(signal()));
+  expect((await post('/v1/generations', plan.declaration, submitToken)).status).toBe(401);
+  const reader = new MirrorClient('https://mirror.test', submitToken, transport); expect((await reader.info(signal())).protocol).toBe(1);
+});
+it('提交重试幂等、内容不可替换；设备只能核对自己的状态', async () => {
+  const input = await submission(); await post('/v1/inbox', input, submitToken); await post('/v1/inbox', input, submitToken);
+  expect((sqlite.prepare('SELECT COUNT(*) AS n FROM capture_inbox').get() as { n: number }).n).toBe(1);
+  expect((await post('/v1/inbox', { ...input, payload: { ...input.payload, title: '覆盖' } }, submitToken)).status).toBe(409);
+  const own = await post('/v1/inbox/device', { ...device, identity: input.identity, ids: [input.id] }, submitToken);
+  expect((await own.json() as { entries: unknown[] }).entries).toHaveLength(1);
+  const other = await post('/v1/inbox/device', { ...device, deviceKey: 'another_device_0123456789_abcdefghijklmnopqrstuvwxyz', identity: input.identity, ids: [input.id] }, submitToken);
+  expect((await other.json() as { entries: unknown[] }).entries).toHaveLength(0);
+});
+it('总机分页接收后回执幂等，云端清除正文，发布及清空镜像不清待收件', async () => {
+  const input = await submission(); await post('/v1/inbox', input, submitToken);
+  const page = await client.inbox(signal()); expect(page.entries[0]?.payload.note).toBe('暂存备注');
+  const receipt = { status: 'received' as const, recordKind: 'bookmark' as const, recordId: 'local-bookmark', message: '已接收' };
+  await client.acknowledge(page.entries[0]!, receipt, signal()); await client.acknowledge(page.entries[0]!, receipt, signal());
+  expect(sqlite.prepare('SELECT payload FROM capture_inbox WHERE id=?').get(input.id)).toMatchObject({ payload: null }); expect((await client.inbox(signal())).entries).toHaveLength(0);
+  const next = await submission(); await post('/v1/inbox', next, submitToken);
+  const plan = await planMirror(sample('已发布'), await client.info(signal())); await client.publish(plan, signal(), () => undefined); await client.clear(await client.info(signal()), signal());
+  expect((await client.inbox(signal())).entries.map((row) => row.id)).toEqual([next.id]);
+});
+it('提交 Cookie 要求同源、拒绝伪造来源；退出失效，无提交 secret 的旧服务不开放提交', async () => {
+  const login = await transport('https://mirror.test/v1/session', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://mirror.test' }, body: JSON.stringify({ token: submitToken }) });
+  const cookie = login.headers.get('Set-Cookie')!; expect(cookie).toContain('HttpOnly');
+  const input = await submission();
+  const send = (origin: string) => transport('https://mirror.test/v1/inbox', { method: 'POST', headers: { Cookie: cookie, Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+  expect((await send('https://attacker.test')).status).toBe(403); expect((await send('https://mirror.test')).status).toBe(200);
+  delete env.SUBMIT_TOKEN_SHA256; expect((await post('/v1/inbox', await submission(), submitToken)).status).toBe(503);
+});
+it('收件分页稳定，不把已经处理的记录混入；拒绝失效库和非法字段', async () => {
+  const input = await submission();
+  expect((await post('/v1/inbox', { ...input, identity: { ...input.identity, epoch: 'old' } }, submitToken)).status).toBe(409);
+  expect((await post('/v1/inbox', { ...input, payload: { ...input.payload, localOnly: true } }, submitToken)).status).toBe(400);
+  for (let index = 0; index < 52; index++) await post('/v1/inbox', { ...input, id: crypto.randomUUID() }, submitToken);
+  const first = await client.inbox(signal()); expect(first.entries).toHaveLength(50); expect(first.hasMore).toBe(true);
+  const next = await client.inbox(signal(), first.entries.at(-1)!.seq); expect(next.entries).toHaveLength(2);
+  sqlite.exec('DELETE FROM capture_inbox');
+  for (let index = 0; index < 30; index++) await post('/v1/inbox', { ...input, id: crypto.randomUUID(), payload: { ...input.payload, note: '字'.repeat(10000) } }, submitToken);
+  const large = await client.inbox(signal()); expect(large.entries.length).toBeLessThan(30); expect(large.hasMore).toBe(true);
+  expect(new TextEncoder().encode(JSON.stringify(large)).length).toBeLessThan(900000);
+  const rest = await client.inbox(signal(), large.entries.at(-1)!.seq); expect(large.entries.length + rest.entries.length).toBe(30);
 });

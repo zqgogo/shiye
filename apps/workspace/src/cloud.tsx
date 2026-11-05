@@ -6,6 +6,7 @@ import type { SavedPublication } from '../../../packages/sync/src/publication.js
 import { requestOrigin } from '../../../packages/adapters/browser/src/index.js';
 import { PageHeader, Pager } from './components.js';
 import { useWorkspace } from './state.js';
+import { CloudInbox } from './cloud-inbox.js';
 
 export function CloudPage() {
   const { service, data, setPageSize } = useWorkspace();
@@ -103,11 +104,11 @@ export function CloudPage() {
   try { matches = Boolean(publication && info && publication.snapshot.baseUrl === mirrorBase(address).href && sameIdentity(info, publication.status.identity)); } catch { /* An incomplete address is expected while typing. */ }
   const commands = ['npm run cloud:prepare', 'npm run cloud:login', 'npm run cloud:deploy'];
   return <>
-    <PageHeader title="你的 Cloudflare，存你的记录。" description="S1 私有只读镜像：电脑编辑，手机查看。默认关闭，按需手动发布。" />
+    <PageHeader title="你的 Cloudflare，连接你的收藏。" description="总机发布，其他设备查看和提交；总机手动接收后统一整理。" />
     <details className="panel"><summary>还没部署？三步准备自己的 Cloudflare 后端</summary>
       <p>在拾页项目目录中依次执行。准备步骤只生成本地配置和独立凭据；部署步骤会在你登录的 Cloudflare 账号创建 D1、Worker 和只读页面，按你的账号方案计费。</p>
       <ol>{commands.map((command) => <li key={command}><code>{command}</code> <button className="btn small" onClick={async () => { try { await navigator.clipboard.writeText(command); setMessage('命令已复制，请在项目目录的终端执行。'); } catch { setMessage('请直接选中命令复制。'); } }}>复制命令</button></li>)}</ol>
-      <p className="micro">可先用 <code>npm run cloud:doctor</code> 检查本地准备。部署结束会给出 HTTPS 地址；publisher.txt 用于插件，reader.txt 用于手机。应用里无需填写 Cloudflare 管理 API token，AI Key 也无需交给后端。</p>
+      <p className="micro">可先用 <code>npm run cloud:doctor</code> 检查本地准备。publisher.txt 用于总机发布和接收；reader.txt 仅查看；submitter.txt 用于其他设备查看和提交。应用里无需填写 Cloudflare 管理 API token，AI Key 也无需交给后端。</p>
     </details>
     <div className="panel"><h2>连接自有后端</h2>
       <label className="field"><span>后端地址</span><input value={address} placeholder="https://shiye.example.com" onChange={(event) => changeAddress(event.target.value)} /></label>
@@ -116,9 +117,10 @@ export function CloudPage() {
         <button className="btn" onClick={() => { cancel(); setToken(''); setInfo(null); setMessage('已断开并清除本页凭据。发布快照和云端已有内容保留，没有自动续传。'); }}>断开并清除凭据</button>
         {busy && <button className="btn" onClick={() => { cancel(); setMessage('已停止等待，快照保留，结果可能未知；重新连接后可核对或续传。没有自动重试。'); }}>取消请求</button>}
       </div>
-      {info && <div className="notice"><span>库 {info.libraryId} · 云端版本 {info.revision}</span><span>{info.publishedAt ? `最后发布 ${new Date(info.publishedAt).toLocaleString('zh-CN')}` : '尚未发布'}</span><a href={mirrorBase(address).href} target="_blank" rel="noreferrer noopener">打开手机只读页面 ↗</a></div>}
+      {info && <div className="notice"><span>库 {info.libraryId} · 云端版本 {info.revision}</span><span>{info.publishedAt ? `最后发布 ${new Date(info.publishedAt).toLocaleString('zh-CN')}` : '尚未发布'}</span><a href={mirrorBase(address).href} target="_blank" rel="noreferrer noopener">打开手机收藏与提交页 ↗</a></div>}
       <p role="status">{message}</p><p className="micro">{progress}</p>
     </div>
+    {info && <CloudInbox key={JSON.stringify([address, info.serverId, info.libraryId, info.epoch])} client={client} info={info} busy={busy} execute={execute} />}
     {publication && !matches && <div className="panel"><h2>本机保存了一份发布快照</h2><p>{publication.snapshot.baseUrl} · {publication.snapshot.plan.declaration.recordCount} 项 · 本机已记录 {publication.status.confirmedChunks}/{publication.status.totalChunks} 片确认。</p>
       <p>请输入原地址和发布凭据并测试连接，再核对或续传。不会把旧快照自动发到新地址，确认分片以服务器实际状态为准。</p>
       <button className="btn" disabled={busy} onClick={() => changeAddress(publication.snapshot.baseUrl)}>填入快照原地址</button>
@@ -136,6 +138,6 @@ export function CloudPage() {
         </div>
       </>}
     </div>}
-    <div className="panel"><h2>本轮边界</h2><p>这是私有只读镜像，尚未提供多设备编辑的双向同步。快照与进度保存在本机，凭据不保存；刷新后重新输入凭据，主动续传。一次只由一个页面上传，关闭页面不自动发送。AI 独立直连自己的模型服务。</p></div>
+    <div className="panel"><h2>使用方式</h2><p>正式库由总机维护，其他设备只新增提交，不远程修改或删除正式收藏。手机用 submitter.txt 登录即可提交，reader.txt 仍然只读。提交设备保留临时列表，刷新云端后核对是否已发布，手动清理副本。AI 独立直连自己的模型服务。</p></div>
   </>;
 }

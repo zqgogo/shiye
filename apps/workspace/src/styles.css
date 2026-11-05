@@ -453,3 +453,8 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .batch-part-table { width:100%; border-collapse:collapse; text-align:left; }
 .batch-part-table th,.batch-part-table td { padding:10px 12px; border-bottom:1px solid var(--line); }
 .batch-part-table th { background:var(--soft); font-size:11px; color:var(--muted); }
+.nav-extra > summary { cursor:pointer; padding:10px 12px; color:var(--muted); font-size:12px; border-radius:8px; }
+.nav-extra > summary:hover { background:#e6e9df; }
+.nav-extra > summary span { display:block; margin:5px 0 0 12px; font-size:10px; opacity:.8; }
+.nav-extra .nav { width:100%; }
+.cloud-inbox .notice { overflow-wrap:anywhere; }
