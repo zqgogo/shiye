@@ -2,6 +2,7 @@
 const $ = (id) => document.getElementById(id);
 let records = [], paths = new Map(), page = 1, operation = 0, cloudInfo = null, canSubmit = false, localPage = 1, localBusy = false;
 let categoryNodes = new Map(), categoryCounts = new Map(), pickerTarget = 'category', pickerParent = '', pickerPage = 1;
+let retryForce = false;
 const status = (text) => { $('status').textContent = text; };
 async function api(path, options = {}) {
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30000);
@@ -11,7 +12,7 @@ async function api(path, options = {}) {
     return await response.json();
   } finally { clearTimeout(timer); }
 }
-function reset() { $('retry-load').hidden = true; cloudInfo = null; canSubmit = false; $('local-results').replaceChildren(); $('capture-form').reset(); records = []; paths.clear(); categoryNodes.clear(); categoryCounts.clear(); if ($('category-dialog').open) $('category-dialog').close(); $('category-choices').replaceChildren(); $('category-breadcrumbs').replaceChildren(); $('category-current').textContent = ''; $('category-search').value = ''; $('category').replaceChildren(new Option('全部分类',''),new Option('未分类','__uncategorized__')); $('capture-category').replaceChildren(new Option('未分类','')); $('query').value=''; $('site-filter').value=''; $('scope').value='all'; $('include-descendants').checked=true; $('result-sort').value='original'; syncCategoryButtons(); $('results').replaceChildren(); $('library').hidden = true; $('logout').hidden = true; $('login').hidden = false; }
+function reset() { $('cache-status').textContent=''; $('retry-load').hidden = true; cloudInfo = null; canSubmit = false; $('local-results').replaceChildren(); $('capture-form').reset(); records = []; paths.clear(); categoryNodes.clear(); categoryCounts.clear(); if ($('category-dialog').open) $('category-dialog').close(); $('category-choices').replaceChildren(); $('category-breadcrumbs').replaceChildren(); $('category-current').textContent = ''; $('category-search').value = ''; $('category').replaceChildren(new Option('全部分类',''),new Option('未分类','__uncategorized__')); $('capture-category').replaceChildren(new Option('未分类','')); $('query').value=''; $('site-filter').value=''; $('scope').value='all'; $('include-descendants').checked=true; $('result-sort').value='original'; syncCategoryButtons(); $('results').replaceChildren(); $('library').hidden = true; $('logout').hidden = true; $('login').hidden = false; }
 function render() {
   const term = $('query').value.trim().toLowerCase(), scope = $('scope').value, category = $('category').value;
   const site = $('site-filter').value.trim().toLowerCase();
@@ -94,11 +95,40 @@ $('category-uncategorized').addEventListener('click',()=>chooseCategory(pickerTa
 $('category-use-current').addEventListener('click',()=>chooseCategory(pickerParent));
 $('category-dialog').addEventListener('click',event=>{if(event.target===$('category-dialog')) { const rect=event.target.getBoundingClientRect(); if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom) event.target.close(); }});
 $('reset-filters').addEventListener('click',()=>{ $('query').value='';$('site-filter').value='';$('category').value='';$('scope').value='all';$('include-descendants').checked=true;$('result-sort').value='original';page=1;render(); });
-async function load() {
-  const version = ++operation; status('正在读取私有镜像…'); $('retry-load').hidden = true; $('login').hidden = true; if (!cloudInfo) $('library').hidden = true;
+function cacheDatabase(action, value, current = () => true) {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('shiye-mobile-cache', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('snapshots');
+    request.onerror = () => reject(new Error('无法打开本机缓存。'));
+    request.onblocked = () => reject(new Error('本机缓存被其他页面占用。'));
+    request.onsuccess = () => {
+      const db = request.result, tx = db.transaction('snapshots', action === 'read' ? 'readonly' : 'readwrite'), store = tx.objectStore('snapshots');
+      let query; if (action === 'read') query = store.get('current'); else if (current()) query = action === 'clear' ? store.delete('current') : store.put(value, 'current');
+      tx.oncomplete = () => { db.close(); resolve(query?.result ?? null); };
+      tx.onerror = tx.onabort = () => { db.close(); reject(new Error('本机缓存未能保存。')); };
+    };
+  });
+}
+function cacheInterval() { try { const value = localStorage.getItem('shiye:mobile-cache-hours'); return ['0','1','2','6'].includes(value) ? Number(value) : 2; } catch { return 2; } }
+$('cache-interval').value = String(cacheInterval());
+$('cache-interval').addEventListener('change',()=>{ try { localStorage.setItem('shiye:mobile-cache-hours', $('cache-interval').value); status('更新间隔已保存；点击“同步最新”可立即更新。'); } catch { status('未能保存更新间隔。'); } });
+function validCache(cache, info, capabilities) {
+  return cache?.schema === 1 && Array.isArray(cache.records) && cache.records.length <= 50000 && typeof cache.fetchedAt === 'number' && cache.fetchedAt <= Date.now() && cache.fetchedAt > 0 && cache.info?.serverId === info.serverId && cache.info?.libraryId === info.libraryId && cache.info?.epoch === info.epoch && cache.syncEnabled === capabilities.syncEnabled && cache.records.every(row=>{ if(!row || typeof row.id!=='string') return false; if(row.kind==='category'||row.kind==='tag') return typeof row.name==='string'; if(!['bookmark','reading'].includes(row.kind)||typeof row.title!=='string'||typeof row.url!=='string') return false; try { const url=new URL(row.url); return ['http:','https:'].includes(url.protocol)&&!url.username&&!url.password; } catch { return false; } });
+}
+async function load(force = false) {
+  retryForce = force;
+  const version = ++operation; status(force ? '正在同步最新记录…' : '正在验证登录，优先使用本机缓存…'); $('retry-load').hidden = true; $('login').hidden = true; if (!cloudInfo) $('library').hidden = true;
   try {
-    const info = await api('/v1/info'); const all = [];
-    if (info.activeGeneration) {
+    const [info, capabilities] = await Promise.all([api('/v1/info'), api('/v1/capabilities')]);
+    if (version !== operation) return;
+    let cached = null; try { cached = await cacheDatabase('read'); } catch { /* Fetch when local storage is unavailable. */ }
+    if (cached && !validCache(cached, info, capabilities)) { try { await cacheDatabase('clear'); } catch {} cached = null; }
+    if (version !== operation) return;
+    const interval = cacheInterval(), useCached = !force && cached && (interval === 0 || Date.now() - cached.fetchedAt < interval * 3600000);
+    const all = useCached ? cached.records : [];
+    canSubmit = capabilities.canSubmit;
+    let sharedInfo = useCached ? cached.sharedInfo : null;
+    if (!useCached && info.activeGeneration) {
       let count = 1;
       for (let index = 0; index < count; index++) {
         const part = await api(`/v1/mirror?generation=${encodeURIComponent(info.activeGeneration)}&part=${index}`);
@@ -109,8 +139,7 @@ async function load() {
       const after = await api('/v1/info'); if (after.activeGeneration !== info.activeGeneration || after.epoch !== info.epoch || after.serverId !== info.serverId) throw new Error('读取期间镜像已切换，请重新载入。');
     }
     if (version !== operation) return;
-    const capabilities = await api('/v1/capabilities'); canSubmit = capabilities.canSubmit; let sharedInfo = null;
-    if (capabilities.syncEnabled) {
+    if (!useCached && capabilities.syncEnabled) {
       let cursor = null; const shared = []; let revision = null;
       do {
         const part = await api(`/v2/public?${revision === null ? '' : `revision=${revision}&`}${cursor ? `cursor=${encodeURIComponent(cursor)}` : ''}`);
@@ -124,8 +153,12 @@ async function load() {
       const after = await api(`/v2/public?revision=${revision}`); if (after.info.revision !== revision) throw new Error('共享收藏版本变化，请重新载入。');
       const readings = all.filter((row) => row.kind === 'reading'); all.splice(0, all.length, ...shared, ...readings);
     }
-    cloudInfo = info;
     if (version !== operation) return;
+    const fetchedAt = useCached ? cached.fetchedAt : Date.now(); let saved = Boolean(useCached);
+    if (!useCached) { try { await cacheDatabase('write', { schema:1, fetchedAt, info, sharedInfo, syncEnabled:capabilities.syncEnabled, records:all }, () => version === operation); saved = true; } catch { /* Reading still works when cache storage is full. */ } }
+    if (version !== operation) return;
+    cloudInfo = info;
+    $('cache-status').textContent = `${useCached ? '本机缓存' : '刚同步最新'} · ${new Date(fetchedAt).toLocaleString()} 更新${!saved ? ' · 缓存未保存，下次需重新下载' : interval === 0 ? ' · 仅手动更新' : ` · ${interval} 小时内不重复下载`}`;
     records = all; categoryNodes = new Map(all.filter((row) => row.kind === 'category').map((row) => [row.id, row])); categoryCounts = new Map(); for (const bookmark of all.filter((row) => row.kind === 'bookmark')) { let id = bookmark.categoryId; const seen = new Set(); while (id && !seen.has(id)) { seen.add(id); categoryCounts.set(id, (categoryCounts.get(id) || 0) + 1); id = categoryNodes.get(id)?.parentId; } }
     const previousCategory = $('category').value, previousCapture = $('capture-category').value;
     const categories = new Map(all.filter((row) => row.kind === 'category').map((row) => [row.id, row])); paths = new Map();
@@ -136,19 +169,19 @@ async function load() {
     $('category').value = previousCategory === '__uncategorized__' || paths.has(previousCategory) ? previousCategory : ''; $('capture-category').value = paths.has(previousCapture) ? previousCapture : ''; syncCategoryButtons();
     $('capture-tags').replaceChildren(); for (const tag of records.filter((row) => row.kind === 'tag')) $('capture-tags').append(new Option(tag.name, tag.id));
     $('submit-access').textContent = canSubmit ? '当前凭据可提交。先保存在本机，再手动发送给总机。' : '当前凭据只读，仍可保存本机草稿；要发送请退出后使用 submitter.txt 登录。';
-    $('published').textContent = sharedInfo ? `共享收藏 · 同步版本 ${sharedInfo.revision}；待看来自单独镜像` : info.publishedAt ? `发布于 ${new Date(info.publishedAt).toLocaleString()} · 版本 ${info.revision}` : '还没有发布镜像，请回电脑端发布。';
+    $('published').textContent = sharedInfo ? `共享收藏 · 同步版本 ${sharedInfo.revision}；待看来自单独镜像` : (useCached ? cached.info : info).publishedAt ? `镜像版本 ${(useCached ? cached.info : info).revision}` : '还没有发布镜像，请回电脑端发布。';
     $('login').hidden = true; $('logout').hidden = false; $('library').hidden = false; page = 1; render(); reconcileLocal(); renderLocal(); status('');
-  } catch (error) { if (version !== operation) return; if (error.status === 401) { reset(); status('需要登录或凭据已失效，请重新登录。'); } else { $('library').hidden = !cloudInfo; $('login').hidden = true; $('retry-load').hidden = false; status(`连接未完成，未清除登录；请恢复网络后重试。${error.message}`); } }
+  } catch (error) { if (version !== operation) return; if (error.status === 401) { try { await cacheDatabase('clear'); } catch {} if (version !== operation) return; reset(); status('需要登录或凭据已失效，请重新登录。'); } else { $('library').hidden = !cloudInfo; $('login').hidden = true; $('retry-load').hidden = false; status(`连接未完成，未清除登录；请恢复网络后重试。${error.message}`); } }
 }
 $('login').addEventListener('submit', async (event) => {
   event.preventDefault(); const token = $('token').value; $('token').value = '';
-  try { await api('/v1/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, remember: $('remember-login').checked }) }); await load(); }
+  try { ++operation; await cacheDatabase('clear').catch(()=>null); await api('/v1/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, remember: $('remember-login').checked }) }); await load(); }
   catch (error) { status(error.message); }
 });
-$('retry-load').addEventListener('click', () => void load());
-$('logout').addEventListener('click', async () => { ++operation; reset(); try { await api('/v1/session', { method: 'DELETE' }); status('已退出。'); } catch (error) { status(`本页已清除；服务端退出失败，请关闭此页或清除站点数据。${error.message}`); } });
+$('retry-load').addEventListener('click', () => void load(retryForce));
+$('logout').addEventListener('click', async () => { ++operation; reset(); try { const cleared = await cacheDatabase('clear').then(()=>true,()=>false); await api('/v1/session', { method: 'DELETE' }); status(cleared ? '已退出。' : '已退出，但本机缓存未能清除，此设备可能仍保留缓存内容。'); } catch (error) { status(`本页已清除；服务端退出失败，请关闭此页或清除站点数据。${error.message}`); } });
 for (const id of ['query', 'scope', 'category', 'include-descendants', 'site-filter', 'result-sort']) $(id).addEventListener('input', () => { page = 1; if (id === 'scope' && $('scope').value === 'reading') $('category').value = ''; render(); });
-$('previous').addEventListener('click', () => { page--; render(); }); $('next').addEventListener('click', () => { page++; render(); }); $('reload').addEventListener('click', load);
+$('previous').addEventListener('click', () => { page--; render(); }); $('next').addEventListener('click', () => { page++; render(); }); $('reload').addEventListener('click', () => void load(true));
 window.addEventListener('pagehide', () => { ++operation; reset(); }); window.addEventListener('pageshow', (event) => { if (event.persisted) load(); });
 function localPrefix() { if (!cloudInfo) throw new Error('请先连接收藏库。'); return `shiye:outbox:${JSON.stringify([cloudInfo.serverId, cloudInfo.libraryId, cloudInfo.epoch])}:`; }
 function device() {
@@ -227,7 +260,7 @@ async function refreshLocal() {
       if (version !== operation) return;
       for (const remote of result.entries) { const current = localEntries().find((row) => row.id === remote.id); if (current) putLocal({ ...current, status: remote.status, receipt: remote.receipt }); }
     }
-    localBusy = false; await load(); if (cloudInfo) showView('local');
+    localBusy = false; await load(true); if (cloudInfo) showView('local');
   } catch (error) { if (version === operation) status(error.message); }
   finally { localBusy = false; if (cloudInfo) renderLocal(); }
 }

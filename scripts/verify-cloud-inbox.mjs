@@ -10,7 +10,7 @@ const harness = await createMirrorHarness(ROOT, directory);
 const attempt = await launchBestEffort(BROWSERS.find((row) => row.name === 'Edge') ?? BROWSERS[0], prepareProfile(directory, 'cloud-inbox'));
 const browser = attempt.browser, master = await browser.newPage();
 master.on('pageerror', (error) => report.errors.push(String(error)));
-let loseReceipt = true, loseSubmit = true, failMobileNetwork = false;
+let loseReceipt = true, loseSubmit = true, failMobileNetwork = false; const mobileRequests = [];
 await master.exposeFunction('inboxRequest', async (url, init) => { report.requests.push({ url, method: init.method }); const result = await harness.request(url, init); if (loseReceipt && url.endsWith('/receipt') && result.status === 200) { loseReceipt = false; throw new Error('synthetic lost receipt'); } return result; });
 await master.evaluateOnNewDocument(() => {
   chrome.permissions.request = async () => true; chrome.permissions.contains = async () => true; window.confirm = () => true;
@@ -23,6 +23,7 @@ async function mobilePage(context = browser) {
   const page = await context.newPage(); await page.setViewport({ width: 390, height: 844 }); page.on('pageerror', (error) => report.errors.push(String(error))); page.on('dialog', (dialog) => dialog.accept());
   await page.setRequestInterception(true);
   page.on('request', async (request) => { try {
+    mobileRequests.push(new URL(request.url()).pathname);
     if (!request.url().startsWith('https://mirror.test/')) { await request.abort(); return; }
     if (failMobileNetwork && new URL(request.url()).pathname === '/v1/info') { await request.abort(); return; }
     const result = await harness.request(request.url(), { method: request.method(), headers: request.headers(), ...(request.postData() ? { body: request.postData() } : {}) });
@@ -53,6 +54,17 @@ try {
   check('网络错误不显示重新登录，提供保留会话重试', await mobile.$eval('#login',n=>n.hidden) && await mobile.$eval('#retry-load',n=>!n.hidden));
   failMobileNetwork = false; await mobile.click('#retry-load'); await mobile.waitForSelector('#library:not([hidden])');
   check('网络恢复后不用重填凭据即可重新读取', await mobile.$eval('#token',n=>n.value===''));
+  const downloads = () => mobileRequests.filter(path=>path==='/v1/mirror'||path==='/v2/public').length;
+  const beforeCachedReload = downloads();
+  await mobile.reload(); await mobile.waitForSelector('#library:not([hidden])');
+  check('两小时内刷新复用缓存，不重新下载镜像分片', downloads()===beforeCachedReload && await mobile.$eval('#cache-status',n=>n.textContent.includes('本机缓存')));
+  await mobile.click('#reload'); await waitText(mobile,'刚同步最新');
+  check('同步最新按钮绕过缓存立即下载',downloads()>beforeCachedReload);
+  const beforeExpired = downloads();
+  await mobile.evaluate(async()=>{ const req=indexedDB.open('shiye-mobile-cache',1);const db=await new Promise(r=>req.onsuccess=()=>r(req.result));const tx=db.transaction('snapshots','readwrite'),store=tx.objectStore('snapshots'),q=store.get('current');q.onsuccess=()=>store.put({...q.result,fetchedAt:Date.now()-3*3600000},'current');await new Promise(r=>tx.oncomplete=r);db.close(); });
+  await mobile.reload(); await mobile.waitForSelector('#library:not([hidden])');
+  check('缓存超过两小时自动重新拉取',downloads()>beforeExpired && await mobile.$eval('#cache-status',n=>n.textContent.includes('刚同步最新')));
+
   await mobile.click('#choose-category'); await mobile.waitForSelector('#category-dialog[open]');
   check('手机分类按层级浏览且每页最多 20 项', await mobile.$$eval('.category-choice',n=>n.length)===20 && await mobile.$eval('#category-choices',n=>!n.textContent.includes('网页')));
   check('分类弹窗底部确认按钮在手机视口内', await mobile.$eval('#category-use-current',n=>n.getBoundingClientRect().bottom<=innerHeight) && await mobile.$eval('#category-dialog',n=>n.scrollWidth<=n.clientWidth));
@@ -109,6 +121,8 @@ try {
   await mobile.click('#local-next'); check('临时列表可翻页且适配手机宽度', await mobile.$eval('#local-page', (node) => node.textContent.startsWith('2 / 3')) && await mobile.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await master.setViewport({ width: 1400, height: 1000 }); await master.screenshot({ path: path.join(directory, 'desktop.png'), fullPage: true });
   await mobile.bringToFront(); await mobile.click('#logout'); await waitText(mobile, '已退出'); check('退出清除当前私有内容，临时记录仅在此浏览器保留', await mobile.$$eval('.temporary', (nodes) => nodes.length) === 0 && await mobile.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith('shiye:outbox:')).length) === 101);
+  const clearedCache=await mobile.evaluate(async()=>{const req=indexedDB.open('shiye-mobile-cache',1);const db=await new Promise(r=>req.onsuccess=()=>r(req.result));const q=db.transaction('snapshots').objectStore('snapshots').get('current');const item=await new Promise(r=>q.onsuccess=()=>r(q.result));db.close();return !item;});
+  check('退出登录清除镜像缓存，临时提交副本保持独立',clearedCache);
   check('完整流程没有页面脚本异常', report.errors.length === 0);
 } catch (error) { report.failure = String(error); report.local = await Promise.race([snapshot(), new Promise((resolve) => setTimeout(() => resolve('snapshot timeout'), 2000))]); report.cloud = harness.db.prepare('SELECT id,status FROM capture_inbox').all(); console.log(JSON.stringify({ requests: report.requests, local: report.local, cloud: report.cloud })); console.log(await master.$$eval('[role=status]', (nodes) => nodes.map((node) => node.textContent))); await master.screenshot({ path: path.join(directory, 'failure.png') }).catch(() => undefined); throw error; }
 finally { fs.mkdirSync(path.join(ROOT, '.verify/reports'), { recursive: true }); fs.writeFileSync(path.join(ROOT, '.verify/reports/cloud-inbox.json'), JSON.stringify(report, null, 2)); await browser.close(); harness.close(); }
