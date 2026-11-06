@@ -318,7 +318,7 @@ async function createBookmark(page, { url, title }) {
   await waitForSelectorReady(page, 'input[placeholder="https://"]', 10_000);
   await setReactInput(page, 'input[placeholder="https://"]', url);
   await setReactInput(page, 'input[placeholder="给它一个容易找回的名字"]', title);
-  await clickIn(page, '.modal', '保存到收件箱');
+  await clickIn(page, '.modal', '保存到收藏库');
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     const state = await page.evaluate(() => {

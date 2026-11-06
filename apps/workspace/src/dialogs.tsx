@@ -104,9 +104,9 @@ export function NewBookmarkModal({ initialUrl = '' }: { initialUrl?: string }) {
       });
       await reload();
       notifyDataChanged();
-      toast('已保存到收件箱。', 'ok');
+      toast('已保存到收藏库。', 'ok');
       closeModal();
-      navigate('inbox');
+      navigate('all');
     } catch (cause) {
       // 重复、墓碑等失败原因需常驻在弹窗内，不能只靠几秒后消失的 toast。
       setError(toUserMessage(cause));
@@ -126,7 +126,7 @@ export function NewBookmarkModal({ initialUrl = '' }: { initialUrl?: string }) {
             ×
           </button>
         </div>
-        <p className="micro">先保存到收件箱，整理可以稍后再做。</p>
+        <p className="micro">保存到收藏库；可直接选择分类，也可以稍后整理。</p>
         <label className="field">
           <span>网址</span>
           <input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://" />
@@ -165,7 +165,7 @@ export function NewBookmarkModal({ initialUrl = '' }: { initialUrl?: string }) {
             取消
           </button>
           <button className="btn primary" onClick={() => void save()} disabled={busy}>
-            {busy ? '保存中…' : '保存到收件箱'}
+            {busy ? '保存中…' : '保存到收藏库'}
           </button>
         </div>
       </div>
@@ -298,7 +298,7 @@ export function ConvertReadingModal({ readingId, categoryId: initialCategoryId }
             为避免绕过删除记录重复建库，需要你选择一种处理方式。
           </p>
           <div className="notice">
-            恢复会保留它原来的分类与未读状态，并把这条待看标记为完成；选择保持待看则不做任何写入。
+            恢复会保留它原来的分类，并把这条待看标记为完成；选择保持待看则不做任何写入。
           </div>
           <p className="alert">{error}</p>
           <div className="actions">
@@ -375,12 +375,12 @@ export function ConvertReadingModal({ readingId, categoryId: initialCategoryId }
     setBusy(true);
     const result = await run(
       () => service.convertReading(item.id, item.localRevision, { title, note, categoryId }),
-      '已转入收藏并进入收件箱。'
+      '已转入收藏库。'
     );
     setBusy(false);
     if (result) {
       closeModal();
-      navigate('inbox');
+      navigate('all');
     }
   };
 
@@ -438,7 +438,7 @@ export function DeleteBookmarkModal({ bookmarkId }: { bookmarkId: string }) {
           《{bookmark.title}》会从日常列表隐藏，但不会被立即清除。关联的待看记录仍保留网址与标题，
           不会因此复活收藏。
         </p>
-        <div className="notice">删除后可在回收站恢复，原分类与未读状态会保留。</div>
+        <div className="notice">删除后可在回收站恢复，原分类会保留。</div>
         <div className="actions">
           <button className="btn" onClick={closeModal}>
             取消

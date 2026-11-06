@@ -33,6 +33,7 @@ it('按完整父子结构新建分类，重复路径复用，不同父级同名�
   const tools = categories.filter((row) => row.name === '工具');
   expect(new Set(tools.map((row) => row.parentId)).size).toBe(2);
   const bookmarks = await repos.bookmarks.listActive();
+  expect(bookmarks.every(row=>!row.inboxUnread && row.unreadFlag===0)).toBe(true);
   expect(bookmarks.find((row) => row.originalUrl === 'https://example.com/0')?.categoryId).toBe(bookmarks.find((row) => row.originalUrl === 'https://example.com/2')?.categoryId);
 });
 

@@ -47,7 +47,7 @@ it('接收前的本机调整可覆盖分类标签标题备注，回执丢失重�
   const category=await service.createCategory('电脑整理'),tag=await service.createTag('电脑标签');
   const input=entry({categoryId:'remote-category',categoryPath:'手机路径',tagIds:['remote-tag'],tagNames:['手机标签']});
   const first=await service.receiveCloudInbox(input,libraryId,{categoryId:category.id,tagIds:[tag.id],title:'电脑标题',note:'重新整理',pinned:false,unread:true});
-  expect((await service.snapshot()).bookmarks[0]).toMatchObject({categoryId:category.id,tagIds:[tag.id],title:'电脑标题',note:'重新整理',pinned:false,inboxUnread:true});
+  expect((await service.snapshot()).bookmarks[0]).toMatchObject({categoryId:category.id,tagIds:[tag.id],title:'电脑标题',note:'重新整理',pinned:false,inboxUnread:false});
   expect(await service.receiveCloudInbox(input,libraryId,{destination:'reading',title:'不应再变更'})).toEqual(first);
   expect((await service.snapshot()).pendingReading).toHaveLength(0);
 });

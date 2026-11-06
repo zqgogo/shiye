@@ -1,3 +1,4 @@
+import { BookmarkFilters, emptyBookmarkFilter, matchesBookmarkFilter } from './bookmark-filters.js';
 import { categoryPath } from '@shiye/core';
 import { OrganizationUndo } from './organization-controls.js';
 import { ConnectionsOverview } from './connection-status.js';
@@ -132,8 +133,8 @@ export function HomePage() {
           <span>待看</span>
         </div>
         <div className="stat">
-          <strong>{active.filter((bookmark) => bookmark.inboxUnread).length}</strong>
-          <span>未读</span>
+          <strong>{active.filter((bookmark) => bookmark.pinned).length}</strong>
+          <span>置顶</span>
         </div>
       </div>
 
@@ -188,7 +189,7 @@ export function HomePage() {
           <span className="hubicon">＋</span>
           <span className="hubtext">
             <strong>收藏一个链接</strong>
-            <small>手动填写网址与标题，进入收件箱</small>
+            <small>手动填写网址与标题，保存到收藏库</small>
           </span>
           <span className="hubarrow">↗</span>
         </button>
@@ -215,14 +216,15 @@ export function HomePage() {
 
 const LIST_TITLES: Record<string, [string, string]> = {
   all: ['全部收藏', '每个链接都带着一点上下文。'],
-  inbox: ['收件箱', '新收藏在此等待查看，标记已读后仍保留在收藏库。'],
-  uncategorized: ['未分类', '未选择分类的收藏，已读后仍保留在这里。'],
+  uncategorized: ['未分类', '尚未选择分类的收藏，可以在此集中整理。'],
   recent: ['最近打开', '仅记录经工作台打开的最近 15 个不同收藏。'],
   trash: ['回收站', `删除不等于立即清除。正文保留 ${TRASH_RETENTION_DAYS} 天，之后由用户主动维护。`],
 };
 
 export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES | 'category'; categoryId?: string }) {
   const { data, navigate, openModal, run, service, toast, route, setPageSize: applyPageSize } = useWorkspace();
+  const [filters,setFilters]=useState(emptyBookmarkFilter);
+  useEffect(()=>setFilters(emptyBookmarkFilter()),[mode,categoryId]);
   const sortKey = `shiye:list-sort:${mode}:${categoryId ?? ''}`;
   const readSort = (): 'recent' | 'title' | 'manual' => { try { const value = localStorage.getItem(sortKey); if (value === 'title' || value === 'recent' || value === 'manual' && (mode === 'category' || mode === 'uncategorized')) return value; } catch { /* Use the default when storage is unavailable. */ } return 'recent'; };
   const [sort, setSortState] = useState<'recent' | 'title' | 'manual'>(readSort);
@@ -273,8 +275,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
 
   const base = mode === 'trash' ? trash ?? [] : data.bookmarks;
   const items = useMemo(() => {
-    let rows = [...base];
-    if (mode === 'inbox') rows = rows.filter((bookmark) => bookmark.inboxUnread);
+    let rows = base.filter(bookmark=>matchesBookmarkFilter(bookmark,filters,data.categories,data.tags));
     if (mode === 'uncategorized') rows = rows.filter((bookmark) => !bookmark.categoryId);
     if (mode === 'recent') {
       rows = rows
@@ -290,14 +291,11 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
       rows = rows.sort((a, b) => (b.deletedAt ?? '').localeCompare(a.deletedAt ?? ''));
       return rows;
     }
-    if (mode === 'inbox') {
-      return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    }
     if (sort === 'manual') return rows.sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.id.localeCompare(b.id));
     return sort === 'title'
       ? rows.sort((a, b) => a.title.localeCompare(b.title, 'zh-CN'))
       : rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  }, [base, mode, categoryId, sort]);
+  }, [base, mode, categoryId, sort, filters, data.categories, data.tags]);
 
   // 切片交给纯函数：页码越界会被钳回来，删到最后一页空了也不会显示一片空白。
   const view = useMemo(() => paginate(items, page, pageSize), [items, page, pageSize]);
@@ -341,12 +339,12 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
     setBulkPlan(null);
     setBulkOutcome(null);
     setReadingPlan(null);
-  }, [mode, categoryId]);
+  }, [mode, categoryId, filters]);
 
   // 换列表、换排序都从第一页看起；排序不改变集合，所以勾选留着。
   useEffect(() => {
     setPage(1);
-  }, [mode, categoryId, sort]);
+  }, [mode, categoryId, sort, filters]);
 
   useEffect(() => {
     setSelected((current) => {
@@ -510,20 +508,9 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
         }
       />
 
-      {mode === 'inbox' ? (
-        <Notice>
-          收件箱只显示未读的新收藏，查看或打开网页不会自动标记已读。
-          <button
-            className="btn small"
-            onClick={() => void run(() => service.markAllInboxRead(), '已全部标记为已读。')}
-          >
-            全部标记已读
-          </button>
-        </Notice>
-      ) : null}
       {mode === 'trash' ? (
         <Notice>
-          回收站中的收藏不会出现在搜索与 AI 材料中。恢复后保留原分类与未读状态。
+          回收站中的收藏不会出现在搜索与 AI 材料中。恢复后保留原分类。
           <button className="btn small" onClick={() => navigate('all')}>
             回到全部收藏
           </button>
@@ -542,7 +529,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
               : '正在统计这一范围里的记录（含回收站）…'}
           </span>
           <span>
-            {purge.note ? `${purge.note} ` : ''}
+            {purge.note ? `${purge.note} ` : ''}清空按整个范围执行，不受列表筛选影响。
             删除标记会一起清掉，之后可以重新导入同一批书签。
           </span>
           <span>
@@ -588,8 +575,9 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
       ) : null}
 
       {mode === 'category' && data.categories.some((row) => row.parentId === categoryId) && <div className="notice"><strong>子分类</strong><div className="actions">{data.categories.filter((row) => row.parentId === categoryId).map((row) => <button className="btn small" key={row.id} onClick={() => navigate(`cat:${row.id}`)}>{row.name}</button>)}</div><span>下方显示当前分类的直属收藏。</span></div>}
+      <BookmarkFilters value={filters} onChange={setFilters} categories={data.categories} tags={data.tags} />
       <div className="toolbar" ref={listTopRef}>
-        <span className="micro">共 {items.length} 条</span>
+        <span className="micro">匹配 {items.length} 条</span>
         <span className="spacer" />
         {items.length > 0 ? (
           <button
@@ -623,7 +611,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
         ) : null}
         {purge && (purgeCounts ? purgeCounts.active + purgeCounts.trashed > 0 : purge.count > 0) ? (
           <button className="btn small" onClick={() => setConfirmPurge(true)}>
-            彻底清空…
+            {mode === 'all' ? '彻底清空整库…' : '彻底清空此范围…'}
           </button>
         ) : null}
         {mode !== 'trash' ? (
@@ -706,7 +694,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
             </span>
           ) : null}
           {bulkPlan.action === 'trash' ? (
-            <span>回收站里可以逐条恢复，也可以勾选批量恢复；原分类与未读状态都会保留。</span>
+            <span>回收站里可以逐条恢复，也可以勾选批量恢复；原分类都会保留。</span>
           ) : null}
           {bulkPlan.action === 'restore' ? (
             <span>分类已经被删掉的会落回未分类，不会凭空造一个同名分类。</span>
@@ -766,7 +754,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
             ? `共 ${items.length} 条 · 第 ${view.page} 页（${view.from}–${view.to}）· 分类 · 标签 · 来源`
             : undefined
         }
-        mode={mode === 'inbox' ? 'inbox' : mode === 'trash' ? 'trash' : 'normal'}
+        mode={mode === 'trash' ? 'trash' : 'normal'}
         selectable={selectMode}
         selected={selectedSet}
         manualSort={sort === 'manual'}
@@ -775,9 +763,7 @@ export function ListPage({ mode, categoryId }: { mode: keyof typeof LIST_TITLES 
         empty={
           mode === 'trash'
             ? { title: '回收站是空的', description: '删除的收藏会先来到这里，可以随时恢复。' }
-            : mode === 'inbox'
-              ? { title: '收件箱清零了', description: '新收藏会先进入这里等待查看。', actionLabel: '去看全部收藏', onAction: () => navigate('all') }
-              : { title: '这里还没有匹配的收藏', description: '试试其他关键词，或先保存一个链接。', actionLabel: '＋ 收藏链接', onAction: () => openModal({ kind: 'new-bookmark' }) }
+            : { title: '这里还没有匹配的收藏', description: '试试其他关键词，或先保存一个链接。', actionLabel: '＋ 收藏链接', onAction: () => openModal({ kind: 'new-bookmark' }) }
         }
       />
       <Pager
@@ -798,7 +784,8 @@ export function SearchPage() {
   const { query, service, data, toast, setPageSize: applyPageSize } = useWorkspace();
   const [hits, setHits] = useState<{ bookmarkId: string; score: number }[] | null>(null);
   const [error, setError] = useState('');
-  const [scope, setScope] = useState('');
+  const [filters,setFilters]=useState(emptyBookmarkFilter);
+  useEffect(()=>setPage(1),[filters]);
   const [reloadKey, setReloadKey] = useState(0);
   /** 搜索结果也可能是几百条，同样按页看；每页条数跟全局设置走。 */
   const [page, setPage] = useState(1);
@@ -818,7 +805,7 @@ export function SearchPage() {
     }
     const timer = window.setTimeout(() => {
       service
-        .search(query, scope ? { categoryId: scope } : undefined)
+        .search(query)
         .then((result) => {
           if (!cancelled) {
             setError('');
@@ -834,15 +821,13 @@ export function SearchPage() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [query, service, data.bookmarks, scope, reloadKey]);
+  }, [query, service, data.bookmarks, reloadKey]);
 
   const items = (hits ?? [])
     .map((hit) => data.bookmarks.find((bookmark) => bookmark.id === hit.bookmarkId))
-    .filter((bookmark): bookmark is Bookmark => Boolean(bookmark));
+    .filter((bookmark): bookmark is Bookmark => Boolean(bookmark)).filter(bookmark=>matchesBookmarkFilter(bookmark,filters,data.categories,data.tags));
 
-  const scopeName = scope
-    ? data.categories.find((category) => category.id === scope)?.name ?? '当前分类'
-    : '全库';
+  const scopeName=filters.category==='__uncategorized__'?'未分类':filters.category?categoryPath(data.categories,filters.category):'全库';
 
   const view = paginate(items, page, pageSize);
 
@@ -852,15 +837,8 @@ export function SearchPage() {
         title="搜索结果"
         description={`关键词「${query}」在${scopeName}内检索，覆盖标题、网址、描述、用途、备注、选中文字、分类与标签。`}
       />
+      <BookmarkFilters value={filters} onChange={setFilters} categories={data.categories} tags={data.tags} search={false} />
       <div className="toolbar" ref={listTopRef}>
-        <select aria-label="检索范围" value={scope} onChange={(event) => setScope(event.target.value)}>
-          <option value="">全库</option>
-          {data.categories.map((category) => (
-            <option key={category.id} value={category.id}>
-              {categoryPath(data.categories, category.id)}
-            </option>
-          ))}
-        </select>
         <span className="micro">匹配 {items.length} 条</span>
         <span className="spacer" />
         <button
@@ -1291,7 +1269,7 @@ export function ReadingPage() {
         onPageSize={changePageSize}
       />
       <div className="footerhint">
-        <span>待看不进入收藏收件箱，也不受分类约束。</span>
+        <span>待看用于跟踪阅读进度，不受收藏分类约束。</span>
         <span>完成后可在完成历史里恢复。</span>
       </div>
     </>

@@ -333,7 +333,7 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
             </button>
             <button
               className="btn primary"
-              onClick={() => navigate(result.destination === 'reading' ? 'reading' : 'inbox')}
+              onClick={() => navigate(result.destination === 'reading' ? 'reading' : 'all')}
             >
               查看保存结果 →
             </button>
@@ -494,13 +494,13 @@ export function CapturePage({ initialMode = 'paste' }: { initialMode?: 'paste' |
                 aria-label="保存目标"
               >
                 <option value="reading">待看 · 暂不分类</option>
-                <option value="library">收藏库 · 进入收件箱</option>
+                <option value="library">收藏库 · 按分类保存</option>
               </select>
             </label>
             <div className="notice">
               {destination === 'reading'
                 ? '只是想找时间看一眼？先放到待看，看完再决定是否收藏。切换目标会重新去重并重置勾选。'
-                : '保存后进入收件箱。原目录会保留为来源信息；分类可在下方逐组映射。切换目标会重新去重并重置勾选。'}
+                : '保存后直接进入收藏库，原目录会保留为来源信息；分类可在下方逐组映射。切换目标会重新去重并重置勾选。'}
             </div>
           </div>
 

@@ -184,7 +184,7 @@ function buildBookmark(params: CreateBookmarkParams): Bookmark {
     selectedText,
     categoryId: params.categoryId ?? null,
     tagIds,
-    inboxUnread: params.inboxUnread ?? true,
+    inboxUnread: params.inboxUnread ?? false,
     pinned: params.pinned ?? false,
     lastOpenedAt: null,
     privacy: {
@@ -200,7 +200,7 @@ function buildBookmark(params: CreateBookmarkParams): Bookmark {
     updatedAt: createdAt,
     deletedAt: null,
     lifeState: 'active',
-    unreadFlag: (params.inboxUnread ?? true) ? 1 : 0,
+    unreadFlag: (params.inboxUnread ?? false) ? 1 : 0,
     categoryKey: params.categoryId ?? 'uncategorized',
   };
   return bookmark;
@@ -1121,7 +1121,7 @@ export class DexieReadingRepository implements ReadingRepository {
           note: params.note ?? queued.note,
           categoryId: params.categoryId ?? null,
           tagIds: params.tagIds ?? [],
-          inboxUnread: true,
+          inboxUnread: false,
           sourceType: 'manual',
         };
         const originalFolder = queued.sources[0]?.originalFolder;
@@ -1703,7 +1703,7 @@ export class DexieImportRepository implements ImportRepository {
               originalUrl: row.originalUrl,
               title: row.title,
               categoryId: targetCategoryId,
-              inboxUnread: true,
+              inboxUnread: false,
               sourceType: params.source === 'paste' ? 'manual' : 'html',
               sourceFolder: row.sourceFolder,
               importBatchId: params.batchId,

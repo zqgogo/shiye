@@ -384,7 +384,7 @@ $('capture-form').addEventListener('submit', (event) => {
     const tags = reading ? [] : [...$('capture-tags').selectedOptions]; if (tags.length > 30) throw new Error('最多选择 30 个标签。');
     device(); putLocal({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), status: 'queued', receipt: null, payload: {
       destination: reading ? 'reading' : 'bookmark', url: url.href, title: $('capture-title').value.trim(), categoryId, categoryPath: paths.get(categoryId) || '', tagIds: tags.map((tag) => tag.value), tagNames: tags.map((tag) => tag.text),
-      sourceDescription: reading ? '' : $('capture-description').value, note: $('capture-note').value, pinned: !reading && $('capture-pinned').checked, unread: !reading && $('capture-unread').checked, aiBlocked: !reading && $('capture-ai-blocked').checked,
+      sourceDescription: reading ? '' : $('capture-description').value, note: $('capture-note').value, pinned: !reading && $('capture-pinned').checked, unread: false, aiBlocked: !reading && $('capture-ai-blocked').checked,
     } });
     $('capture-form').reset(); syncCategoryButtons(); $('bookmark-fields').hidden = false; localPage = 1; showView('local'); status('已保存到本机，尚未发送。确认后点击「发送给总机」。');
   } catch (error) { status(`未保存，表单仍保留。${error.message}`); }

@@ -75,7 +75,7 @@ export function WorkspaceProvider({
   const [data, setData] = useState<WorkspaceSnapshot>(initialData);
   const [route, setRoute] = useState(() => {
     const hash = window.location.hash.replace(/^#/, '');
-    return hash || 'home';
+    return hash === 'inbox' ? 'all' : hash || 'home';
   });
   const [query, setQueryState] = useState('');
   const [drawerId, setDrawerId] = useState<string | null>(null);

@@ -75,7 +75,6 @@ export function Sidebar() {
   useEffect(() => { if (extraRoutes.includes(route)) setMoreOpen(true); }, [route]);
   const active = data.bookmarks;
   const readingCount = data.pendingReading.length;
-  const inboxCount = active.filter((bookmark) => bookmark.inboxUnread).length;
   const uncategorized = active.filter((bookmark) => !bookmark.categoryId).length;
   const pinned = data.settings.pinnedCategoryIds
     .map((id) => data.categories.find((category) => category.id === id))
@@ -107,11 +106,10 @@ export function Sidebar() {
         <small>日常 · LIBRARY</small>
         {item('home', ICONS.home, '首页')}
         {item('reading', ICONS.reading, '待看', readingCount)}
-        {item('inbox', ICONS.inbox, '收件箱', inboxCount)}
+        {item('uncategorized', ICONS.uncategorized, '未分类', uncategorized)}
         {item('all', ICONS.all, '全部收藏', active.length)}
         <details className="nav-extra" open={moreOpen} onToggle={(event) => setMoreOpen(event.currentTarget.open)}>
-          <summary>更多入口 <span>未分类 · 导入 · 回收站</span></summary>
-          {item('uncategorized', ICONS.uncategorized, '未分类', uncategorized)}
+          <summary>更多入口 <span>导入 · 回收站</span></summary>
           {item('capture:file', ICONS.all, '导入与待整理')}
           {item('trash', ICONS.trash, '回收站', data.trashedCount)}
         </details>
@@ -361,7 +359,7 @@ export function BookmarkRow({
             <button
               className="btn small"
               onClick={() =>
-                void run(() => service.restoreBookmark(bookmark.id), '已恢复，原分类与未读状态保留。')
+                void run(() => service.restoreBookmark(bookmark.id), '已恢复，原分类保留。')
               }
             >
               恢复
@@ -372,21 +370,6 @@ export function BookmarkRow({
             <button className="btn small" onClick={() => void addToReading()}>
               加入待看
             </button>
-            {mode === 'inbox' ? (
-              <button
-                className="btn small"
-                onClick={() => void run(() => service.markRead([bookmark.id]), '已标记为已读。')}
-              >
-                标记已读
-              </button>
-            ) : !bookmark.inboxUnread ? (
-              <button
-                className="btn small"
-                onClick={() => void run(() => service.markUnread([bookmark.id]), '已恢复未读。')}
-              >
-                恢复未读
-              </button>
-            ) : null}
             <button
               className={`iconbtn ${bookmark.pinned ? 'pinned' : ''}`}
               aria-label={bookmark.pinned ? '取消置顶' : '置顶'}
@@ -515,7 +498,7 @@ const UNDO_REASON_LABEL: Record<ImportUndoReason, string> = {
 };
 
 const UNDO_REASON_NOTE: Record<ImportUndoReason, string> = {
-  modified: '编辑、改分类 / 标签 / 隐私、应用过 AI 建议或标记过已读，撤回不做反向操作。',
+  modified: '编辑、改分类 / 标签 / 隐私、应用过 AI 建议或调整过状态，撤回不做反向操作。',
   trashed: '你把它移进了回收站，撤回不会顺手捞回来。',
   completed: '已经读完，后续处理不该被一次撤销回滚。',
   converted: '已经转成收藏，形态变了就不再算「这次导入的新增」。',

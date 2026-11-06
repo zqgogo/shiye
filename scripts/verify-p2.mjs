@@ -59,7 +59,7 @@ async function newWorkspacePage(browser, base, route = 'home') {
   return { page, errors };
 }
 
-/** 只在指定容器内按文本找按钮并点击，避免「保存」误点到「保存到收件箱」。 */
+/** 只在指定容器内按文本找按钮并点击，避免「保存」误点到「保存到收藏库」。 */
 async function clickIn(page, container, text) {
   const ok = await page.evaluate(
     (sel, needle) => {
@@ -114,7 +114,7 @@ async function createBookmark(page, { url, title, categoryId }) {
   if (categoryId) {
     await page.select('.modal select[aria-label="选择分类"]', categoryId);
   }
-  await clickIn(page, '.modal', '保存到收件箱');
+  await clickIn(page, '.modal', '保存到收藏库');
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     const state = await page.evaluate(() => {

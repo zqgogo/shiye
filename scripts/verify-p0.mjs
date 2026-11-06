@@ -98,7 +98,7 @@ async function verifyBrowser(target) {
     await workspace.waitForSelector('input[placeholder="https://"]', { timeout: 10_000 });
     await setReactInput(workspace, 'input[placeholder="https://"]', BOOKMARK_URL);
     await setReactInput(workspace, 'input[placeholder="给它一个容易找回的名字"]', BOOKMARK_TITLE);
-    await clickByText(workspace, '保存到收件箱');
+    await clickByText(workspace, '保存到收藏库');
     await workspace.waitForFunction(() => !document.querySelector('input[placeholder="https://"]'), {
       timeout: 20_000,
     });
@@ -136,7 +136,7 @@ async function verifyBrowser(target) {
     await setReactInput(popup, 'input[placeholder="https://"]', POPUP_URL);
     await setReactInput(popup, 'input[placeholder="给它一个容易找回的名字"]', POPUP_TITLE);
     await clickByText(popup, '保存收藏');
-    await waitForText(popup, '已保存到收件箱');
+    await waitForText(popup, '已保存到收藏库');
     record('popup 写入收藏', true, `创建「${POPUP_TITLE}」`);
 
     const popupAfter = await popup.evaluate(readMainLibrary);

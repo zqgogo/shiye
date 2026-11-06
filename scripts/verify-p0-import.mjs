@@ -294,7 +294,7 @@ async function main() {
       const input = target?.querySelector('input[type="checkbox"]');
       if (input && !input.checked) input.click();
     });
-    await clickByText(page, '保存到收件箱');
+    await clickByText(page, '保存到收藏库');
     await waitForSelectorGone(page, 'input[placeholder="https://"]', 20_000);
     const withLocalOnly = await page.evaluate(readMainLibrary);
     record(

@@ -178,9 +178,9 @@ export function Popup({ service }: { service: WorkspaceService }) {
       <div hidden={tab !== 'capture'}>
       {saved ? (
         <>
-          <h2>已保存到{ saved.kind === 'reading' ? '待看' : '收件箱' }</h2>
+          <h2>已保存到{ saved.kind === 'reading' ? '待看' : '收藏库' }</h2>
           <p className="micro">{saved.title || url}</p>
-          <button className="btn primary" onClick={() => openWorkspace(saved.kind === 'reading' ? 'reading' : 'inbox')}>
+          <button className="btn primary" onClick={() => openWorkspace(saved.kind === 'reading' ? 'reading' : 'all')}>
             打开工作台查看 ↗
           </button>
           <button className="btn" onClick={() => window.close()}>
@@ -220,7 +220,7 @@ export function Popup({ service }: { service: WorkspaceService }) {
                 </option>
               ))}
             </select>
-            <small>保存后同时出现在收件箱与所选分类。</small>
+            <small>保存后出现在收藏库与所选分类。</small>
           </label>
           <label className="field">
             <span>主动保存的选中文字</span>

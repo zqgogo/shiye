@@ -29,9 +29,9 @@ describe('收藏仓库', () => {
     });
     expect(created.canonicalUrl).toBe('https://example.com/A?x=1#h');
     expect(created.lifeState).toBe('active');
-    expect(created.unreadFlag).toBe(1);
+    expect(created.unreadFlag).toBe(0);
     expect(created.categoryKey).toBe('uncategorized');
-    expect(created.inboxUnread).toBe(true);
+    expect(created.inboxUnread).toBe(false);
 
     await expect(
       repos.bookmarks.create({ originalUrl: 'https://example.com/A?x=1#h', title: '重复' })
@@ -125,7 +125,7 @@ describe('待看队列', () => {
       categoryId: category.id,
       title: '转入后的标题',
     });
-    expect(bookmark.inboxUnread).toBe(true);
+    expect(bookmark.inboxUnread).toBe(false);
     expect(bookmark.categoryId).toBe(category.id);
     expect(bookmark.note).toBe('稍后看');
 
@@ -264,6 +264,7 @@ describe('分类与导入', () => {
     const result = await repos.imports.commit(params);
     expect(result.inserted).toBe(1);
     expect(result.skipped).toBe(1);
+    expect((await repos.bookmarks.findByCanonical('https://example.com/new-1'))?.inboxUnread).toBe(false);
     expect(await repos.bookmarks.findByCanonical('https://example.com/unselected')).toBeUndefined();
 
     await expect(repos.imports.commit(params)).rejects.toMatchObject({ code: 'ALREADY_APPLIED' });

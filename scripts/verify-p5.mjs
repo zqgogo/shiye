@@ -293,7 +293,7 @@ async function createBookmark(page, { url, title }) {
   await waitForSelectorReady(page, 'input[placeholder="https://"]', 10_000);
   await setReactInput(page, 'input[placeholder="https://"]', url);
   await setReactInput(page, 'input[placeholder="给它一个容易找回的名字"]', title);
-  await clickIn(page, '.modal', '保存到收件箱');
+  await clickIn(page, '.modal', '保存到收藏库');
   // 写入成功时保存弹窗会关闭；失败时 .alert 会常驻，两种情况都别无限等。
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {

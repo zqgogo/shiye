@@ -20,7 +20,7 @@ import { AiConfigPage, AiPage, AskPage, OrganizePage } from './ai.js';
 function CurrentPage() {
   const { route } = useWorkspace();
   if (route === 'home') return <HomePage />;
-  if (route === 'inbox') return <ListPage mode="inbox" />;
+  if (route === 'inbox') return <ListPage mode="all" />;
   if (route === 'uncategorized') return <ListPage mode="uncategorized" />;
   if (route === 'all') return <ListPage mode="all" />;
   if (route === 'recent') return <ListPage mode="recent" />;
@@ -51,8 +51,8 @@ function FooterHint() {
   const { route } = useWorkspace();
   const mapping: Record<string, string> = {
     home: '首页 · 粘贴链接 / 书签导入',
-    inbox: '收件箱 · 未读新收藏',
-    uncategorized: '未分类 · 已读仍保留',
+    inbox: '全部收藏',
+    uncategorized: '未分类收藏',
     all: '全部收藏 · 本地主库',
     recent: '最近打开 · 最多 15 条',
     trash: '回收站 · 可恢复',

@@ -268,7 +268,7 @@ async function createBookmark(page, { url, title }) {
   await waitForSelectorReady(page, 'input[placeholder="https://"]', 10_000);
   await setReactInput(page, 'input[placeholder="https://"]', url);
   await setReactInput(page, 'input[placeholder="给它一个容易找回的名字"]', title);
-  await clickIn(page, '.modal', '保存到收件箱');
+  await clickIn(page, '.modal', '保存到收藏库');
   await waitForSelectorGone(page, '.modal input[placeholder="https://"]', 20_000);
   await sleep(600);
 }
@@ -415,7 +415,7 @@ async function main() {
     );
     await popup.select('.popupframe .field select', ctx.categoryId);
     await clickIn(popup, '.popupframe', '保存收藏');
-    await waitForText(popup, '已保存到收件箱', 20_000);
+    await waitForText(popup, '已保存到收藏库', 20_000);
     await sleep(600);
     const afterPopupBookmark = await page.evaluate(readMainLibrary);
     const popupBookmark = afterPopupBookmark.bookmarks.find((row) => row.originalUrl === POPUP_BOOKMARK_URL);

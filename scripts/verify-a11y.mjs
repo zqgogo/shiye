@@ -153,7 +153,7 @@ async function createBookmark(page, { url, title }) {
   await setReactInput(page, 'input[placeholder="给它一个容易找回的名字"]', title);
   await page.evaluate(() => {
     const button = [...document.querySelectorAll('.modal button')].find((node) =>
-      (node.textContent ?? '').includes('保存到收件箱')
+      (node.textContent ?? '').includes('保存到收藏库')
     );
     button?.click();
   });
@@ -300,7 +300,7 @@ async function main() {
     await setReactInput(page, 'input[placeholder="给它一个容易找回的名字"]', '键盘测试');
     await page.evaluate(() => {
       const button = [...document.querySelectorAll('.modal button')].find((node) =>
-        (node.textContent ?? '').includes('保存到收件箱')
+        (node.textContent ?? '').includes('保存到收藏库')
       );
       button?.click();
     });

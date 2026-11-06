@@ -27,7 +27,7 @@ export function createCloudInbox(db: ShiyeDB, bookmarks: BookmarkRepository, rea
           if (changes.categoryId && !category) throw new AppError('REVISION_CONFLICT', '所选分类已被删除，请重新选择后接收。');
           if (changes.tagIds && tagIds.length !== p.tagIds.length) throw new AppError('REVISION_CONFLICT', '所选标签已变化，请重新选择后接收。');
           const bookmark = await bookmarks.create({ originalUrl: p.url, title: p.title, sourceDescription: p.sourceDescription, note: p.note,
-            categoryId: category?.id ?? null, tagIds, pinned: p.pinned, inboxUnread: p.unread, privacy: { localOnly: false, aiBlocked: p.aiBlocked }, sourceType: 'manual', sourceFolder: p.categoryPath });
+            categoryId: category?.id ?? null, tagIds, pinned: p.pinned, inboxUnread: false, privacy: { localOnly: false, aiBlocked: p.aiBlocked }, sourceType: 'manual', sourceFolder: p.categoryPath });
           receipt = { status: 'received', recordKind: 'bookmark', recordId: bookmark.id, message: (p.categoryId && !category) || tagIds.length !== p.tagIds.length ? '已接收；失效分类移至未分类，失效标签已跳过。' : '已按所选分类接收。' };
         }
       } else {

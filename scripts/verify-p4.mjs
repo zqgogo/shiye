@@ -494,7 +494,7 @@ async function main() {
     await waitForSelectorReady(page, 'input[placeholder="https://"]', 10_000);
     await setReactInput(page, 'input[placeholder="https://"]', URL_TEMPLATE);
     await setReactInput(page, 'input[placeholder="给它一个容易找回的名字"]', 'P4 模板收藏');
-    await clickIn(page, '.modal', '保存到收件箱');
+    await clickIn(page, '.modal', '保存到收藏库');
     await waitForSelectorGone(page, '.modal input[placeholder="https://"]', 20_000);
     await sleep(600);
 
