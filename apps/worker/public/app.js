@@ -6,11 +6,11 @@ async function api(path, options = {}) {
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30000);
   try {
     const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal, ...options });
-    if (!response.ok) throw new Error(response.status === 401 ? '需要登录或凭据已失效。' : response.status === 409 ? '服务或记录状态已变化，请重新载入。' : `服务请求失败（${response.status}）。`);
+    if (!response.ok) { const error = new Error(response.status === 401 ? '需要登录或凭据已失效。' : response.status === 409 ? '服务或记录状态已变化，请重新载入。' : `服务请求失败（${response.status}）。`); error.status = response.status; throw error; }
     return await response.json();
   } finally { clearTimeout(timer); }
 }
-function reset() { cloudInfo = null; canSubmit = false; $('local-results').replaceChildren(); $('capture-form').reset(); records = []; paths.clear(); $('results').replaceChildren(); $('library').hidden = true; $('logout').hidden = true; $('login').hidden = false; }
+function reset() { $('retry-load').hidden = true; cloudInfo = null; canSubmit = false; $('local-results').replaceChildren(); $('capture-form').reset(); records = []; paths.clear(); $('results').replaceChildren(); $('library').hidden = true; $('logout').hidden = true; $('login').hidden = false; }
 function render() {
   const term = $('query').value.trim().toLowerCase(), scope = $('scope').value, category = $('category').value;
   const selectedPath = paths.get(category);
@@ -30,7 +30,7 @@ function render() {
   if (!visible.length) { const empty = document.createElement('p'); empty.textContent = '暂时没有匹配记录。'; $('results').append(empty); }
 }
 async function load() {
-  const version = ++operation; status('正在读取私有镜像…'); $('library').hidden = true;
+  const version = ++operation; status('正在读取私有镜像…'); $('retry-load').hidden = true; $('login').hidden = true; if (!cloudInfo) $('library').hidden = true;
   try {
     const info = await api('/v1/info'); const all = [];
     if (info.activeGeneration) {
@@ -70,13 +70,14 @@ async function load() {
     $('submit-access').textContent = canSubmit ? '当前凭据可提交。先保存在本机，再手动发送给总机。' : '当前凭据只读，仍可保存本机草稿；要发送请退出后使用 submitter.txt 登录。';
     $('published').textContent = sharedInfo ? `共享收藏 · 同步版本 ${sharedInfo.revision}；待看来自单独镜像` : info.publishedAt ? `发布于 ${new Date(info.publishedAt).toLocaleString()} · 版本 ${info.revision}` : '还没有发布镜像，请回电脑端发布。';
     $('login').hidden = true; $('logout').hidden = false; $('library').hidden = false; page = 1; render(); reconcileLocal(); renderLocal(); status('');
-  } catch (error) { if (version !== operation) return; reset(); status(error.message); }
+  } catch (error) { if (version !== operation) return; if (error.status === 401) { reset(); status('需要登录或凭据已失效，请重新登录。'); } else { $('library').hidden = !cloudInfo; $('login').hidden = true; $('retry-load').hidden = false; status(`连接未完成，未清除登录；请恢复网络后重试。${error.message}`); } }
 }
 $('login').addEventListener('submit', async (event) => {
   event.preventDefault(); const token = $('token').value; $('token').value = '';
-  try { await api('/v1/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) }); await load(); }
+  try { await api('/v1/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, remember: $('remember-login').checked }) }); await load(); }
   catch (error) { status(error.message); }
 });
+$('retry-load').addEventListener('click', () => void load());
 $('logout').addEventListener('click', async () => { ++operation; reset(); try { await api('/v1/session', { method: 'DELETE' }); status('已退出。'); } catch (error) { status(`本页已清除；服务端退出失败，请关闭此页或清除站点数据。${error.message}`); } });
 for (const id of ['query', 'scope', 'category']) $(id).addEventListener('input', () => { page = 1; if (id === 'scope' && $('scope').value === 'reading') $('category').value = ''; render(); });
 $('previous').addEventListener('click', () => { page--; render(); }); $('next').addEventListener('click', () => { page++; render(); }); $('reload').addEventListener('click', load);

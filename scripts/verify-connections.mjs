@@ -6,7 +6,7 @@ import { createMirrorHarness } from './lib/mirror-test-harness.mjs';
 const directory = path.join(ROOT, '.verify/connections'); fs.mkdirSync(directory, { recursive: true });
 const report = { generatedAt: new Date().toISOString(), steps: [], errors: [] }, check = (name, value) => { assert.ok(value, name); report.steps.push({ name, ok: true }); console.log(`PASS ${name}`); };
 const harness = await createMirrorHarness(ROOT, directory), requests = [];
-const attempt = await launchBestEffort(BROWSERS.find((row) => row.name === 'Chrome') ?? BROWSERS[0], prepareProfile(directory, 'connections'));
+const attempt = await launchBestEffort(BROWSERS.find((row) => row.name === 'Edge') ?? BROWSERS[0], prepareProfile(directory, 'connections'));
 const browser = attempt.browser, page = await browser.newPage(); await page.setViewport({ width: 1400, height: 1100 }); page.on('pageerror', (error) => report.errors.push(String(error)));
 await page.exposeFunction('connectionRequest', async (url, init) => { assert.equal(new URL(url).origin, 'https://mirror.test'); requests.push(new URL(url).pathname); return harness.request(url, init); });
 await page.evaluateOnNewDocument(() => {
@@ -76,7 +76,16 @@ try {
   await setReactInput(page, 'input[type=password]', harness.publisher); await click('测试连接（不上传）'); await text('连接通过');
   await page.evaluate(() => { for (const callback of [...window.permissionListeners]) callback({ origins: ['https://mirror.test/*'] }); }); await text('访问权限已撤销');
   check('撤销域名权限后全局连接状态立即失效，不保留旧成功提示', await page.$eval('.connection-card', (node) => node.textContent.includes('连接验证未通过')) && await page.$eval('[role=status]', (node) => !node.textContent.includes('连接通过')));
+  await click('修改地址或凭据'); await setReactInput(page, 'input[type=password]', harness.publisher);
   await click('测试连接（不上传）'); await text('连接通过'); await page.screenshot({ path: path.join(directory, 'cloud.png'), fullPage: true });
+  await click('修改地址或凭据'); await page.click('[aria-label="在此设备记住发布凭据"]');
+  check('主动勾选后保存本机发布凭据', await page.$eval('[aria-label="在此设备记住发布凭据"]', n=>n.checked));
+  const beforeRememberReload = requests.length;
+  await page.reload(); await text('连接通过');
+  check('刷新恢复发布凭据并自动验证', await page.$eval('input[type=password]', (n)=>Boolean(n.value)) && requests.length > beforeRememberReload);
+  check('自动恢复只做身份查询，不上传收藏', harness.db.prepare('SELECT COUNT(*) AS n FROM shared_entities').get().n === 0);
+  await click('修改地址或凭据'); await page.click('[aria-label="在此设备记住发布凭据"]');
+  check('取消记住删除保存记录但保留当前页面连接', await page.evaluate(()=>!localStorage.getItem('shiye:remembered-cloud-credential')) && await page.$eval('input[type=password]', n=>Boolean(n.value)));
   await click('断开并清除凭据'); await text('已断开'); check('主动断开清除当前工作台凭据，保留地址且不自动重连', await page.$eval('input[type=password]', (node) => node.value === '') && await page.$eval('.connection-card', (node) => node.textContent.includes('已保存地址 · 待填凭据')));
   await route('settings'); const beforeReload = requests.length; await page.reload(); await text('已保存设置 · 待填 Key'); await text('已保存地址 · 待填凭据');
   check('刷新只恢复普通设置，测试与开启状态不恢复，不自动联网', requests.length === beforeReload && await page.$eval('.connection-overview', (node) => !node.textContent.includes('已连接 · 当前工作台可用') && !node.textContent.includes('已开启')));

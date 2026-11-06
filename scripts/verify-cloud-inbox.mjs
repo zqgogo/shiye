@@ -7,10 +7,10 @@ const directory = path.join(ROOT, '.verify/cloud-inbox'); fs.mkdirSync(directory
 const report = { generatedAt: new Date().toISOString(), steps: [], errors: [], requests: [] };
 const check = (name, condition) => { assert.ok(condition, name); report.steps.push({ name, ok: true }); console.log(`PASS ${name}`); };
 const harness = await createMirrorHarness(ROOT, directory);
-const attempt = await launchBestEffort(BROWSERS.find((row) => row.name === 'Chrome') ?? BROWSERS[0], prepareProfile(directory, 'cloud-inbox'));
+const attempt = await launchBestEffort(BROWSERS.find((row) => row.name === 'Edge') ?? BROWSERS[0], prepareProfile(directory, 'cloud-inbox'));
 const browser = attempt.browser, master = await browser.newPage();
 master.on('pageerror', (error) => report.errors.push(String(error)));
-let loseReceipt = true, loseSubmit = true;
+let loseReceipt = true, loseSubmit = true, failMobileNetwork = false;
 await master.exposeFunction('inboxRequest', async (url, init) => { report.requests.push({ url, method: init.method }); const result = await harness.request(url, init); if (loseReceipt && url.endsWith('/receipt') && result.status === 200) { loseReceipt = false; throw new Error('synthetic lost receipt'); } return result; });
 await master.evaluateOnNewDocument(() => {
   chrome.permissions.request = async () => true; chrome.permissions.contains = async () => true; window.confirm = () => true;
@@ -24,11 +24,12 @@ async function mobilePage(context = browser) {
   await page.setRequestInterception(true);
   page.on('request', async (request) => { try {
     if (!request.url().startsWith('https://mirror.test/')) { await request.abort(); return; }
+    if (failMobileNetwork && new URL(request.url()).pathname === '/v1/info') { await request.abort(); return; }
     const result = await harness.request(request.url(), { method: request.method(), headers: request.headers(), ...(request.postData() ? { body: request.postData() } : {}) });
     if (loseSubmit && request.method() === 'POST' && new URL(request.url()).pathname === '/v1/inbox' && result.status === 200) { loseSubmit = false; await request.abort(); return; }
     await request.respond({ status: result.status, headers: result.headers, body: result.body });
   } catch { await request.abort().catch(() => undefined); } });
-  await page.goto('https://mirror.test/'); await waitText(page, '需要登录'); await page.type('#token', harness.submitter); await page.click('#login button'); await page.waitForSelector('#library:not([hidden])'); return page;
+  await page.goto('https://mirror.test/'); await waitText(page, '需要登录'); await page.type('#token', harness.submitter); await page.click('#remember-login'); await page.click('#login button'); await page.waitForSelector('#library:not([hidden])'); return page;
 }
 try {
   await master.goto(`chrome-extension://${attempt.extId}/workspace.html#cloud`); await master.waitForSelector('input[type=password]');
@@ -43,7 +44,14 @@ try {
   await setReactInput(master, 'input[placeholder="https://shiye.example.com"]', 'https://mirror.test'); await setReactInput(master, 'input[type=password]', harness.publisher); await click(master, '测试连接（不上传）'); await waitText(master, '连接通过');
   check('左侧顶部保留四个常用入口，更多入口默认收起且功能保留', await master.evaluate(() => document.querySelector('aside .navgroup').querySelectorAll(':scope > button').length === 4 && !document.querySelector('aside .nav-extra').open && document.querySelector('aside .nav-extra').textContent.includes('回收站')));
   await click(master, '准备发布预览'); await waitText(master, '预览已准备'); await click(master, '确认上传并发布镜像'); await waitText(master, '镜像已发布');
-  const mobile = await mobilePage(); await mobile.click('#show-add');
+  const mobile = await mobilePage();
+  const cookies = await mobile.cookies(); const session = cookies.find(row=>row.name==='__Host-shiye_reader');
+  check('手机主动保持登录使用 HttpOnly Secure 的 30 天 Cookie', session?.httpOnly && session?.secure && session.expires > Date.now()/1000 + 29*86400);
+  failMobileNetwork = true; await mobile.reload(); await waitText(mobile, '未清除登录');
+  check('网络错误不显示重新登录，提供保留会话重试', await mobile.$eval('#login',n=>n.hidden) && await mobile.$eval('#retry-load',n=>!n.hidden));
+  failMobileNetwork = false; await mobile.click('#retry-load'); await mobile.waitForSelector('#library:not([hidden])');
+  check('网络恢复后不用重填凭据即可重新读取', await mobile.$eval('#token',n=>n.value===''));
+  await mobile.click('#show-add');
   check('手机使用独立提交凭据登录，分类展示完整层级和标签', await mobile.$eval('#capture-category', (node) => [...node.options].some((option) => option.text === '技术 / 网页')) && await mobile.$eval('#capture-tags', (node) => node.options[0]?.text === '参考'));
   await mobile.type('#capture-url', 'https://example.com/from-phone'); await mobile.type('#capture-title', '手机新增收藏'); await mobile.select('#capture-category', 'web'); await mobile.select('#capture-tags', 'reference'); await mobile.type('#capture-note', '随提交传送的笔记'); await mobile.type('#capture-description', '来源介绍'); await mobile.click('#capture-pinned'); await mobile.click('#save-local'); await waitText(mobile, '已保存到本机，尚未发送');
   check('普通收藏格式先保存在本机，不自动上传', harness.db.prepare('SELECT COUNT(*) AS n FROM capture_inbox').get().n === 0 && await mobile.$$eval('.temporary', (nodes) => nodes.length) === 1);

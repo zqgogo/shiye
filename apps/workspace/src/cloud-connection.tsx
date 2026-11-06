@@ -1,3 +1,4 @@
+import { readCloudCredential, saveCloudCredential, forgetCloudCredential } from './cloud-credential.js';
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode, type MutableRefObject } from 'react';
 import { mirrorBase } from '../../../packages/sync/src/client.js';
 import type { MirrorInfo } from '../../../packages/sync/src/protocol.js';
@@ -7,13 +8,18 @@ const storageKey = 'shiye:mirror-address';
 const remembered = () => { try { return localStorage.getItem(storageKey) ?? ''; } catch { return ''; } };
 interface CloudConnection {
   address: string; savedAddress: string; token: string; info: MirrorInfo | null; sharedInfo: SharedInfo | null; testedAt: string | null; modified: boolean; error: string;
+  rememberToken: boolean; autoConnectPending: boolean; rememberedIdentity: string | null; setRememberToken(value: boolean): void; consumeAutoConnect(): void;
   version: MutableRefObject<number>; changeAddress(value: string): void; changeToken(value: string): void; saveAddress(): void;
   connected(info: MirrorInfo, shared: SharedInfo, expectedVersion: number): boolean; setInfo(info: MirrorInfo): void; setSharedInfo(info: SharedInfo): void; failed(message: string): void; disconnect(): void;
 }
 const Context = createContext<CloudConnection | null>(null);
 export function useCloudConnection() { const value = useContext(Context); if (!value) throw new Error('云端连接上下文缺失。'); return value; }
 export function CloudConnectionProvider({ children }: { children: ReactNode }) {
-  const [address, setAddress] = useState(remembered), [savedAddress, setSavedAddress] = useState(remembered), [token, setToken] = useState('');
+  const [initial] = useState(readCloudCredential);
+  const [address, setAddress] = useState(() => initial?.address ?? remembered()), [savedAddress, setSavedAddress] = useState(() => initial?.address ?? remembered()), [token, setToken] = useState(initial?.token ?? '');
+  const [rememberToken, setRemember] = useState(Boolean(initial)), [autoConnectPending, setAutoConnectPending] = useState(Boolean(initial)), [rememberedIdentity, setRememberedIdentity] = useState(initial?.identity ?? null);
+  const forget = () => { forgetCloudCredential(); setRemember(false); setRememberedIdentity(null); setAutoConnectPending(false); };
+
   const [info, setInfo] = useState<MirrorInfo | null>(null), [sharedInfo, setSharedInfo] = useState<SharedInfo | null>(null), [testedAt, setTestedAt] = useState<string | null>(null);
   const [modified, setModified] = useState(false), [error, setError] = useState(''); const version = useRef(0);
   const [verifiedVersion, setVerifiedVersion] = useState(-1);
@@ -23,14 +29,17 @@ export function CloudConnectionProvider({ children }: { children: ReactNode }) {
     const event = extensionApi()?.permissions?.onRemoved; if (!event) return;
     const removed = (permissions: chrome.permissions.Permissions) => { let origin: string; try { origin = new URL(address).origin; } catch { return; }
       if (!permissions.origins?.some((pattern) => ['<all_urls>', 'https://*/*', `${origin}/*`].includes(pattern))) return;
-      invalidate(); setModified(true); setError('此后端的访问权限已撤销，请重新测试并授权。');
+      forget(); setToken(''); invalidate(); setModified(true); setError('此后端的访问权限已撤销，请重新测试并授权。');
     }; event.addListener(removed); return () => event.removeListener(removed);
   }, [address]);
-  return <Context.Provider value={{ address, savedAddress, token, get info() { return verifiedVersion === version.current ? info : null; }, get sharedInfo() { return verifiedVersion === version.current ? sharedInfo : null; }, testedAt, modified, error, version,
-    changeAddress: (value) => { if (value === address) return; invalidate(); setAddress(value); setToken(''); setModified(true); },
-    changeToken: (value) => { if (value === token) return; invalidate(); setToken(value); setModified(true); }, saveAddress,
-    connected: (next, shared, expectedVersion) => { if (expectedVersion !== version.current) return false; setVerifiedVersion(expectedVersion); setInfo(next); setSharedInfo(shared); setTestedAt(new Date().toISOString()); setModified(false); setError(''); try { saveAddress(); } catch { setError('连接已验证，但后端地址未能保存；刷新后需重新填写。'); } return true; },
+  return <Context.Provider value={{ address, savedAddress, token, rememberToken, autoConnectPending, rememberedIdentity,
+    consumeAutoConnect: () => setAutoConnectPending(false),
+    setRememberToken: (value) => { if (!value) { forget(); return; } if (!token || !address) throw new Error('请先填写地址和发布凭据。'); saveAddress(); saveCloudCredential({ address, token, identity: info ? JSON.stringify([info.serverId, info.libraryId, info.epoch]) : null }); setRemember(true); },
+    get info() { return verifiedVersion === version.current ? info : null; }, get sharedInfo() { return verifiedVersion === version.current ? sharedInfo : null; }, testedAt, modified, error, version,
+    changeAddress: (value) => { if (value === address) return; forget(); invalidate(); setAddress(value); setToken(''); setModified(true); },
+    changeToken: (value) => { if (value === token) return; if (rememberToken) { if (value) saveCloudCredential({ address, token: value, identity: rememberedIdentity }); else forget(); } invalidate(); setToken(value); setModified(true); }, saveAddress,
+    connected: (next, shared, expectedVersion) => { if (expectedVersion !== version.current) return false; setVerifiedVersion(expectedVersion); setInfo(next); setSharedInfo(shared); setTestedAt(new Date().toISOString()); setModified(false); setError(''); try { saveAddress(); if (rememberToken) { const identity = JSON.stringify([next.serverId, next.libraryId, next.epoch]); saveCloudCredential({ address, token, identity }); setRememberedIdentity(identity); } } catch { setError('连接已验证，但后端地址未能保存；刷新后需重新填写。'); } return true; },
     setInfo, setSharedInfo, failed: (message) => { setVerifiedVersion(-1); setInfo(null); setSharedInfo(null); setTestedAt(null); setError(message); },
-    disconnect: () => { invalidate(); setToken(''); setModified(false); },
+    disconnect: () => { forget(); invalidate(); setToken(''); setModified(false); },
   }}>{children}</Context.Provider>;
 }

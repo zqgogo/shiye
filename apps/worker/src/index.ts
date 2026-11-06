@@ -119,12 +119,12 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     if (path === '/v1/session' && request.method === 'DELETE') { sameOrigin(request); return json({ ok: true }, 200, { 'Set-Cookie': cookie('', 0) }); }
     if (path === '/v1/session' && request.method === 'POST') {
       sameOrigin(request);
-      const input = z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{24,256}$/) }).strict().parse(await body(request));
+      const input = z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{24,256}$/), remember: z.boolean().optional() }).strict().parse(await body(request));
       const authRequest = new Request(request.url, { headers: { Authorization: `Bearer ${input.token}` } });
       await authenticate(authRequest, env);
       const isSubmit = constantEqual(await tokenHash(input.token), env.SUBMIT_TOKEN_SHA256 ?? '');
       if (!isSubmit && !constantEqual(await tokenHash(input.token), env.READ_TOKEN_SHA256)) fail(403, '手机页面请使用独立只读或提交凭据。');
-      return json({ ok: true, canSubmit: isSubmit }, 200, { 'Set-Cookie': cookie(input.token, 8 * 3600) });
+      return json({ ok: true, canSubmit: isSubmit }, 200, { 'Set-Cookie': cookie(input.token, input.remember ? 30 * 24 * 3600 : 8 * 3600) });
     }
     if (path.startsWith('/v2/')) return await sharedRequest(request, env, { auth: authenticate, body, json, fail, identity: async () => identityOf(await library(db)) });
     if (!path.startsWith('/v1/')) {

@@ -82,7 +82,9 @@ it('只读令牌和只读 cookie 不能写入；同域登录、过期退出及�
   expect((await post('/v1/generations', plan.declaration, readToken)).status).toBe(401);
   const login = await transport('https://mirror.test/v1/session', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://mirror.test' }, body: JSON.stringify({ token: readToken }) });
   expect(login.status).toBe(200); const cookie = login.headers.get('Set-Cookie')!;
-  expect(cookie).toContain('HttpOnly'); expect(cookie).toContain('Secure'); expect(cookie).toContain('SameSite=Strict');
+  expect(cookie).toContain('HttpOnly'); expect(cookie).toContain('Secure'); expect(cookie).toContain('SameSite=Strict'); expect(cookie).toContain('Max-Age=28800');
+  const remembered = await transport('https://mirror.test/v1/session', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://mirror.test' }, body: JSON.stringify({ token: readToken, remember: true }) });
+  expect(remembered.status).toBe(200); expect(remembered.headers.get('Set-Cookie')).toContain('Max-Age=2592000');
   const info = await transport('https://mirror.test/v1/info', { headers: { Cookie: cookie } });
   expect(info.status).toBe(200); expect(info.headers.get('Cache-Control')).toContain('no-store');
   expect((await transport('https://mirror.test/v1/generations', { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify(plan.declaration) })).status).toBe(401);
