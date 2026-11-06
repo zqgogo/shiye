@@ -1,6 +1,7 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 let records = [], paths = new Map(), page = 1, operation = 0, cloudInfo = null, canSubmit = false, localPage = 1, localBusy = false;
+let categoryNodes = new Map(), categoryCounts = new Map(), pickerTarget = 'category', pickerParent = '', pickerPage = 1;
 const status = (text) => { $('status').textContent = text; };
 async function api(path, options = {}) {
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30000);
@@ -10,13 +11,15 @@ async function api(path, options = {}) {
     return await response.json();
   } finally { clearTimeout(timer); }
 }
-function reset() { $('retry-load').hidden = true; cloudInfo = null; canSubmit = false; $('local-results').replaceChildren(); $('capture-form').reset(); records = []; paths.clear(); $('results').replaceChildren(); $('library').hidden = true; $('logout').hidden = true; $('login').hidden = false; }
+function reset() { $('retry-load').hidden = true; cloudInfo = null; canSubmit = false; $('local-results').replaceChildren(); $('capture-form').reset(); records = []; paths.clear(); categoryNodes.clear(); categoryCounts.clear(); if ($('category-dialog').open) $('category-dialog').close(); $('category-choices').replaceChildren(); $('category-breadcrumbs').replaceChildren(); $('category-current').textContent = ''; $('category-search').value = ''; $('category').replaceChildren(new Option('全部分类',''),new Option('未分类','__uncategorized__')); $('capture-category').replaceChildren(new Option('未分类','')); $('query').value=''; $('site-filter').value=''; $('scope').value='all'; $('include-descendants').checked=true; $('result-sort').value='original'; syncCategoryButtons(); $('results').replaceChildren(); $('library').hidden = true; $('logout').hidden = true; $('login').hidden = false; }
 function render() {
   const term = $('query').value.trim().toLowerCase(), scope = $('scope').value, category = $('category').value;
-  const selectedPath = paths.get(category);
+  const site = $('site-filter').value.trim().toLowerCase();
+  syncCategoryButtons();
   const visible = records.filter((row) => row.kind === (scope === 'reading' ? 'reading' : 'bookmark') &&
-    (scope !== 'pinned' || row.pinned) && (!category || row.categoryId === category || (selectedPath && (paths.get(row.categoryId) || '').startsWith(selectedPath + ' / '))) &&
-    (!term || `${row.title} ${row.url} ${paths.get(row.categoryId) || ''}`.toLowerCase().includes(term)));
+    (scope !== 'pinned' || row.pinned) && (!category || (category === '__uncategorized__' ? !row.categoryId : row.categoryId === category || ($('include-descendants').checked && withinCategory(row.categoryId, category)))) &&
+    (!term || `${row.title} ${row.url} ${paths.get(row.categoryId) || ''}`.toLowerCase().includes(term)) && (!site || new URL(row.url).hostname.toLowerCase().includes(site)));
+  const sorting = $('result-sort').value; if (sorting !== 'original') visible.sort((a,b) => (sorting === 'site' ? new URL(a.url).hostname.localeCompare(new URL(b.url).hostname) : a.title.localeCompare(b.title, 'zh-CN')) || a.id.localeCompare(b.id));
   const pages = Math.max(1, Math.ceil(visible.length / 50)); page = Math.min(pages, Math.max(1, page));
   $('count').textContent = `匹配 ${visible.length} 条`; $('page').textContent = `${page} / ${pages}`;
   $('previous').disabled = page <= 1; $('next').disabled = page >= pages; $('results').replaceChildren();
@@ -27,8 +30,70 @@ function render() {
     const subtitle = document.createElement('small'); subtitle.textContent = `${url.hostname} · ${row.kind === 'reading' ? '待看' : paths.get(row.categoryId) || '未分类'}`;
     link.append(title, subtitle); $('results').append(link);
   }
-  if (!visible.length) { const empty = document.createElement('p'); empty.textContent = '暂时没有匹配记录。'; $('results').append(empty); }
+  if (!visible.length) { const empty = document.createElement('p'); empty.className = 'empty-results'; empty.textContent = '没有符合当前条件的记录。可调整关键词、分类或网站，或点击“清除筛选”。'; $('results').append(empty); }
 }
+function withinCategory(id, parent) {
+  const seen = new Set(); while (id && !seen.has(id)) { if (id === parent) return true; seen.add(id); id = categoryNodes.get(id)?.parentId; } return false;
+}
+function syncCategoryButtons() {
+  const reading = $('scope').value === 'reading';
+  $('choose-category').disabled = reading; $('include-descendants').disabled = reading;
+  const value = $('category').value;
+  $('choose-category').querySelector('span').textContent = reading ? '待看不按分类筛选' : value === '__uncategorized__' ? '未分类' : paths.get(value) || '全部分类';
+  $('choose-capture-category').querySelector('span').textContent = paths.get($('capture-category').value) || '未分类';
+}
+function chooseCategory(id) {
+  $(pickerTarget).value = id;
+  $(pickerTarget).dispatchEvent(new Event('input', { bubbles:true }));
+  syncCategoryButtons(); $('category-dialog').close();
+}
+function openCategoryPicker(target) {
+  pickerTarget = target; pickerParent = ''; pickerPage = 1; $('category-search').value = '';
+  $('category-dialog-title').textContent = target === 'category' ? '筛选收藏分类' : '选择保存分类';
+  $('category-current').textContent = `当前：${paths.get($(target).value) || ($(target).value === '__uncategorized__' || target === 'capture-category' ? '未分类' : '全部分类')}`;
+  $('category-all').hidden = target !== 'category';
+  renderCategoryPicker(); $('category-dialog').showModal();
+}
+function renderCategoryPicker() {
+  const query = $('category-search').value.trim().toLowerCase();
+  const rows = [...categoryNodes.values()].filter(row => query ? (paths.get(row.id) || row.name).toLowerCase().includes(query) : (row.parentId || '') === pickerParent).sort((a,b)=>a.name.localeCompare(b.name,'zh-CN') || a.id.localeCompare(b.id));
+  const pages = Math.max(1, Math.ceil(rows.length / 20)); pickerPage = Math.max(1, Math.min(pickerPage, pages));
+  $('category-breadcrumbs').replaceChildren();
+  const navigate = (id) => { pickerParent = id; pickerPage = 1; $('category-search').value = ''; renderCategoryPicker(); };
+  const crumb = (id, name) => { const button = document.createElement('button'); button.type='button'; button.textContent=name; button.onclick=()=>navigate(id); $('category-breadcrumbs').append(button); };
+  crumb('', '所有目录');
+  const ancestors=[], seen=new Set(); let id=pickerParent; while(id && !seen.has(id)) { seen.add(id); const node=categoryNodes.get(id); if(!node)break; ancestors.unshift(node); id=node.parentId; }
+  for(const row of ancestors) crumb(row.id, row.name);
+  $('category-choices').replaceChildren();
+  for (const row of rows.slice((pickerPage-1)*20,pickerPage*20)) {
+    const children=[...categoryNodes.values()].filter(child=>child.parentId===row.id).length;
+    const card=document.createElement('div'); card.className='category-choice';
+    const choose=document.createElement('button'); choose.type='button'; choose.className='category-choice-name'; choose.dataset.categoryId=row.id;
+    const name=document.createElement('strong'); name.textContent=row.name;
+    const detail=document.createElement('small'); detail.textContent=`${children} 个子分类 · ${categoryCounts.get(row.id)||0} 条收藏（含子级）`;
+    choose.append(name,detail);
+    if(query) { const path=document.createElement('small'); path.textContent=paths.get(row.id); path.className='choice-path'; choose.append(path); }
+    choose.onclick=()=>chooseCategory(row.id); card.append(choose);
+    if(children) { const enter=document.createElement('button'); enter.type='button'; enter.className='category-enter'; enter.textContent='下一级 ›'; enter.setAttribute('aria-label',`进入 ${row.name} 的子分类`); enter.onclick=()=>navigate(row.id); card.append(enter); }
+    $('category-choices').append(card);
+  }
+  if(!rows.length) { const empty=document.createElement('p'); empty.className='empty-results'; empty.textContent=query ? '没有匹配的分类，试试名称或上级目录名。' : '当前目录没有子分类，可选择当前分类或返回上级。'; $('category-choices').append(empty); }
+  $('category-choice-count').textContent=`${query ? '搜索匹配' : '本级'} ${rows.length} 个分类 · 点击名称选用，点击“下一级”进入目录`;
+  $('category-choice-page').textContent=`${pickerPage} / ${pages}`; $('category-previous').disabled=pickerPage===1; $('category-next').disabled=pickerPage===pages;
+  $('category-use-current').textContent=pickerParent ? `选择「${categoryNodes.get(pickerParent)?.name || '当前分类'}」` : pickerTarget==='category' ? '使用全部分类' : '保存为未分类';
+}
+$('choose-category').addEventListener('click',()=>openCategoryPicker('category'));
+$('choose-capture-category').addEventListener('click',()=>openCategoryPicker('capture-category'));
+$('capture-category').addEventListener('input',syncCategoryButtons);
+$('category-search').addEventListener('input',()=>{pickerPage=1;renderCategoryPicker();});
+$('category-previous').addEventListener('click',()=>{pickerPage--;renderCategoryPicker();});
+$('category-next').addEventListener('click',()=>{pickerPage++;renderCategoryPicker();});
+for(const id of ['close-category-dialog','category-cancel']) $(id).addEventListener('click',()=>$('category-dialog').close());
+$('category-all').addEventListener('click',()=>chooseCategory(''));
+$('category-uncategorized').addEventListener('click',()=>chooseCategory(pickerTarget==='category' ? '__uncategorized__' : ''));
+$('category-use-current').addEventListener('click',()=>chooseCategory(pickerParent));
+$('category-dialog').addEventListener('click',event=>{if(event.target===$('category-dialog')) { const rect=event.target.getBoundingClientRect(); if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom) event.target.close(); }});
+$('reset-filters').addEventListener('click',()=>{ $('query').value='';$('site-filter').value='';$('category').value='';$('scope').value='all';$('include-descendants').checked=true;$('result-sort').value='original';page=1;render(); });
 async function load() {
   const version = ++operation; status('正在读取私有镜像…'); $('retry-load').hidden = true; $('login').hidden = true; if (!cloudInfo) $('library').hidden = true;
   try {
@@ -61,11 +126,14 @@ async function load() {
     }
     cloudInfo = info;
     if (version !== operation) return;
-    records = all; const categories = new Map(all.filter((row) => row.kind === 'category').map((row) => [row.id, row])); paths = new Map();
+    records = all; categoryNodes = new Map(all.filter((row) => row.kind === 'category').map((row) => [row.id, row])); categoryCounts = new Map(); for (const bookmark of all.filter((row) => row.kind === 'bookmark')) { let id = bookmark.categoryId; const seen = new Set(); while (id && !seen.has(id)) { seen.add(id); categoryCounts.set(id, (categoryCounts.get(id) || 0) + 1); id = categoryNodes.get(id)?.parentId; } }
+    const previousCategory = $('category').value, previousCapture = $('capture-category').value;
+    const categories = new Map(all.filter((row) => row.kind === 'category').map((row) => [row.id, row])); paths = new Map();
     for (const row of categories.values()) { const names = [row.name], seen = new Set([row.id]); let parent = row.parentId;
       while (parent && !seen.has(parent) && names.length < 32) { seen.add(parent); const node = categories.get(parent); if (!node) break; names.unshift(node.name); parent = node.parentId; } paths.set(row.id, names.join(' / ')); }
-    $('category').replaceChildren(new Option('全部分类', '')); for (const [id, path] of [...paths].sort((a, b) => a[1].localeCompare(b[1], 'zh-CN'))) $('category').append(new Option(path, id));
+    $('category').replaceChildren(new Option('全部分类', ''), new Option('未分类', '__uncategorized__')); for (const [id, path] of [...paths].sort((a, b) => a[1].localeCompare(b[1], 'zh-CN'))) $('category').append(new Option(path, id));
     $('capture-category').replaceChildren(new Option('未分类', '')); for (const [id, name] of [...paths].sort((a, b) => a[1].localeCompare(b[1], 'zh-CN'))) $('capture-category').append(new Option(name, id));
+    $('category').value = previousCategory === '__uncategorized__' || paths.has(previousCategory) ? previousCategory : ''; $('capture-category').value = paths.has(previousCapture) ? previousCapture : ''; syncCategoryButtons();
     $('capture-tags').replaceChildren(); for (const tag of records.filter((row) => row.kind === 'tag')) $('capture-tags').append(new Option(tag.name, tag.id));
     $('submit-access').textContent = canSubmit ? '当前凭据可提交。先保存在本机，再手动发送给总机。' : '当前凭据只读，仍可保存本机草稿；要发送请退出后使用 submitter.txt 登录。';
     $('published').textContent = sharedInfo ? `共享收藏 · 同步版本 ${sharedInfo.revision}；待看来自单独镜像` : info.publishedAt ? `发布于 ${new Date(info.publishedAt).toLocaleString()} · 版本 ${info.revision}` : '还没有发布镜像，请回电脑端发布。';
@@ -79,7 +147,7 @@ $('login').addEventListener('submit', async (event) => {
 });
 $('retry-load').addEventListener('click', () => void load());
 $('logout').addEventListener('click', async () => { ++operation; reset(); try { await api('/v1/session', { method: 'DELETE' }); status('已退出。'); } catch (error) { status(`本页已清除；服务端退出失败，请关闭此页或清除站点数据。${error.message}`); } });
-for (const id of ['query', 'scope', 'category']) $(id).addEventListener('input', () => { page = 1; if (id === 'scope' && $('scope').value === 'reading') $('category').value = ''; render(); });
+for (const id of ['query', 'scope', 'category', 'include-descendants', 'site-filter', 'result-sort']) $(id).addEventListener('input', () => { page = 1; if (id === 'scope' && $('scope').value === 'reading') $('category').value = ''; render(); });
 $('previous').addEventListener('click', () => { page--; render(); }); $('next').addEventListener('click', () => { page++; render(); }); $('reload').addEventListener('click', load);
 window.addEventListener('pagehide', () => { ++operation; reset(); }); window.addEventListener('pageshow', (event) => { if (event.persisted) load(); });
 function localPrefix() { if (!cloudInfo) throw new Error('请先连接收藏库。'); return `shiye:outbox:${JSON.stringify([cloudInfo.serverId, cloudInfo.libraryId, cloudInfo.epoch])}:`; }
@@ -166,7 +234,7 @@ $('capture-form').addEventListener('submit', (event) => {
       destination: reading ? 'reading' : 'bookmark', url: url.href, title: $('capture-title').value.trim(), categoryId, categoryPath: paths.get(categoryId) || '', tagIds: tags.map((tag) => tag.value), tagNames: tags.map((tag) => tag.text),
       sourceDescription: reading ? '' : $('capture-description').value, note: $('capture-note').value, pinned: !reading && $('capture-pinned').checked, unread: !reading && $('capture-unread').checked, aiBlocked: !reading && $('capture-ai-blocked').checked,
     } });
-    $('capture-form').reset(); $('bookmark-fields').hidden = false; localPage = 1; showView('local'); status('已保存到本机，尚未发送。确认后点击「发送给总机」。');
+    $('capture-form').reset(); syncCategoryButtons(); $('bookmark-fields').hidden = false; localPage = 1; showView('local'); status('已保存到本机，尚未发送。确认后点击「发送给总机」。');
   } catch (error) { status(`未保存，表单仍保留。${error.message}`); }
 });
 $('local-filter').addEventListener('change', () => { localPage = 1; renderLocal(); });
