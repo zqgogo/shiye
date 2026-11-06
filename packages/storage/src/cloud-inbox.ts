@@ -6,7 +6,7 @@ import type { ShiyeDB } from './db.js';
 export function createCloudInbox(db: ShiyeDB, bookmarks: BookmarkRepository, reading: ReadingRepository) {
   return { async receive(raw: unknown, expectedLibraryId: string, edits?: InboxReceiveEdits): Promise<InboxReceipt> {
     const entry = InboxEntrySchema.parse(raw), hash = await digest(JSON.stringify(entry));
-    const checked = canonicalizeUrl(entry.payload.url);
+    const checked = canonicalizeUrl(entry.payload.url), readingKey=`r:${await digest(checked.canonicalUrl)}`;
     return db.transaction('rw', [db.settings, db.meta, db.bookmarks, db.readingItems, db.categories, db.tags, db.tombstones], async () => {
       const libraryId = ((await db.settings.get('app'))?.value as { libraryId?: string } | undefined)?.libraryId;
       if (libraryId !== expectedLibraryId) throw new AppError('REVISION_CONFLICT', '本机主库已变化，请重新检查云端收件箱。');
@@ -16,6 +16,7 @@ export function createCloudInbox(db: ShiyeDB, bookmarks: BookmarkRepository, rea
       const changes = InboxReceiveEditsSchema.parse(edits ?? {});
       const p = InboxPayloadSchema.parse({ ...entry.payload, ...changes }); let receipt: InboxReceipt;
       const sync = (await db.meta.where('key').startsWith('cloud-sync:').toArray()).map((row) => row.value as import('../../sync/src/two-way-local.js').SharedState).find((value) => value.localLibraryId === libraryId && value.identity.serverId === entry.identity.serverId && value.identity.libraryId === entry.identity.libraryId && value.identity.epoch === entry.identity.epoch);
+      const readingPublicId=(id:string)=>{const row=sync?.baseline.find(row=>sync.maps[row.key]===id && row.data?.kind==='reading')?.data;return row?.kind==='reading'?row.publicId:sync?.publicIds?.[readingKey] ?? id;};
       if (p.destination === 'bookmark') {
         const existing = await bookmarks.findAnyByCanonical(checked.canonicalUrl);
         if (existing?.deletedAt) throw new AppError('TOMBSTONED', '此网址在回收站中，请先明确恢复，或退回这份提交。');
@@ -32,10 +33,10 @@ export function createCloudInbox(db: ShiyeDB, bookmarks: BookmarkRepository, rea
         }
       } else {
         const existing = await reading.findByCanonical(checked.canonicalUrl);
-        if (existing?.status === 'pending') receipt = { status: 'received', recordKind: 'reading', recordId: existing.id, message: '已在待看，保留总机原内容。' };
+        if (existing?.status === 'pending') receipt = { status: 'received', recordKind: 'reading', recordId: readingPublicId(existing.id), message: '已在待看，保留总机原内容。' };
         else {
           const item = (await reading.add({ originalUrl: p.url, title: p.title, note: p.note, sourceType: 'manual' })).item;
-          receipt = { status: 'received', recordKind: 'reading', recordId: item.id, message: existing ? '已重新加入待看，保留原有笔记。' : '已加入待看。' };
+          receipt = { status: 'received', recordKind: 'reading', recordId: readingPublicId(item.id), message: existing ? '已重新加入待看，保留原有笔记。' : '已加入待看。' };
         }
       }
       await db.meta.put({ key, value: { hash, receipt } }); return receipt;

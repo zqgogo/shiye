@@ -84,7 +84,7 @@ try {
   const saved = await env.DB.prepare('SELECT payload,status FROM capture_inbox WHERE id=?').bind(inbound.id).first();
   check('真实 D1 回执重试幂等且清除正文', saved.payload === null && saved.status === 'received' && (await client.inbox(controller.signal)).entries.length === 0);
   const sharedInfo = await (await server.fetch('https://mirror.test/v2/info', { headers: { Authorization: `Bearer ${publisher}` } })).json();
-  check('真实 D1 新同步库独立初始化，未自动迁移个人镜像内容', sharedInfo.protocol === 2 && sharedInfo.revision === 0 && !sharedInfo.enabled);
+  check('真实 D1 新同步库独立初始化，未自动迁移个人镜像内容', sharedInfo.protocol === 3 && sharedInfo.revision === 0 && !sharedInfo.enabled);
   const sharedIdentity = { serverId: sharedInfo.serverId, libraryId: sharedInfo.libraryId, epoch: sharedInfo.epoch };
   let sharedRevision = 0, firstOperation;
   const sharedRows = [];

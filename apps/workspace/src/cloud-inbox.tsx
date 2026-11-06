@@ -23,7 +23,7 @@ export function CloudInbox({ client, info, busy, execute }: { client: () => Mirr
     if (page.entries.some((entry) => !sameIdentity(entry.identity, info))) throw new Error('提交属于其他云库，未接收。');
     setEdits({}); setEntries(page.entries); setSelected(page.entries.map((entry) => entry.id)); setMore(page.hasMore); setLoaded(true);
     if (!back && cursor) setHistory((values) => [...values, after]); else if (!cursor) setHistory([]); else if (back) setHistory((values) => values.slice(0, -1));
-    setAfter(cursor); setNextAfter(page.entries.at(-1)?.seq ?? cursor); setMessage(`本页 ${page.entries.length} 条待接收。收藏接收后请同步，待看接收后请发布单独镜像。`);
+    setAfter(cursor); setNextAfter(page.entries.at(-1)?.seq ?? cursor); setMessage(`本页 ${page.entries.length} 条待接收。收藏与待看接收后，请检查并确认双向同步。`);
     });
   };
   const receive = (reject = false) => {
@@ -44,7 +44,7 @@ export function CloudInbox({ client, info, busy, execute }: { client: () => Mirr
       await reload(); notifyDataChanged();
       if (!current()) return;
       setEntries((values) => values.filter((entry) => !finished.has(entry.id))); setSelected((values) => values.filter((id) => !finished.has(id)));
-      setMessage(`${reject ? '已退回' : '已接收'} ${done} 条。${errors.length ? ` ${errors.length} 条未确认，可重试；本机已入库的不会重复创建。\n${errors.join('\n')}` : reject ? '' : '收藏请检查并确认同步；待看请发布单独镜像。重复网址保留本机原内容；已入库但回执未确认的记录，重试保留首次接收结果。'}`);
+      setMessage(`${reject ? '已退回' : '已接收'} ${done} 条。${errors.length ? ` ${errors.length} 条未确认，可重试；本机已入库的不会重复创建。\n${errors.join('\n')}` : reject ? '' : '收藏与待看请检查并确认双向同步。重复网址保留本机原内容；已入库但回执未确认的记录，重试保留首次接收结果。'}`);
     });
   };
   return <div className="panel cloud-inbox"><h2>云端收件箱</h2><p>手机可先提交，接收前可展开“调整后接收”修改分类等信息；修改仅用于这次入库，不回写手机提交。本机确认接收后再发布；备注会随提交暂存在云端，接收确认后云端清除提交正文。</p>

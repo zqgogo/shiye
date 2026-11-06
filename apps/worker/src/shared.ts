@@ -7,8 +7,8 @@ interface Entity { key: string; version: number; body: string | null; public_bod
 export async function sharedRequest(request: Request, env: Env, h: Helpers): Promise<Response> {
   const url = new URL(request.url), db = env.DB, publicRead = url.pathname === '/v2/public' && request.method === 'GET';
   await h.auth(request, env, !publicRead);
-  const state = async () => { const row = await db.prepare('SELECT * FROM shared_state WHERE singleton=1').first<{ revision: number; enabled: number }>(); if (!row) h.fail(503, '请升级后端数据库。'); return row; };
-  const info = async (): Promise<SharedInfo> => { const value = await state(); return { ...await h.identity(), protocol: 2, revision: value.revision, enabled: Boolean(value.enabled) }; };
+  const state = async () => { const row = await db.prepare('SELECT * FROM shared_state WHERE singleton=1').first<{ revision: number; enabled: number; reading_enabled:number }>(); if (!row) h.fail(503, '请升级后端数据库。'); return row; };
+  const info = async (): Promise<SharedInfo> => { const value = await state(); return { ...await h.identity(), protocol: 3, readingEnabled:Boolean(value.reading_enabled), revision: value.revision, enabled: Boolean(value.enabled) }; };
   if (url.pathname === '/v2/info' && request.method === 'GET') return h.json(await info());
   if ((url.pathname === '/v2/changes' || publicRead) && request.method === 'GET') {
     const before = await info();
@@ -17,7 +17,7 @@ export async function sharedRequest(request: Request, env: Env, h: Helpers): Pro
     if (revision !== before.revision) h.fail(409, '云端正在变化，请重新检查同步。');
     const rows = (await db.prepare(`SELECT key,version,${publicRead ? 'public_body AS body' : 'body'} FROM shared_entities WHERE version>? AND key>? ORDER BY key LIMIT 51`).bind(since, cursor).all<Entity>()).results;
     const result = []; let bytes = 0;
-    for (const row of rows.slice(0, 50)) { const value = { key: row.key, version: row.version, data: row.body ? JSON.parse(row.body) : null }; const size = byteLength(JSON.stringify(value)); if (bytes + size > 800000 && result.length) break; bytes += size; result.push(value); }
+    for (const row of rows.slice(0, 50)) { const value = { key: row.key, version: row.version, data: publicRead && row.key.startsWith('r:') && !before.readingEnabled ? null : row.body ? JSON.parse(row.body) : null }; const size = byteLength(JSON.stringify(value)); if (bytes + size > 800000 && result.length) break; bytes += size; result.push(value); }
     const after = await info(); if (after.revision !== before.revision) h.fail(409, '读取期间同步版本变化，请重试。');
     return h.json({ info: before, rows: result, next: rows.length > result.length ? result.at(-1)?.key ?? null : null });
   }
@@ -37,11 +37,12 @@ export async function sharedRequest(request: Request, env: Env, h: Helpers): Pro
       if ((old?.version ?? 0) !== change.expected) h.fail(409, '收藏版本已变化，请重新检查。');
       if (!old) added++;
       if (change.data) {
-        const prefix = { bookmark: 'b:', category: 'c:', tag: 't:' }[change.data.kind];
+        if(change.data.kind==='reading' && (change.data.related && !change.data.related.startsWith('b:') || (change.data.status==='pending') !== (change.data.completedAt===null)))h.fail(400,'待看状态或关联编号无效。');
+        const prefix = { bookmark: 'b:', category: 'c:', tag: 't:', reading:'r:' }[change.data.kind];
         if (!change.key.startsWith(prefix)) h.fail(400, '收藏编号类型不符。');
-        if (change.data.kind === 'bookmark' && change.key !== `b:${await digest(canonicalizeUrl(change.data.url).canonicalUrl)}`) h.fail(400, '网址与同步编号不符。');
+        if ((change.data.kind === 'bookmark' || change.data.kind === 'reading') && change.key !== `${change.data.kind==='reading'?'r':'b'}:${await digest(canonicalizeUrl(change.data.url).canonicalUrl)}`) h.fail(400, '网址与同步编号不符。');
         if (change.data.kind === 'tag' && change.key !== `t:${await digest(change.data.name.normalize('NFC'))}`) h.fail(400, '标签与同步编号不符。');
-        graph.set(change.key, publicRecord(change.key, change.data));
+        const projected=publicRecord(change.key, change.data); if(projected)graph.set(change.key,projected);else graph.delete(change.key);
       } else graph.delete(change.key);
       delta += (change.data ? byteLength(JSON.stringify(change.data)) : 0) - (old?.bytes ?? 0);
     }
@@ -49,10 +50,10 @@ export async function sharedRequest(request: Request, env: Env, h: Helpers): Pro
     const totals = await db.prepare('SELECT COUNT(*) AS n,COALESCE(SUM(bytes),0) AS bytes FROM shared_entities').first<{ n: number; bytes: number }>();
     if ((totals?.n ?? 0) + added > 100000 || (totals?.bytes ?? 0) + delta > 24 * 1024 * 1024) h.fail(413, '共享收藏超过同步容量（含删除标记 10 万项、正文 24 MB）。');
     const revision = before.revision + 1, nonce = crypto.randomUUID();
-    const statements = [db.prepare('UPDATE shared_state SET revision=?,enabled=1,operation_id=? WHERE singleton=1 AND revision=?').bind(revision, nonce, before.revision)];
+    const statements = [db.prepare('UPDATE shared_state SET revision=?,enabled=1,reading_enabled=CASE WHEN ? THEN 1 ELSE reading_enabled END,operation_id=? WHERE singleton=1 AND revision=?').bind(revision, input.readingComplete ? 1 : 0, nonce, before.revision)];
     for (const change of input.changes) statements.push(db.prepare(`INSERT INTO shared_entities(key,version,body,public_body,bytes)
       SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM shared_state WHERE singleton=1 AND revision=? AND operation_id=?)
-      ON CONFLICT(key) DO UPDATE SET version=excluded.version,body=excluded.body,public_body=excluded.public_body,bytes=excluded.bytes`).bind(change.key, revision, change.data ? JSON.stringify(change.data) : null, change.data ? JSON.stringify(publicRecord(change.key, change.data)) : null, change.data ? byteLength(JSON.stringify(change.data)) : 0, revision, nonce));
+      ON CONFLICT(key) DO UPDATE SET version=excluded.version,body=excluded.body,public_body=excluded.public_body,bytes=excluded.bytes`).bind(change.key, revision, change.data ? JSON.stringify(change.data) : null, change.data && publicRecord(change.key,change.data) ? JSON.stringify(publicRecord(change.key, change.data)) : null, change.data ? byteLength(JSON.stringify(change.data)) : 0, revision, nonce));
     statements.push(db.prepare(`INSERT INTO shared_operations(id,input_hash,revision,device_id,created_at)
       SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM shared_state WHERE singleton=1 AND revision=? AND operation_id=?) ON CONFLICT(id) DO NOTHING`).bind(input.operationId, inputHash, revision, input.deviceId, new Date().toISOString(), revision, nonce));
     const applied = await db.batch(statements); if (applied[0]?.meta.changes !== 1) h.fail(409, '另一台电脑先完成同步，请重新检查。');

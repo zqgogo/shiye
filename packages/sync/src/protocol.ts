@@ -8,7 +8,7 @@ const address = z.string().max(8192).refine((value) => { try { const url = new U
 export const MirrorRecordSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('bookmark'), id, title: z.string().max(300), url: address,
     categoryId: id.nullable(), tagIds: z.array(id).max(30), pinned: z.boolean(), unread: z.boolean() }).strict(),
-  z.object({ kind: z.literal('reading'), id, title: z.string().max(300), url: address }).strict(),
+  z.object({ kind: z.literal('reading'), id, title: z.string().max(300), url: address, status:z.enum(['pending','completed']).optional() }).strict(),
   z.object({ kind: z.literal('category'), id, name: z.string().min(1).max(60), parentId: id.nullable() }).strict(),
   z.object({ kind: z.literal('tag'), id, name: z.string().min(1).max(40) }).strict(),
 ]);

@@ -22,7 +22,7 @@ class Query implements Statement {
   async run() { return this.runNow(); }
 }
 beforeEach(async () => {
-  sql = new DatabaseSync(':memory:'); for (const name of ['0001_mirror.sql', '0002_inbox.sql', '0003_two_way.sql']) sql.exec(readFileSync(new URL(`../../../apps/worker/migrations/${name}`, import.meta.url), 'utf8'));
+  sql = new DatabaseSync(':memory:'); for (const name of ['0001_mirror.sql', '0002_inbox.sql', '0003_two_way.sql', '0004_reading_sync.sql']) sql.exec(readFileSync(new URL(`../../../apps/worker/migrations/${name}`, import.meta.url), 'utf8'));
   env = { WRITE_TOKEN_SHA256: await digest(publisher), READ_TOKEN_SHA256: await digest(reader), SUBMIT_TOKEN_SHA256: await digest(submitter), DB: { prepare: (text) => new Query(text), async batch(statements) { sql.exec('BEGIN IMMEDIATE'); try { const results = statements.map((statement) => (statement as Query).runNow()); sql.exec('COMMIT'); return results; } catch (error) { sql.exec('ROLLBACK'); throw error; } } } };
   fetcher = async (input, init) => handleRequest(new Request(input, init), env); client = new TwoWayClient(address, publisher, fetcher);
   dbA = new ShiyeDB(`home-${newId()}`); dbB = new ShiyeDB(`work-${newId()}`); a = createWorkspaceService(createRepositories(dbA)); b = createWorkspaceService(createRepositories(dbB)); await a.snapshot(); await b.snapshot();
@@ -121,16 +121,93 @@ it('空分类和未使用标签也同步，本地专用独占的目录与标签�
 it('并发误复用同一操作编号但正文不同，失败事务不能借胜出者条件覆盖内容', async () => {
   const info = await client.info(signal()), key = `b:${await digest('https://example.com/nonce')}`;
   const data = { kind: 'bookmark', publicId: newId(), url: 'https://example.com/nonce', title: 'A', sourceDescription: '', note: '', selectedText: '', aiPurpose: '', category: null, tags: [], pinned: false, unread: true, aiBlocked: false, lockedFields: [], order: 0 };
-  const value = { identity: { serverId: info.serverId, libraryId: info.libraryId, epoch: info.epoch }, deviceId: newId(), operationId: newId(), baseRevision: 0, changes: [{ key, expected: 0, data }] };
+  const value = { protocol:3, identity: { serverId: info.serverId, libraryId: info.libraryId, epoch: info.epoch }, deviceId: newId(), operationId: newId(), baseRevision: 0, changes: [{ key, expected: 0, data }] };
   const send = (input: unknown) => fetcher(`${address}/v2/changes`, { method: 'POST', headers: { Authorization: `Bearer ${publisher}`, 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
   const responses = await Promise.all([send(value), send({ ...value, changes: [{ key, expected: 0, data: { ...data, title: 'B' } }] })]);
   expect(responses.filter((response) => response.ok)).toHaveLength(1);
   const stored = (await client.read(signal(), null)).rows[0]!.data; expect(stored?.kind === 'bookmark' && stored.title).toBe(responses[0]!.ok ? 'A' : 'B');
 });
-it('启用双机同步后，旧镜像接口不再泄露过时收藏，保留独立待看', async () => {
+it('启用待看双向同步后，旧镜像接口不再显示过时收藏或待看', async () => {
   const { MirrorClient, planMirror } = await import('../../sync/src/client.js'); const legacy = new MirrorClient(address, publisher, fetcher);
   const info = await legacy.info(signal()); const old = await planMirror([{ kind: 'bookmark', id: 'old-id', title: '旧私密标题', url: 'https://example.com/old', categoryId: null, tagIds: [], pinned: false, unread: true }, { kind: 'reading', id: 'reading', title: '待看', url: 'https://example.com/reading' }], info); await legacy.publish(old, signal(), () => undefined);
   await a.createBookmark({ originalUrl: 'https://example.com/current' }); await sync(a);
   const response = await fetcher(`${address}/v1/mirror?generation=${old.declaration.generationId}&part=0`, { headers: { Authorization: `Bearer ${reader}` } });
-  const result = await response.json() as { records: { kind: string }[] }; expect(result.records.map((row) => row.kind)).toEqual(['reading']); expect(JSON.stringify(result)).not.toContain('旧私密标题');
+  const result = await response.json() as { records: { kind: string }[] }; expect(result.records.map((row) => row.kind)).toEqual([]); expect(JSON.stringify(result)).not.toContain('旧私密标题');
+});
+it('待看双向新增、拉取、完成、重新加入和移除；接收删除留快照且不复活', async () => {
+  const home=await a.addReading({originalUrl:'https://example.com/read-home',title:'家里待看',note:'待看私有笔记'});
+  await b.addReading({originalUrl:'https://example.com/read-work',title:'工作待看'});
+  await sync(a);await sync(b);await sync(a);
+  expect((await a.readTwoWay(address)).readingItems).toHaveLength(2);expect((await b.readTwoWay(address)).readingItems).toHaveLength(2);
+  const work=(await b.snapshot()).pendingReading.find(row=>row.title==='家里待看')!;
+  expect(work.id).not.toBe(home.id);expect(work.note).toBe('待看私有笔记');
+  await b.completeReading(work.id);await sync(b);await sync(a);expect((await a.getReading(home.id))?.status).toBe('completed');
+  const response=await fetcher(`${address}/v2/public`,{headers:{Authorization:`Bearer ${reader}`}});const visible=await response.text();expect(visible).toContain('completed');expect(visible).not.toContain('待看私有笔记');
+  await a.reopenReading(home.id);await sync(a);await sync(b);expect((await b.getReading(work.id))?.status).toBe('pending');
+  await b.removeReadingItems([work.id]);await sync(b);await sync(a);expect(await a.getReading(home.id)).toBeUndefined();
+  expect((await dbA.purgeSnapshots.toArray()).some(row=>row.scopeLabel==='同步移除的待看'&&row.readingItems.some(row=>row.id===home.id))).toBe(true);
+  await sync(a);await sync(b);expect((await a.readTwoWay(address)).readingItems).toHaveLength(1);
+});
+it('待看离线双边编辑、完成与编辑、删除与编辑都显式冲突，陈旧预览不能覆盖',async()=>{
+  const reading=await a.addReading({originalUrl:'https://example.com/read-conflict',title:'原待看'});await sync(a);await sync(b);
+  const work=(await b.snapshot()).pendingReading[0]!;
+  await dbB.readingItems.update(work.id,{note:'离线备注',localRevision:work.localRevision+1});const stale=await plan(b);
+  await a.completeReading(reading.id);await sync(a);await expect(apply(b,stale)).rejects.toThrow('重新检查');
+  const conflict=await plan(b);expect(resolveShared(conflict).conflicts).toHaveLength(1);await expect(apply(b,conflict)).rejects.toThrow('冲突');conflict.choices[resolveShared(conflict).conflicts[0]!.key]='remote';await apply(b,conflict);expect((await b.getReading(work.id))?.status).toBe('completed');
+  const current=(await b.getReading(work.id))!;await dbB.readingItems.update(work.id,{title:'保留并修改',localRevision:current.localRevision+1});await a.removeReadingItems([reading.id]);await sync(a);
+  const deleted=await plan(b);expect(resolveShared(deleted).conflicts).toHaveLength(1);deleted.choices[resolveShared(deleted).conflicts[0]!.key]='local';await apply(b,deleted);await sync(a);expect((await a.readTwoWay(address)).readingItems[0]?.title).toBe('保留并修改');
+});
+it('同网址待看首次合并只留一条，已有不同内容先选择；旧收藏基线升级不丢待看',async()=>{
+  await a.createBookmark({originalUrl:'https://example.com/book'});await sync(a);await sync(b);
+  sql.prepare('UPDATE shared_state SET reading_enabled=0').run();
+  await a.addReading({originalUrl:'https://example.com/same-reading',title:'家里版本'});await b.addReading({originalUrl:'https://example.com/same-reading',title:'工作版本'});await sync(a);
+  const p=await plan(b);expect(resolveShared(p).conflicts).toHaveLength(1);p.choices[resolveShared(p).conflicts[0]!.key]='local';await apply(b,p);await sync(a);
+  expect((await a.readTwoWay(address)).readingItems).toHaveLength(1);expect((await b.readTwoWay(address)).readingItems).toHaveLength(1);expect((await a.snapshot()).bookmarks).toHaveLength(1);
+});
+it('本地专用关联待看隔离，已共享转私有撤回关联待看且保留本机，分批隐私守卫生效',async()=>{
+  const book=await a.createBookmark({originalUrl:'https://example.com/linked'});await a.addReading({originalUrl:book.originalUrl,relatedBookmarkId:book.id,note:'关联笔记'});await sync(a);await sync(b);
+  const before=(await a.getBookmark(book.id))!;await a.updateBookmark(book.id,before.localRevision,{privacy:{localOnly:true,aiBlocked:false}});await sync(a);await sync(b);
+  expect((await a.readTwoWay(address)).readingItems).toHaveLength(1);expect((await b.readTwoWay(address)).readingItems).toHaveLength(0);await sync(a);expect((await a.readTwoWay(address)).readingItems).toHaveLength(1);
+  const other=await a.createBookmark({originalUrl:'https://example.com/private-before-send'});await a.addReading({originalUrl:other.originalUrl,relatedBookmarkId:other.id});const pending=await plan(a);await a.updateBookmark(other.id,other.localRevision,{privacy:{localOnly:true,aiBlocked:false}});
+  await expect(a.assertTwoWay(pending,pending.projection.filter(([key])=>key.startsWith('r:')).map(([key])=>key))).rejects.toThrow('隐私');
+});
+it('待看转换成收藏会同步完成状态及关联编号；手机重复提交的回执使用正式公开编号',async()=>{
+  const item=await a.addReading({originalUrl:'https://example.com/convert-reading',title:'可收藏'});await sync(a);await sync(b);
+  const work=(await b.snapshot()).pendingReading[0]!;await b.convertReading(work.id,work.localRevision,{});await sync(b);await sync(a);
+  const reading=(await a.getReading(item.id))!;expect(reading.status).toBe('completed');expect(reading.relatedBookmarkId).toBe((await a.snapshot()).bookmarks[0]?.id);
+  await a.reopenReading(item.id);await sync(a);await sync(b);const state=await client.read(signal(),null),data=state.rows.find(row=>row.data?.kind==='reading')!.data!;
+  const input={seq:1,id:newId(),identity:{serverId:state.info.serverId,libraryId:state.info.libraryId,epoch:state.info.epoch},createdAt:new Date().toISOString(),payload:{destination:'reading',url:item.originalUrl,title:'重复手机',note:'手机备注',sourceDescription:'',categoryId:null,categoryPath:'',tagIds:[],tagNames:[],pinned:false,unread:false,aiBlocked:false}};
+  const receipt=await b.receiveCloudInbox(input,(await b.snapshot()).settings.libraryId);expect(receipt.recordId).toBe('publicId' in data ? data.publicId : 'invalid');
+});
+it('待看同步期间本机被改动拒绝迟到拉取；旧协议写入被拒绝；空库也能启用统一待看',async()=>{
+  const item=await a.addReading({originalUrl:'https://example.com/late-reading'});await sync(a);const p=await plan(b),result=await client.upload(p,signal(),()=>b.assertTwoWay(p),()=>undefined);await b.addReading({originalUrl:'https://example.com/local-reading'});await expect(b.applyTwoWay(p,result.rows,result.info.revision)).rejects.toThrow('本机被修改');
+  const info=await client.info(signal());expect((await fetcher(`${address}/v2/changes`,{method:'POST',headers:{Authorization:`Bearer ${publisher}`,'Content-Type':'application/json'},body:JSON.stringify({identity:{serverId:info.serverId,libraryId:info.libraryId,epoch:info.epoch},deviceId:newId(),operationId:newId(),baseRevision:info.revision,changes:[]})})).ok).toBe(false);
+  expect((await a.getReading(item.id))?.status).toBe('pending');
+});
+it('空库首次确认也启用统一待看；无变化再次同步不增加版本',async()=>{
+  expect((await client.info(signal())).readingEnabled).toBe(false);await sync(a);const info=await client.info(signal());expect(info.readingEnabled).toBe(true);expect(info.enabled).toBe(true);expect((await client.read(signal(),null)).rows).toHaveLength(0);await sync(b);expect((await client.info(signal())).revision).toBe(info.revision);
+});
+it('多批待看上传中断后可继续，最后一批确认前不切换手机旧镜像来源',async()=>{
+  for(let i=0;i<55;i++)await a.addReading({originalUrl:`https://example.com/partial-reading/${i}`,title:`待看 ${i}`});
+  const p=await plan(a);let lost=false;const flaky=new TwoWayClient(address,publisher,async(input,init)=>{const response=await fetcher(input,init);if(!lost&&init?.method==='POST'&&response.ok){lost=true;throw new Error('lost first part');}return response;});
+  await expect(flaky.upload(p,signal(),()=>a.assertTwoWay(p),()=>undefined)).rejects.toThrow('lost first part');
+  expect((await client.info(signal())).readingEnabled).toBe(false);const publicPart=await fetcher(`${address}/v2/public`,{headers:{Authorization:`Bearer ${reader}`}});expect((await publicPart.json() as {rows:{data:unknown}[]}).rows.every(row=>row.data===null)).toBe(true);
+  await sync(a);await sync(b);expect((await b.readTwoWay(address)).readingItems).toHaveLength(55);expect((await client.info(signal())).readingEnabled).toBe(true);
+});
+it('接收待看删除的快照写入失败时，记录与基线一同回滚，重试可以完成',async()=>{
+  const item=await a.addReading({originalUrl:'https://example.com/snapshot-rollback'});await sync(a);await sync(b);const work=(await b.snapshot()).pendingReading[0]!;await b.removeReadingItems([work.id]);await sync(b);
+  const p=await plan(a),result=await client.upload(p,signal(),()=>a.assertTwoWay(p),()=>undefined),before=(await a.readTwoWay(address)).state?.revision;
+  const fail=()=>{throw new Error('snapshot unavailable');};dbA.purgeSnapshots.hook('creating',fail);
+  await expect(a.applyTwoWay(p,result.rows,result.info.revision)).rejects.toThrow('snapshot unavailable');expect(await a.getReading(item.id)).toBeDefined();expect((await a.readTwoWay(address)).state?.revision).toBe(before);
+  dbA.purgeSnapshots.hook('creating').unsubscribe(fail);await a.applyTwoWay(p,result.rows,result.info.revision);expect(await a.getReading(item.id)).toBeUndefined();
+});
+it('首次本地专用关联待看不上传，新电脑私有关联不被云端同网址待看覆盖',async()=>{
+  const book=await a.createBookmark({originalUrl:'https://example.com/reading-secret',privacy:{localOnly:true}});await a.addReading({originalUrl:book.originalUrl,relatedBookmarkId:book.id,note:'不上传私有待看'});await sync(a);expect(JSON.stringify(sql.prepare('SELECT body FROM shared_entities').all())).not.toContain('不上传私有待看');
+  const shared=await b.createBookmark({originalUrl:book.originalUrl});await b.addReading({originalUrl:shared.originalUrl,relatedBookmarkId:shared.id,title:'云端待看'});await sync(b);await sync(a);
+  expect((await a.readTwoWay(address)).readingItems[0]?.note).toBe('不上传私有待看');expect((await b.snapshot()).pendingReading[0]?.title).toBe('云端待看');
+});
+it('拉取后不同本机编号的待看删除再加入，公开编号保持稳定以关联手机回执',async()=>{
+  const item=await a.addReading({originalUrl:'https://example.com/re-add'});await sync(a);await sync(b);const first=(await client.read(signal(),null)).rows.find(row=>row.data?.kind==='reading')!.data!;
+  await b.removeReadingItems([(await b.snapshot()).pendingReading[0]!.id]);await sync(b);await sync(a);await b.addReading({originalUrl:item.originalUrl,title:'重新加入'});await sync(b);await sync(a);const second=(await client.read(signal(),null)).rows.find(row=>row.data?.kind==='reading')!.data!;
+  expect('publicId' in second && second.publicId).toBe('publicId' in first && first.publicId);
 });

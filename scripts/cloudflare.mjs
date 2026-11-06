@@ -30,7 +30,7 @@ try {
     child.on('error', () => { process.exitCode = 1; }); await new Promise((resolve) => child.on('close', (code) => { process.exitCode = code ?? 1; resolve(); }));
   } else if (command === 'deploy') {
     const result = await deployCloud(root, { run, account: values.account, log: console.log });
-    console.log(`部署并握手检查通过：${result.url}\n两台电脑在「云端与收件箱」填写同一地址及 publisher.txt，先检查再确认同步收藏。手机仅查看用 reader.txt，新增提交用 submitter.txt。没有自动上传收藏。`);
+    console.log(`部署并握手检查通过：${result.url}\n两台电脑在「云端与收件箱」填写同一地址及 publisher.txt，先检查再确认双向同步。手机仅查看用 reader.txt，新增提交用 submitter.txt。没有自动上传收藏。`);
   } else if (command === 'verify') {
     const local = doctorCloud(root), saved = fs.existsSync(files.state) ? JSON.parse(fs.readFileSync(files.state, 'utf8')) : {};
     const url = values.url ?? saved.url; if (!url) throw new Error('请用 --url 提供部署后的 HTTPS 根地址。');

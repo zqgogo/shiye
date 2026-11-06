@@ -1,20 +1,21 @@
 import { AppError, newId, nowIso, canonicalizeUrl } from '@shiye/core';
-import type { Bookmark, Category, Tag } from '@shiye/core';
+import type { Bookmark, Category, Tag, ReadingItem } from '@shiye/core';
 import type { ShiyeDB } from './db.js';
 import type { SharedLocal, SharedPlan, SharedState } from '../../sync/src/two-way-local.js';
 import { type SharedRow, sameData } from '../../sync/src/two-way.js';
+import { writePurgeSnapshot } from './purge.js';
 import { sameIdentity } from '../../sync/src/protocol.js';
 export function createTwoWayRepository(db: ShiyeDB) {
   const key = (address: string) => `cloud-sync:${address}`;
-  const tables = [db.settings, db.meta, db.bookmarks, db.categories, db.tags, db.tombstones];
+  const tables = [db.settings, db.meta, db.bookmarks, db.categories, db.tags, db.tombstones, db.readingItems, db.purgeSnapshots];
   async function read(address: string): Promise<SharedLocal> {
     const localLibraryId = ((await db.settings.get('app'))?.value as { libraryId?: string } | undefined)?.libraryId ?? '';
     if (!localLibraryId) throw new AppError('INVALID_INPUT', '请先初始化本地主库。');
     const stored = ((await db.meta.get(key(address)))?.value as SharedState | undefined) ?? null;
     if (stored && stored.localLibraryId !== localLibraryId) throw new AppError('REVISION_CONFLICT', '此同步连接属于旧主库，请先解除本机同步记录再重新合并。');
-    const bookmarks = (await db.bookmarks.toArray()).sort((a, b) => a.id.localeCompare(b.id)), categories = (await db.categories.toArray()).sort((a, b) => a.id.localeCompare(b.id)), tags = (await db.tags.toArray()).sort((a, b) => a.id.localeCompare(b.id)), tombstones = await db.tombstones.toArray();
-    return { localLibraryId, bookmarks, categories, tags, tombstones, state: stored,
-      fingerprint: JSON.stringify([localLibraryId, bookmarks, categories, tags, tombstones, stored?.stamp ?? null]) };
+    const bookmarks = (await db.bookmarks.toArray()).sort((a, b) => a.id.localeCompare(b.id)), categories = (await db.categories.toArray()).sort((a, b) => a.id.localeCompare(b.id)), tags = (await db.tags.toArray()).sort((a, b) => a.id.localeCompare(b.id)), tombstones = await db.tombstones.toArray(), readingItems=(await db.readingItems.toArray()).sort((a,b)=>a.id.localeCompare(b.id));
+    return { localLibraryId, bookmarks, readingItems, categories, tags, tombstones, state: stored,
+      fingerprint: JSON.stringify([localLibraryId, bookmarks, categories, tags, tombstones, readingItems, stored?.stamp ?? null]) };
   }
   return {
     async read(address: string) { return db.transaction('r', tables, () => read(address)); },
@@ -25,8 +26,9 @@ export function createTwoWayRepository(db: ShiyeDB) {
       if (libraryId !== plan.local.localLibraryId || stamp !== (plan.local.state?.stamp ?? null)) throw new AppError('REVISION_CONFLICT', '主库或同步基线变化，请重新检查。');
       const oldBooks = new Map(plan.local.bookmarks.map((row) => [row.id, row])), oldCategories = new Map(plan.local.categories.map((row) => [row.id, row])), oldTags = new Map(plan.local.tags.map((row) => [row.id, row]));
       for (const id of keys) { const localId = plan.maps[id]; if (!localId) continue;
-        const table = id.startsWith('b:') ? db.bookmarks : id.startsWith('c:') ? db.categories : db.tags;
-        const previous = id.startsWith('b:') ? oldBooks.get(localId) : id.startsWith('c:') ? oldCategories.get(localId) : oldTags.get(localId);
+        const table = id.startsWith('r:') ? db.readingItems : id.startsWith('b:') ? db.bookmarks : id.startsWith('c:') ? db.categories : db.tags;
+        const previous = id.startsWith('r:') ? plan.local.readingItems.find(row=>row.id===localId) : id.startsWith('b:') ? oldBooks.get(localId) : id.startsWith('c:') ? oldCategories.get(localId) : oldTags.get(localId);
+        if(id.startsWith('r:')) {const reading=plan.local.readingItems.find(row=>row.id===localId);if(reading?.relatedBookmarkId && !sameData(await db.bookmarks.get(reading.relatedBookmarkId),oldBooks.get(reading.relatedBookmarkId)))throw new AppError('REVISION_CONFLICT','待看关联收藏的隐私或内容变化，请重新检查。');}
         if (!sameData(await table.get(localId), previous)) throw new AppError('REVISION_CONFLICT', '待发送记录已修改或转为本地专用，请重新检查。');
       }
     }); },
@@ -59,6 +61,22 @@ export function createTwoWayRepository(db: ShiyeDB) {
             delete next.acceptedAnalysis; await db.bookmarks.put(next); await db.meta.put({ key: `revfloor:bookmark:${id}`, value: version }); await db.tombstones.delete(['bookmark', id]);
           }
         }
+        for(const row of active)if(row.data?.kind==='reading') {
+          const data=row.data,id=maps[row.key]!,old=await db.readingItems.get(id),checked=canonicalizeUrl(data.url);
+          const relatedBookmarkId=data.related ? maps[data.related] ?? null : null;
+          const values={originalUrl:checked.originalUrl,canonicalUrl:checked.canonicalUrl,title:data.title,note:data.note,status:data.status,addedAt:data.addedAt,completedAt:data.completedAt,relatedBookmarkId};
+          const previous=old ? Object.fromEntries(Object.keys(values).map(field=>[field,old[field as keyof ReadingItem]])) : null;
+          if(!old || !sameData(previous,values)) {
+            const floor=(await db.meta.get(`revfloor:reading:${id}`))?.value,version=Math.max(old?.localRevision ?? 0,typeof floor==='number'?floor:0)+1;
+            await db.readingItems.put({...old,...values,id,revision:Math.max(old?.revision ?? 0,version-1)+1,localRevision:version,changeVersion:row.version,sources:old?.sources ?? [{sourceType:'manual',capturedAt:now}]});
+            await db.meta.put({key:`revfloor:reading:${id}`,value:version});
+          }
+        }
+        const removedReading:ReadingItem[]=[];
+        for(const row of remote)if(!row.data && row.key.startsWith('r:') && !excluded.has(row.key)) {
+          const id=maps[row.key];if(!id)continue;const old=await db.readingItems.get(id);const related=old?.relatedBookmarkId ? await db.bookmarks.get(old.relatedBookmarkId) : undefined;if(old && !related?.privacy.localOnly && !related?.deletedAt)removedReading.push(old);
+        }
+        if(removedReading.length) {await writePurgeSnapshot(db,{entry:'selection',scopeLabel:'同步移除的待看',readingItems:removedReading});await db.readingItems.bulkDelete(removedReading.map(row=>row.id));}
         const categoryIndex = new Map(local.categories.map((row) => [row.id, row]));
         const liveMappings = new Set(active.map((row) => `${row.key[0]}:${maps[row.key]}`));
         const depth = (id: string, seen = new Set<string>()): number => { const row = categoryIndex.get(id); if (!row?.parentId || seen.has(id)) return 0; seen.add(id); return 1 + depth(row.parentId, seen); };
@@ -66,6 +84,7 @@ export function createTwoWayRepository(db: ShiyeDB) {
         for (const row of [...remote].sort((a, b) => priority(a) - priority(b))) if (!row.data && !excluded.has(row.key)) {
           const id = maps[row.key]; if (!id) continue;
           if (liveMappings.has(`${row.key[0]}:${id}`)) continue;
+          if(row.key.startsWith('r:')) continue;
           if (row.key.startsWith('b:')) {
             const old = await db.bookmarks.get(id); if (!old || old.deletedAt || old.privacy.localOnly) continue;
             const revision = old.localRevision + 1; await db.bookmarks.put({ ...old, deletedAt: now, lifeState: 'deleted', revision: old.revision + 1, localRevision: revision, changeVersion: row.version, updatedAt: now });
@@ -75,7 +94,8 @@ export function createTwoWayRepository(db: ShiyeDB) {
             if (!await db.bookmarks.where('categoryKey').equals(id).filter((book) => !book.deletedAt).count() && !await db.categories.where('parentId').equals(id).count()) await db.categories.delete(id);
           } else if (!await db.bookmarks.where('tagIds').equals(id).filter((book) => !book.deletedAt).count()) await db.tags.delete(id);
         }
-        const state: SharedState = { localLibraryId: local.localLibraryId, identity: { serverId: plan.info.serverId, libraryId: plan.info.libraryId, epoch: plan.info.epoch }, revision, baseline: remote, maps, excluded: plan.excluded, stamp: newId(), deviceId: plan.deviceId };
+        const publicIds={...local.state?.publicIds};for(const row of remote)if(row.data?.kind==='reading')publicIds[row.key]=row.data.publicId;
+        const state: SharedState = { publicIds, localLibraryId: local.localLibraryId, identity: { serverId: plan.info.serverId, libraryId: plan.info.libraryId, epoch: plan.info.epoch }, revision, baseline: remote, maps, excluded: plan.excluded, stamp: newId(), deviceId: plan.deviceId };
         await db.meta.put({ key: key(plan.address), value: state });
       });
     },

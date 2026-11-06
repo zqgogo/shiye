@@ -136,8 +136,8 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     if (path === '/v1/capabilities' && request.method === 'GET') {
       await authenticate(request, env);
       const token = /^Bearer ([^\s]{24,256})$/.exec(request.headers.get('Authorization') ?? '')?.[1] ?? /(?:^|;\s*)__Host-shiye_reader=([^;]+)/.exec(request.headers.get('Cookie') ?? '')?.[1];
-      const shared = await db.prepare('SELECT enabled FROM shared_state WHERE singleton=1').first<{ enabled: number }>();
-      return json({ syncEnabled: Boolean(shared?.enabled), canSubmit: Boolean(token && /^[a-f0-9]{64}$/.test(env.SUBMIT_TOKEN_SHA256 ?? '') && constantEqual(await digest(token), env.SUBMIT_TOKEN_SHA256!)) });
+      const shared = await db.prepare('SELECT enabled,reading_enabled FROM shared_state WHERE singleton=1').first<{ enabled: number; reading_enabled:number }>();
+      return json({ syncEnabled: Boolean(shared?.enabled), readingSyncEnabled:Boolean(shared?.reading_enabled), canSubmit: Boolean(token && /^[a-f0-9]{64}$/.test(env.SUBMIT_TOKEN_SHA256 ?? '') && constantEqual(await digest(token), env.SUBMIT_TOKEN_SHA256!)) });
     }
     if (path.startsWith('/v1/inbox')) return await inboxRequest(request, env, path);
     await authenticate(request, env, write);
@@ -233,9 +233,9 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       const gen = await generation(db, id); const chunk = await db.prepare(`SELECT body FROM mirror_chunks WHERE generation_id=? AND part=?
         AND generation_id=(SELECT active_generation FROM mirror_library WHERE singleton=1)`).bind(id, index).first<{ body: string }>();
       if (!chunk) fail(409, '镜像分片不存在或版本已变化。');
-      const shared = await db.prepare('SELECT enabled FROM shared_state WHERE singleton=1').first<{ enabled: number }>();
+      const shared = await db.prepare('SELECT enabled,reading_enabled FROM shared_state WHERE singleton=1').first<{ enabled: number; reading_enabled:number }>();
       const records = JSON.parse(chunk.body) as MirrorRecord[];
-      return json({ generationId: id, index, chunkCount: gen.chunk_count, records: shared?.enabled ? records.filter((row) => row.kind === 'reading') : records });
+      return json({ generationId: id, index, chunkCount: gen.chunk_count, records: shared?.enabled ? records.filter((row) => row.kind === 'reading' && !shared.reading_enabled) : records });
     }
     if (path === '/v1/mirror' && request.method === 'DELETE') {
       const input = ClearMirrorSchema.parse(await body(request)); const lib = await library(db); guard(lib, input.identity);

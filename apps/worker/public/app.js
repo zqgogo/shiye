@@ -17,14 +17,14 @@ async function api(path, options = {}) {
     return await response.json();
   } finally { clearTimeout(timer); }
 }
-function reset() { localSelected.clear(); $('local-batch-status').textContent=''; directoryParent=''; directoryPage=1; browseScroll=0; $('directory-use').textContent='查看本级收藏'; $('directory-count').textContent=''; $('directory-panel').hidden=true; $('directory-rows').replaceChildren(); $('directory-path').replaceChildren(); $('directory-search').value=''; $('folder-rows').replaceChildren(); $('browse-path').replaceChildren(); $('cache-status').textContent=''; $('retry-load').hidden = true; cloudInfo = null; canSubmit = false; $('local-results').replaceChildren(); $('capture-form').reset(); records = []; paths.clear(); categoryNodes.clear(); categoryCounts.clear(); if ($('category-dialog').open) $('category-dialog').close(); $('category-choices').replaceChildren(); $('category-breadcrumbs').replaceChildren(); $('category-current').textContent = ''; $('category-search').value = ''; $('category').replaceChildren(new Option('全部分类',''),new Option('未分类','__uncategorized__')); $('capture-category').replaceChildren(new Option('未分类','')); $('query').value=''; $('site-filter').value=''; $('scope').value='all'; $('include-descendants').checked=true; $('result-sort').value='original'; syncCategoryButtons(); $('results').replaceChildren(); $('library').hidden = true; $('logout').hidden = true; $('login').hidden = false; }
+function reset() { localSelected.clear(); $('local-batch-status').textContent=''; directoryParent=''; directoryPage=1; browseScroll=0; $('directory-use').textContent='查看本级收藏'; $('directory-count').textContent=''; $('directory-panel').hidden=true; $('directory-rows').replaceChildren(); $('directory-path').replaceChildren(); $('directory-search').value=''; $('folder-rows').replaceChildren(); $('browse-path').replaceChildren(); $('cache-status').textContent=''; $('retry-load').hidden = true; cloudInfo = null; canSubmit = false; $('local-results').replaceChildren(); $('capture-form').reset(); records = []; paths.clear(); categoryNodes.clear(); categoryCounts.clear(); if ($('category-dialog').open) $('category-dialog').close(); $('category-choices').replaceChildren(); $('category-breadcrumbs').replaceChildren(); $('category-current').textContent = ''; $('category-search').value = ''; $('category').replaceChildren(new Option('全部分类',''),new Option('未分类','__uncategorized__')); $('capture-category').replaceChildren(new Option('未分类','')); $('query').value=''; $('site-filter').value=''; $('scope').value='all'; $('include-descendants').checked=true; $('result-sort').value='original';$('reading-state').value='pending'; syncCategoryButtons(); $('results').replaceChildren(); $('library').hidden = true; $('logout').hidden = true; $('login').hidden = false; }
 function render() {
   const term = $('query').value.trim().toLowerCase(), scope = $('scope').value, category = $('category').value;
   const site = $('site-filter').value.trim().toLowerCase();
   syncCategoryButtons();
   renderExplorer();
   const visible = records.filter((row) => row.kind === (scope === 'reading' ? 'reading' : 'bookmark') &&
-    (scope !== 'pinned' || row.pinned) && (!category || (category === '__uncategorized__' ? !row.categoryId : row.categoryId === category || ($('include-descendants').checked && withinCategory(row.categoryId, category)))) &&
+    (scope !== 'pinned' || row.pinned) && (scope!=='reading' || $('reading-state').value==='all' || (row.status || 'pending')===$('reading-state').value) && (!category || (category === '__uncategorized__' ? !row.categoryId : row.categoryId === category || ($('include-descendants').checked && withinCategory(row.categoryId, category)))) &&
     (!term || `${row.title} ${row.url} ${paths.get(row.categoryId) || ''}`.toLowerCase().includes(term)) && (!site || new URL(row.url).hostname.toLowerCase().includes(site)));
   const sorting = $('result-sort').value; if (sorting !== 'original') visible.sort((a,b) => (sorting === 'site' ? new URL(a.url).hostname.localeCompare(new URL(b.url).hostname) : a.title.localeCompare(b.title, 'zh-CN')) || a.id.localeCompare(b.id));
   const pages = Math.max(1, Math.ceil(visible.length / 50)); page = Math.min(pages, Math.max(1, page));
@@ -34,7 +34,7 @@ function render() {
     const url = new URL(row.url); if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) continue;
     const link = document.createElement('a'); link.className = 'link'; link.href = url.href; link.target = '_blank'; link.rel = 'noreferrer noopener';
     const title = document.createElement('strong'); title.textContent = `${row.pinned ? '★ ' : ''}${row.title} ↗`;
-    const subtitle = document.createElement('small'); subtitle.textContent = `${url.hostname} · ${row.kind === 'reading' ? '待看' : paths.get(row.categoryId) || '未分类'}`;
+    const subtitle = document.createElement('small'); subtitle.textContent = `${url.hostname} · ${row.kind === 'reading' ? (row.status==='completed'?'已完成':'待看') : paths.get(row.categoryId) || '未分类'}`;
     link.append(title, subtitle); $('results').append(link);
   }
   if (!visible.length) { const empty = document.createElement('p'); empty.className = 'empty-results'; empty.textContent = '没有符合当前条件的记录。可调整关键词、分类或网站，或点击“清除筛选”。'; $('results').append(empty); }
@@ -43,7 +43,7 @@ function withinCategory(id, parent) {
   const seen = new Set(); while (id && !seen.has(id)) { if (id === parent) return true; seen.add(id); id = categoryNodes.get(id)?.parentId; } return false;
 }
 function syncCategoryButtons() {
-  const reading = $('scope').value === 'reading';
+  const reading = $('scope').value === 'reading'; $('reading-state-control').hidden=!reading;
   $('choose-category').disabled = reading; $('include-descendants').disabled = reading;
   const value = $('category').value;
   $('choose-category').querySelector('span').textContent = reading ? '待看不按分类筛选' : value === '__uncategorized__' ? '未分类' : paths.get(value) || '全部分类';
@@ -100,7 +100,7 @@ $('category-all').addEventListener('click',()=>chooseCategory(''));
 $('category-uncategorized').addEventListener('click',()=>chooseCategory(pickerTarget==='category' ? '__uncategorized__' : ''));
 $('category-use-current').addEventListener('click',()=>chooseCategory(pickerParent));
 $('category-dialog').addEventListener('click',event=>{if(event.target===$('category-dialog')) { const rect=event.target.getBoundingClientRect(); if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom) event.target.close(); }});
-$('reset-filters').addEventListener('click',()=>{ $('query').value='';$('site-filter').value='';$('category').value='';$('scope').value='all';$('include-descendants').checked=true;$('result-sort').value='original';page=1;render(); });
+$('reset-filters').addEventListener('click',()=>{ $('query').value='';$('site-filter').value='';$('category').value='';$('scope').value='all';$('include-descendants').checked=true;$('result-sort').value='original';$('reading-state').value='pending';page=1;render(); });
 // Folder browsing is a page, so long hierarchies never squeeze the record list.
 function childrenOf(parent) {
   return [...categoryNodes.values()].filter(row => (row.parentId || '') === parent).sort((a,b)=>a.name.localeCompare(b.name,'zh-CN') || a.id.localeCompare(b.id));
@@ -188,7 +188,7 @@ function cacheInterval() { try { const value = localStorage.getItem('shiye:mobil
 $('cache-interval').value = String(cacheInterval());
 $('cache-interval').addEventListener('change',()=>{ try { localStorage.setItem('shiye:mobile-cache-hours', $('cache-interval').value); status('更新间隔已保存；点击“同步最新”可立即更新。'); } catch { status('未能保存更新间隔。'); } });
 function validCache(cache, info, capabilities) {
-  return cache?.schema === 1 && Array.isArray(cache.records) && cache.records.length <= 50000 && typeof cache.fetchedAt === 'number' && cache.fetchedAt <= Date.now() && cache.fetchedAt > 0 && cache.info?.serverId === info.serverId && cache.info?.libraryId === info.libraryId && cache.info?.epoch === info.epoch && cache.syncEnabled === capabilities.syncEnabled && cache.records.every(row=>{ if(!row || typeof row.id!=='string') return false; if(row.kind==='category'||row.kind==='tag') return typeof row.name==='string'; if(!['bookmark','reading'].includes(row.kind)||typeof row.title!=='string'||typeof row.url!=='string') return false; try { const url=new URL(row.url); return ['http:','https:'].includes(url.protocol)&&!url.username&&!url.password; } catch { return false; } });
+  return cache?.schema === 1 && Array.isArray(cache.records) && cache.records.length <= 50000 && typeof cache.fetchedAt === 'number' && cache.fetchedAt <= Date.now() && cache.fetchedAt > 0 && cache.info?.serverId === info.serverId && cache.info?.libraryId === info.libraryId && cache.info?.epoch === info.epoch && cache.syncEnabled === capabilities.syncEnabled && cache.readingSyncEnabled === capabilities.readingSyncEnabled && cache.records.every(row=>{ if(!row || typeof row.id!=='string') return false; if(row.kind==='category'||row.kind==='tag') return typeof row.name==='string'; if(!['bookmark','reading'].includes(row.kind)||typeof row.title!=='string'||typeof row.url!=='string') return false; try { const url=new URL(row.url); return ['http:','https:'].includes(url.protocol)&&!url.username&&!url.password; } catch { return false; } });
 }
 async function load(force = false) {
   retryForce = force;
@@ -203,7 +203,7 @@ async function load(force = false) {
     const all = useCached ? cached.records : [];
     canSubmit = capabilities.canSubmit;
     let sharedInfo = useCached ? cached.sharedInfo : null;
-    if (!useCached && info.activeGeneration) {
+    if (!useCached && info.activeGeneration && !capabilities.readingSyncEnabled) {
       let count = 1;
       for (let index = 0; index < count; index++) {
         const part = await api(`/v1/mirror?generation=${encodeURIComponent(info.activeGeneration)}&part=${index}`);
@@ -219,18 +219,18 @@ async function load(force = false) {
       do {
         const part = await api(`/v2/public?${revision === null ? '' : `revision=${revision}&`}${cursor ? `cursor=${encodeURIComponent(cursor)}` : ''}`);
         if (version !== operation) return;
-        if (!Array.isArray(part.rows) || part.rows.length > 50 || (revision !== null && part.info.revision !== revision) || part.info.serverId !== info.serverId || part.info.libraryId !== info.libraryId || part.info.epoch !== info.epoch) throw new Error('共享收藏版本变化，请重新载入。');
+        if (Boolean(part.info.readingEnabled)!==Boolean(capabilities.readingSyncEnabled) || !Array.isArray(part.rows) || part.rows.length > 50 || (revision !== null && part.info.revision !== revision) || part.info.serverId !== info.serverId || part.info.libraryId !== info.libraryId || part.info.epoch !== info.epoch) throw new Error('共享收藏版本变化，请重新载入。');
         revision = part.info.revision; sharedInfo = part.info;
         for (const row of part.rows) if (row.data) shared.push(row.data);
         if (part.next && (part.next === cursor || !part.rows.length)) throw new Error('共享收藏分页异常。'); cursor = part.next;
         if (shared.length > 50000) throw new Error('共享收藏超过容量。');
       } while (cursor);
       const after = await api(`/v2/public?revision=${revision}`); if (after.info.revision !== revision) throw new Error('共享收藏版本变化，请重新载入。');
-      const readings = all.filter((row) => row.kind === 'reading'); all.splice(0, all.length, ...shared, ...readings);
+      const readings = capabilities.readingSyncEnabled ? [] : all.filter((row) => row.kind === 'reading'); all.splice(0, all.length, ...shared, ...readings);
     }
     if (version !== operation) return;
     const fetchedAt = useCached ? cached.fetchedAt : Date.now(); let saved = Boolean(useCached);
-    if (!useCached) { try { await cacheDatabase('write', { schema:1, fetchedAt, info, sharedInfo, syncEnabled:capabilities.syncEnabled, records:all }, () => version === operation); saved = true; } catch { /* Reading still works when cache storage is full. */ } }
+    if (!useCached) { try { await cacheDatabase('write', { schema:1, fetchedAt, info, sharedInfo, syncEnabled:capabilities.syncEnabled, readingSyncEnabled:capabilities.readingSyncEnabled, records:all }, () => version === operation); saved = true; } catch { /* Reading still works when cache storage is full. */ } }
     if (version !== operation) return;
     cloudInfo = info;
     $('cache-status').textContent = `${useCached ? '本机缓存' : '刚同步最新'} · ${new Date(fetchedAt).toLocaleString()} 更新${!saved ? ' · 缓存未保存，下次需重新下载' : interval === 0 ? ' · 仅手动更新' : ` · ${interval} 小时内不重复下载`}`;
@@ -244,7 +244,7 @@ async function load(force = false) {
     $('category').value = previousCategory === '__uncategorized__' || paths.has(previousCategory) ? previousCategory : ''; $('capture-category').value = paths.has(previousCapture) ? previousCapture : ''; syncCategoryButtons();
     $('capture-tags').replaceChildren(); for (const tag of records.filter((row) => row.kind === 'tag')) $('capture-tags').append(new Option(tag.name, tag.id));
     $('submit-access').textContent = canSubmit ? '当前凭据可提交。先保存在本机，再手动发送给总机。' : '当前凭据只读，仍可保存本机草稿；要发送请退出后使用 submitter.txt 登录。';
-    $('published').textContent = sharedInfo ? `共享收藏 · 同步版本 ${sharedInfo.revision}；待看来自单独镜像` : (useCached ? cached.info : info).publishedAt ? `镜像版本 ${(useCached ? cached.info : info).revision}` : '还没有发布镜像，请回电脑端发布。';
+    $('published').textContent = sharedInfo ? `共享收藏 · 同步版本 ${sharedInfo.revision}${sharedInfo.readingEnabled ? '；收藏与待看已统一' : '；待看来自旧版镜像'}` : (useCached ? cached.info : info).publishedAt ? `镜像版本 ${(useCached ? cached.info : info).revision}` : '还没有发布镜像，请回电脑端发布。';
     $('login').hidden = true; $('logout').hidden = false; $('library').hidden = false; page = 1; render(); reconcileLocal(); renderLocal(); status('');
   } catch (error) { if (version !== operation) return; if (error.status === 401) { try { await cacheDatabase('clear'); } catch {} if (version !== operation) return; reset(); status('需要登录或凭据已失效，请重新登录。'); } else { $('library').hidden = !cloudInfo; $('login').hidden = true; $('retry-load').hidden = false; status(`连接未完成，未清除登录；请恢复网络后重试。${error.message}`); } }
 }
@@ -255,7 +255,7 @@ $('login').addEventListener('submit', async (event) => {
 });
 $('retry-load').addEventListener('click', () => void load(retryForce));
 $('logout').addEventListener('click', async () => { ++operation; reset(); try { const cleared = await cacheDatabase('clear').then(()=>true,()=>false); await api('/v1/session', { method: 'DELETE' }); status(cleared ? '已退出。' : '已退出，但本机缓存未能清除，此设备可能仍保留缓存内容。'); } catch (error) { status(`本页已清除；服务端退出失败，请关闭此页或清除站点数据。${error.message}`); } });
-for (const id of ['query', 'scope', 'category', 'include-descendants', 'site-filter', 'result-sort']) $(id).addEventListener('input', () => { page = 1; if (id === 'scope' && $('scope').value === 'reading') $('category').value = ''; render(); });
+for (const id of ['query', 'scope', 'category', 'include-descendants', 'site-filter', 'result-sort', 'reading-state']) $(id).addEventListener('input', () => { page = 1; if (id === 'scope' && $('scope').value === 'reading') $('category').value = ''; render(); });
 $('previous').addEventListener('click', () => { page--; render(); }); $('next').addEventListener('click', () => { page++; render(); }); $('reload').addEventListener('click', () => void load(true));
 window.addEventListener('pagehide', () => { ++operation; reset(); }); window.addEventListener('pageshow', (event) => { if (event.persisted) load(); });
 function localPrefix() { if (!cloudInfo) throw new Error('请先连接收藏库。'); return `shiye:outbox:${JSON.stringify([cloudInfo.serverId, cloudInfo.libraryId, cloudInfo.epoch])}:`; }

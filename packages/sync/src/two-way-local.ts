@@ -1,10 +1,10 @@
-import type { Bookmark, Category, Tag, Tombstone } from '@shiye/core';
+import type { Bookmark, Category, Tag, Tombstone, ReadingItem } from '@shiye/core';
 import { canonicalizeUrl, newId } from '@shiye/core';
 import { digest } from './protocol.js';
 import { mirrorBase } from './client.js';
 import { SharedDataSchema, mergeShared, type SharedData, type SharedRow, type SharedInfo } from './two-way.js';
-export interface SharedState { localLibraryId: string; identity: { serverId: string; libraryId: string; epoch: string }; revision: number; baseline: SharedRow[]; maps: Record<string, string>; excluded: string[]; stamp: string; deviceId: string; }
-export interface SharedLocal { localLibraryId: string; bookmarks: Bookmark[]; categories: Category[]; tags: Tag[]; tombstones: Tombstone[]; state: SharedState | null; fingerprint: string; }
+export interface SharedState { publicIds?:Record<string,string>; localLibraryId: string; identity: { serverId: string; libraryId: string; epoch: string }; revision: number; baseline: SharedRow[]; maps: Record<string, string>; excluded: string[]; stamp: string; deviceId: string; }
+export interface SharedLocal { localLibraryId: string; bookmarks: Bookmark[]; readingItems:ReadingItem[]; categories: Category[]; tags: Tag[]; tombstones: Tombstone[]; state: SharedState | null; fingerprint: string; }
 export interface SharedPlan { deviceId: string; address: string; local: SharedLocal; remote: SharedRow[]; info: SharedInfo; maps: Record<string, string>; excluded: string[]; projection: [string, SharedData | null][]; choices: Record<string, 'local' | 'remote'>; }
 export async function prepareSharedPlan(address: string, local: SharedLocal, remote: SharedRow[], info: SharedInfo): Promise<SharedPlan> {
   address = mirrorBase(address).href;
@@ -46,6 +46,25 @@ export async function prepareSharedPlan(address: string, local: SharedLocal, rem
     projection.set(key, SharedDataSchema.parse({ kind: 'bookmark', publicId: known?.kind === 'bookmark' ? known.publicId : row.id,
       url: canonicalizeUrl(row.originalUrl).originalUrl, title: row.title, sourceDescription: row.sourceDescription, note: row.note, selectedText: row.selectedText, aiPurpose: row.aiPurpose,
       category: categoryKey(row.categoryId), tags: row.tagIds.map(tagKey).filter((id): id is string => Boolean(id)).sort(), pinned: row.pinned, unread: row.inboxUnread, aiBlocked: row.privacy.aiBlocked, lockedFields: [...row.lockedFields].sort(), order: row.sortOrder ?? 0 }));
+  }
+  // Reading identity follows canonical URL independently of bookmark identity.
+  const hiddenBookmarks=new Set<string>();
+  for(const row of local.bookmarks)if(row.privacy.localOnly || row.deletedAt)hiddenBookmarks.add(`b:${await digest(row.canonicalUrl)}`);
+  const localBooks=new Map(local.bookmarks.map(row=>[row.id,row]));
+  const localReading=new Map(local.readingItems.map(row=>[row.canonicalUrl,row]));
+  for(const row of remote)if(row.data?.kind==='reading') {
+    const existing=localReading.get(canonicalizeUrl(row.data.url).canonicalUrl);if(existing)maps[row.key]=existing.id;
+    if(row.data.related && hiddenBookmarks.has(row.data.related)) { if(base.get(row.key)?.data && !previous?.excluded.includes(row.key)) projection.set(row.key,null);else excluded.add(row.key); }
+  }
+  for(const row of local.readingItems) {
+    const key=`r:${await digest(row.canonicalUrl)}`, book=row.relatedBookmarkId ? localBooks.get(row.relatedBookmarkId) : undefined;
+    const related=book ? `b:${await digest(book.canonicalUrl)}` : null;
+    if((related && hiddenBookmarks.has(related)) || excluded.has(key)) {
+      if(previous?.excluded.includes(key) || !base.get(key)?.data) {excluded.add(key);continue;}
+      maps[key]=row.id;projection.set(key,null);continue;
+    }
+    maps[key]=row.id;const known=cloud.get(key)?.data ?? base.get(key)?.data;
+    projection.set(key,SharedDataSchema.parse({kind:'reading',publicId:known?.kind==='reading'?known.publicId:previous?.publicIds?.[key] ?? row.id,url:canonicalizeUrl(row.originalUrl).originalUrl,title:row.title,note:row.note,status:row.status,addedAt:row.addedAt,completedAt:row.completedAt,related}));
   }
   for (const row of local.tombstones) if (row.entityType === 'bookmark' && row.canonicalUrl && row.privacyScope !== 'local') {
     const key = `b:${await digest(row.canonicalUrl)}`; if (!projection.has(key) && !excluded.has(key)) projection.set(key, null);

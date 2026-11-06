@@ -120,7 +120,7 @@ export function CloudPage() {
     });
   };
   const clear = () => {
-    if (!info || !window.confirm('清空旧版镜像及未完成上传？本机收藏和双机共享收藏保留；手机待看镜像会清空。')) return;
+    if (!info || !window.confirm('清空旧版镜像及未完成上传？本机数据及新版共享收藏与待看保留；只清空兼容旧版的镜像。')) return;
     void execute(async (signal, current) => {
       const next = await client().clear(info, signal);
       if (publication) await service.removeCloudPublication(publication.snapshot.id, true).catch(() => undefined);
@@ -142,7 +142,7 @@ export function CloudPage() {
     <div className="panel"><h2>连接自有后端</h2>
       <ConnectionCard name="Cloudflare 连接状态" status={connecting ? '正在验证连接与权限' : cloudStatus.label} tone={connecting ? 'pending' : cloudStatus.tone} actions={<button className="btn small" onClick={() => setEditorOpen(true)}>修改地址或凭据</button>}>
         <p>{address ? safeHost(address) : '尚未填写你的后端地址'}</p><small>{info ? `发布权限与同步协议已验证 · ${cloud.testedAt ? new Date(cloud.testedAt).toLocaleString('zh-CN') : ''}` : cloud.modified ? '修改配置后原连接已失效，重新验证通过后才能同步。' : cloud.rememberToken ? '已在此设备记住凭据；进入本页时自动验证，不自动同步。' : '未记住凭据时，仅当前工作台有效；可在下方开启本机记住。'}</small>
-        {cloud.sharedInfo && <p>共享收藏同步版本 {cloud.sharedInfo.revision} · 待看镜像版本 {info?.revision ?? 0}</p>}
+        {cloud.sharedInfo && <p>共享库同步版本 {cloud.sharedInfo.revision} · {cloud.sharedInfo.readingEnabled ? '收藏与待看已统一' : '首次确认同步后纳入待看'}</p>}
         {cloud.error && <p className="alert">{cloud.error}</p>}
       </ConnectionCard>
       <details className="connection-editor" open={editorOpen} onToggle={(event) => setEditorOpen(event.currentTarget.open)}><summary>连接配置 · 地址与应用凭据</summary>
@@ -155,7 +155,7 @@ export function CloudPage() {
         <button className="btn" onClick={() => { cancel(); cloud.disconnect(); setEditorOpen(true); setMessage('已断开并清除本工作台凭据。地址和发布快照保留，没有自动续传。'); }}>断开并清除凭据</button>
         {busy && <button className="btn" onClick={() => { cancel(); setMessage('已停止等待，快照保留，结果可能未知；重新连接后可核对或续传。没有自动重试。'); }}>取消请求</button>}
       </div>
-      {info && <div className="notice"><span>库 {info.libraryId} · 待看镜像版本 {info.revision}</span><span>{info.publishedAt ? `待看镜像最后发布 ${new Date(info.publishedAt).toLocaleString('zh-CN')}` : '待看镜像尚未发布'}</span><a href={mirrorBase(address).href} target="_blank" rel="noreferrer noopener">打开手机收藏与提交页 ↗</a></div>}
+      {info && <div className="notice"><span>库 {info.libraryId}</span><span>{cloud.sharedInfo?.readingEnabled ? '收藏与待看统一同步；手机点“同步最新”读取。' : '检查并确认同步后，手机即可读取共享收藏与待看。'}</span><a href={mirrorBase(address).href} target="_blank" rel="noreferrer noopener">打开手机收藏与提交页 ↗</a></div>}
       <p role="status">{messageVersion.current === cloud.version.current ? message : ''}</p><p className="micro">{progress}</p>
     </div>
     {info && <TwoWayPanel key={`sync:${JSON.stringify([address, info.serverId, info.libraryId, info.epoch])}`} address={address} token={token} execute={execute} busy={busy} onSynced={cloud.setSharedInfo} />}
@@ -164,7 +164,7 @@ export function CloudPage() {
       <p>请输入原地址和发布凭据并测试连接，再核对或续传。不会把旧快照自动发到新地址，确认分片以服务器实际状态为准。</p>
       <button className="btn" disabled={busy} onClick={() => changeAddress(publication.snapshot.baseUrl)}>填入快照原地址</button>
     </div>}
-    {info && <details className="panel"><summary>待看与旧版镜像（高级）</summary><h2>发布记录镜像</h2><p>双机同步启用后，新版手机收藏直接读取共享库；下面仅维护待看与旧版镜像，不会替换双机共享收藏。</p><p>仅收藏标题、网址、分类、标签、置顶信息及待看标题和网址。排除本地专用、删除项、备注、摘录、AI 材料、Key、暂存和日志。</p>
+    {info && <details className="panel"><summary>旧版只读镜像（兼容）</summary><h2>发布记录镜像</h2><p>双机同步启用后，新版手机收藏与待看直接读取共享库；下面只供旧版兼容，不会替换新版双向同步的数据。</p><p>仅收藏标题、网址、分类、标签、置顶信息及待看标题和网址。排除本地专用、删除项、备注、摘录、AI 材料、Key、暂存和日志。</p>
       <p className="micro">删除或转为本地专用后，需要再次成功发布才能从云端撤回；离线时旧镜像仍然可读。上传前逐片复核，发布前再次检查完整快照。</p>
       <div className="toolbar"><button className="btn" disabled={busy} onClick={() => void prepare()}>准备发布预览</button><button className="btn danger" disabled={busy} onClick={clear}>清空云端镜像</button></div>
       {publication && matches && <><h3>发送预览</h3><p>目标 {publication.snapshot.baseUrl} · 共 {records.length} 项（含必要目录和标签）· {publication.status.totalChunks} 片 · 约 {(publication.snapshot.plan.bytes / 1024).toFixed(1)} KB</p>
@@ -177,6 +177,6 @@ export function CloudPage() {
         </div>
       </>}
     </details>}
-    <div className="panel"><h2>使用方式</h2><p>两台电脑使用同一地址和发布凭据，先检查、再确认同步收藏；首次合并，之后交换变化。手机用 submitter.txt 提交、reader.txt 查看。任意一台电脑接收手机收藏后同步即可进入共享库；待看仍单独发布镜像。提交设备保留临时副本，AI 仍独立直连。</p></div>
+    <div className="panel"><h2>使用方式</h2><p>两台电脑使用同一地址和发布凭据，先检查、再确认双向同步；首次合并，之后交换变化。手机用 submitter.txt 提交、reader.txt 查看。任意一台电脑接收手机收藏或待看后，检查并确认双向同步即可进入共享库。提交设备保留临时副本，AI 仍独立直连。</p></div>
   </>;
 }

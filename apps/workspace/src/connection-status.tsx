@@ -18,7 +18,7 @@ export function ConnectionsOverview({ onlyAi = false }: { onlyAi?: boolean }) {
   const { navigate } = useWorkspace(), { ai, cloud, aiStatus, cloudStatus } = useConnectionStatus();
   return <div className={`connection-overview ${onlyAi ? 'connection-overview-single' : ''}`}>
     {!onlyAi && <ConnectionCard name="Cloudflare" status={cloudStatus.label} tone={cloudStatus.tone} actions={<button className="btn small" onClick={() => navigate('cloud')}>{cloud.info || cloud.savedAddress ? '查看 / 修改云端配置' : '配置云端连接'}</button>}>
-      <p>{cloud.address ? safeHost(cloud.address) : '用于家里与工作电脑同步收藏，以及手机查看和提交。'}</p><small>{cloud.info ? `上次连接验证 ${cloud.testedAt ? new Date(cloud.testedAt).toLocaleTimeString('zh-CN') : ''}；并非持续在线检测。` : cloud.rememberToken ? '凭据已在此设备保存；进入云端页会自动验证，不自动同步。' : '可选择在此设备记住凭据；未开启时刷新需重填。'}</small>
+      <p>{cloud.address ? safeHost(cloud.address) : '用于家里与工作电脑同步收藏与待看，以及手机查看和提交。'}</p><small>{cloud.info ? `上次连接验证 ${cloud.testedAt ? new Date(cloud.testedAt).toLocaleTimeString('zh-CN') : ''}；并非持续在线检测。` : cloud.rememberToken ? '凭据已在此设备保存；进入云端页会自动验证，不自动同步。' : '可选择在此设备记住凭据；未开启时刷新需重填。'}</small>
     </ConnectionCard>}
     <ConnectionCard name="内置 AI" status={aiStatus.label} tone={aiStatus.tone} actions={<button className="btn small" onClick={() => navigate('aiconfig')}>{ai.profile.apiKey || ai.preferencesSaved ? '查看 / 修改 AI 配置' : '配置内置 AI'}</button>}>
       <p>{ai.profile.provider === 'deepseek' ? 'DeepSeek' : '兼容服务'} · {ai.profile.model || '未选择模型'} · {safeHost(ai.profile.baseUrl)}</p><small>{ai.enabled ? ai.jsonTested ? '问答、整理均已通过测试，发送资料仍需确认。' : '问答可用；整理还需通过输出测试。' : 'Key 仅在当前工作台；测试通过后仍需主动开启。'}</small>

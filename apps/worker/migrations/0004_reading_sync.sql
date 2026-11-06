@@ -1,0 +1,1 @@
+ALTER TABLE shared_state ADD COLUMN reading_enabled INTEGER NOT NULL DEFAULT 0;

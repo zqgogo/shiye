@@ -12,7 +12,7 @@ export class TwoWayClient {
     try { while (true) { const item = await reader.read(); if (item.done) break; size += item.value.length; if (size > 1000000) throw new Error('同步响应超过容量。'); chunks.push(item.value); } } finally { await reader.cancel().catch(() => undefined); }
     const all = new Uint8Array(size); let offset = 0; for (const part of chunks) { all.set(part, offset); offset += part.length; } return JSON.parse(new TextDecoder().decode(all));
   }
-  async info(signal: AbortSignal) { return SharedInfoSchema.parse(await this.request('v2/info', signal)); }
+  async info(signal: AbortSignal) { const parsed=SharedInfoSchema.safeParse(await this.request('v2/info', signal)); if(!parsed.success) throw new Error('后端同步协议需要升级，请部署最新版后端，并更新两台电脑的扩展。'); return parsed.data; }
   async read(signal: AbortSignal, state: SharedState | null): Promise<{ info: SharedInfo; rows: SharedRow[] }> {
     const info = await this.info(signal); if (state && (!sameIdentity(state.identity, info) || state.revision > info.revision)) throw new Error('此地址的云库身份或历史变化，请先解除本机连接记录再重新合并。');
     const rows = new Map(state?.baseline.map((row) => [row.key, row]) ?? []), since = state?.revision ?? 0; let cursor: string | null = null;
@@ -30,9 +30,10 @@ export class TwoWayClient {
     const merge = resolveShared(plan); if (merge.conflicts.some((conflict) => !plan.choices[conflict.key])) throw new Error('请先选择冲突记录保留哪一份。');
     const before = await this.info(signal); if (!sameIdentity(before, plan.info) || before.revision !== plan.info.revision) throw new Error('云端已有新同步，请重新检查。');
     let revision = before.revision; const deviceId = plan.deviceId, parts = splitChanges(orderedChanges(plan));
+    if(!before.readingEnabled && !parts.length)parts.push([]);
     for (let index = 0; index < parts.length; index++) {
       await guard(parts[index]!.map((row) => row.key)); if (signal.aborted) throw new Error('已取消同步。');
-      const response = await this.request('v2/changes', signal, { identity: { serverId: before.serverId, libraryId: before.libraryId, epoch: before.epoch }, baseRevision: revision, operationId: newId(), deviceId, changes: parts[index] }) as { revision?: number };
+      const response = await this.request('v2/changes', signal, { protocol:3, readingComplete:index===parts.length-1, identity: { serverId: before.serverId, libraryId: before.libraryId, epoch: before.epoch }, baseRevision: revision, operationId: newId(), deviceId, changes: parts[index] }) as { revision?: number };
       if (response.revision !== revision + 1) throw new Error('同步确认版本不一致，请重新检查。'); revision++; progress(index + 1, parts.length);
     }
     const result = await this.read(signal, null);
