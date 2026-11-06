@@ -89,3 +89,65 @@ html { -webkit-text-size-adjust:100%; text-size-adjust:100%; }
 @media(max-width:350px) { .temporary .actions { flex-direction:column; align-items:stretch; } }
 
 .cache-status { font-size:12px; margin:6px 0 12px; color:#69756c; overflow-wrap:anywhere; }
+
+/* Mobile explorer: records stay close, large directories have their own page. */
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+.browse-search { display:flex; align-items:center; gap:8px; }
+.search-label { flex:1; margin:0; }
+.search-label input { min-height:44px; font-size:16px; }
+#choose-category { display:flex; align-items:center; min-height:44px; gap:8px; flex:none; }
+#choose-category span { display:none; }
+#choose-category b { font-weight:500; }
+#browse-path,#directory-path { justify-content:flex-start; gap:4px; margin:12px 0; min-width:0; overflow:hidden; }
+#browse-path button,#directory-path button { min-height:44px; min-width:0; padding:8px; border:0; background:transparent; max-width:45%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+#browse-path button+button::before,#directory-path button+button::before { content:'› '; color:#8a958b; }
+.browse-controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.browse-controls > label { margin:0; flex:1; min-width:110px; }
+.browse-controls select { min-height:44px; }
+.browse-controls > button { min-height:44px; font-size:13px; }
+.browse-controls .more-filters { display:contents; border:0; }
+.more-filters > summary { min-height:44px; padding:13px 8px; list-style:none; font-size:13px; }
+.more-filters > summary::-webkit-details-marker { display:none; }
+.filter-content { flex-basis:100%; order:5; padding:12px; background:white; border:1px solid #dfe3d8; border-radius:12px; }
+.more-filters:not([open]) .filter-content { display:none; }
+#folder-preview { margin-top:16px; border-top:1px solid #dfe3d8; }
+.folder-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.folder-heading button { background:transparent; border:0; min-height:44px; padding:8px 0; font-size:12px; }
+#toggle-folders { font-weight:600; }
+.folder-row { width:100%; display:flex; align-items:center; gap:12px; text-align:left; padding:12px; background:#fff; border:0; border-bottom:1px solid #e7ebe2; border-radius:0; min-height:64px; }
+.folder-row:first-child { border-radius:12px 12px 0 0; }
+.folder-row:last-child { border-radius:0 0 12px 12px; }
+.folder-icon { display:grid; place-items:center; width:32px; height:32px; background:#edf1e8; color:#59744e; border-radius:8px; font-size:24px; flex:none; }
+.folder-label { flex:1; min-width:0; }
+.folder-label strong { display:block; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.folder-label small { display:block; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:3px; }
+#count { font-size:12px; margin:18px 0 8px; }
+.link { padding:14px; margin:8px 0; }
+.link strong { font-size:15px; line-height:1.5; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.link small { font-size:12px; }
+.directory-heading { display:flex; gap:12px; align-items:center; margin-top:16px; }
+.directory-heading h2 { font-size:20px; margin:0; }
+.directory-heading button { min-height:44px; font-size:13px; }
+.directory-shortcuts { display:flex; gap:6px; flex-wrap:wrap; }
+.directory-shortcuts button { min-height:44px; font-size:12px; }
+#directory-use { background:#345d41; color:white; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#directory-count { font-size:12px; }
+#directory-pagination button { min-height:44px; }
+@media(max-width:550px) {
+  main { padding:16px 14px; }
+  header { gap:10px; }
+  header h1 { font-size:19px; }
+  header p { display:none; }
+  .mark { font-size:20px; padding:8px 12px; }
+  #status:empty { display:none; }
+  #published { font-size:11px; margin:12px 0 0; }
+  #cache-status { font-size:10px; margin:3px 0 10px; }
+  .view-tabs { margin:12px 0 16px; }
+  #browse > p:last-child { font-size:11px; }
+  /* Saving a record also needs a spacious category selector. */
+  #category-dialog { width:100vw; height:100dvh; max-height:100dvh; max-width:100vw; margin:0; border:0; border-radius:0; padding:16px; }
+  #category-choices { max-height:none; }
+  #category-current { max-height:3.2em; overflow:auto; }
+  #category-breadcrumbs { flex-wrap:nowrap; overflow:auto; }
+  #category-breadcrumbs button { flex:none; max-width:65%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+}

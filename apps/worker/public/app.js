@@ -3,6 +3,10 @@ const $ = (id) => document.getElementById(id);
 let records = [], paths = new Map(), page = 1, operation = 0, cloudInfo = null, canSubmit = false, localPage = 1, localBusy = false;
 let categoryNodes = new Map(), categoryCounts = new Map(), pickerTarget = 'category', pickerParent = '', pickerPage = 1;
 let retryForce = false;
+let directoryParent = '', directoryPage = 1, browseScroll = 0;
+let foldersCollapsed = false;
+try { foldersCollapsed = localStorage.getItem('shiye:folders-collapsed') === 'true'; } catch {}
+
 const status = (text) => { $('status').textContent = text; };
 async function api(path, options = {}) {
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30000);
@@ -12,11 +16,12 @@ async function api(path, options = {}) {
     return await response.json();
   } finally { clearTimeout(timer); }
 }
-function reset() { $('cache-status').textContent=''; $('retry-load').hidden = true; cloudInfo = null; canSubmit = false; $('local-results').replaceChildren(); $('capture-form').reset(); records = []; paths.clear(); categoryNodes.clear(); categoryCounts.clear(); if ($('category-dialog').open) $('category-dialog').close(); $('category-choices').replaceChildren(); $('category-breadcrumbs').replaceChildren(); $('category-current').textContent = ''; $('category-search').value = ''; $('category').replaceChildren(new Option('全部分类',''),new Option('未分类','__uncategorized__')); $('capture-category').replaceChildren(new Option('未分类','')); $('query').value=''; $('site-filter').value=''; $('scope').value='all'; $('include-descendants').checked=true; $('result-sort').value='original'; syncCategoryButtons(); $('results').replaceChildren(); $('library').hidden = true; $('logout').hidden = true; $('login').hidden = false; }
+function reset() { directoryParent=''; directoryPage=1; browseScroll=0; $('directory-use').textContent='查看本级收藏'; $('directory-count').textContent=''; $('directory-panel').hidden=true; $('directory-rows').replaceChildren(); $('directory-path').replaceChildren(); $('directory-search').value=''; $('folder-rows').replaceChildren(); $('browse-path').replaceChildren(); $('cache-status').textContent=''; $('retry-load').hidden = true; cloudInfo = null; canSubmit = false; $('local-results').replaceChildren(); $('capture-form').reset(); records = []; paths.clear(); categoryNodes.clear(); categoryCounts.clear(); if ($('category-dialog').open) $('category-dialog').close(); $('category-choices').replaceChildren(); $('category-breadcrumbs').replaceChildren(); $('category-current').textContent = ''; $('category-search').value = ''; $('category').replaceChildren(new Option('全部分类',''),new Option('未分类','__uncategorized__')); $('capture-category').replaceChildren(new Option('未分类','')); $('query').value=''; $('site-filter').value=''; $('scope').value='all'; $('include-descendants').checked=true; $('result-sort').value='original'; syncCategoryButtons(); $('results').replaceChildren(); $('library').hidden = true; $('logout').hidden = true; $('login').hidden = false; }
 function render() {
   const term = $('query').value.trim().toLowerCase(), scope = $('scope').value, category = $('category').value;
   const site = $('site-filter').value.trim().toLowerCase();
   syncCategoryButtons();
+  renderExplorer();
   const visible = records.filter((row) => row.kind === (scope === 'reading' ? 'reading' : 'bookmark') &&
     (scope !== 'pinned' || row.pinned) && (!category || (category === '__uncategorized__' ? !row.categoryId : row.categoryId === category || ($('include-descendants').checked && withinCategory(row.categoryId, category)))) &&
     (!term || `${row.title} ${row.url} ${paths.get(row.categoryId) || ''}`.toLowerCase().includes(term)) && (!site || new URL(row.url).hostname.toLowerCase().includes(site)));
@@ -83,7 +88,7 @@ function renderCategoryPicker() {
   $('category-choice-page').textContent=`${pickerPage} / ${pages}`; $('category-previous').disabled=pickerPage===1; $('category-next').disabled=pickerPage===pages;
   $('category-use-current').textContent=pickerParent ? `选择「${categoryNodes.get(pickerParent)?.name || '当前分类'}」` : pickerTarget==='category' ? '使用全部分类' : '保存为未分类';
 }
-$('choose-category').addEventListener('click',()=>openCategoryPicker('category'));
+$('choose-category').addEventListener('click',openDirectory);
 $('choose-capture-category').addEventListener('click',()=>openCategoryPicker('capture-category'));
 $('capture-category').addEventListener('input',syncCategoryButtons);
 $('category-search').addEventListener('input',()=>{pickerPage=1;renderCategoryPicker();});
@@ -95,6 +100,75 @@ $('category-uncategorized').addEventListener('click',()=>chooseCategory(pickerTa
 $('category-use-current').addEventListener('click',()=>chooseCategory(pickerParent));
 $('category-dialog').addEventListener('click',event=>{if(event.target===$('category-dialog')) { const rect=event.target.getBoundingClientRect(); if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom) event.target.close(); }});
 $('reset-filters').addEventListener('click',()=>{ $('query').value='';$('site-filter').value='';$('category').value='';$('scope').value='all';$('include-descendants').checked=true;$('result-sort').value='original';page=1;render(); });
+// Folder browsing is a page, so long hierarchies never squeeze the record list.
+function childrenOf(parent) {
+  return [...categoryNodes.values()].filter(row => (row.parentId || '') === parent).sort((a,b)=>a.name.localeCompare(b.name,'zh-CN') || a.id.localeCompare(b.id));
+}
+function pathButtons(container, id, navigate) {
+  container.replaceChildren();
+  const chain=[], seen=new Set();
+  while (id && !seen.has(id)) { seen.add(id); const row=categoryNodes.get(id); if(!row) break; chain.unshift(row); id=row.parentId; }
+  const crumb=(value,name)=>{const button=document.createElement('button'); button.type='button'; button.textContent=name; button.onclick=()=>navigate(value); container.append(button);};
+  crumb('', '全部分类');
+  if(chain.length>2) { const more=document.createElement('span'); more.textContent='…'; more.title=chain.slice(0,-2).map(row=>row.name).join(' / '); container.append(more); }
+  for(const row of chain.slice(-2)) crumb(row.id,row.name);
+  container.title=chain.map(row=>row.name).join(' / ');
+}
+function visitCategory(id) {
+  $('category').value=id; page=1; $('directory-panel').hidden=true; $('browse').hidden=false;
+  render(); window.scrollTo(0,0);
+}
+function folderRow(row, navigate, showPath=false) {
+  const button=document.createElement('button'); button.type='button'; button.className='folder-row'; button.dataset.folderId=row.id;
+  const icon=document.createElement('span'); icon.className='folder-icon'; icon.textContent='▱'; icon.setAttribute('aria-hidden','true');
+  const text=document.createElement('span'); text.className='folder-label';
+  const name=document.createElement('strong'); name.textContent=row.name;
+  const detail=document.createElement('small'); detail.textContent=showPath ? paths.get(row.id) : `${categoryCounts.get(row.id)||0} 条收藏 · ${childrenOf(row.id).length} 个子分类`;
+  text.append(name,detail);
+  const arrow=document.createElement('span'); arrow.textContent='›'; arrow.setAttribute('aria-hidden','true');
+  button.append(icon,text,arrow); button.onclick=()=>navigate(row.id); return button;
+}
+function renderExplorer() {
+  const id=$('category').value, reading=$('scope').value==='reading';
+  pathButtons($('browse-path'),id,visitCategory);
+  if(id==='__uncategorized__') { const label=document.createElement('span');label.textContent='未分类';$('browse-path').append(label); }
+  $('browse-path').hidden=reading;
+  const children=id==='__uncategorized__' ? [] : childrenOf(id);
+  // Searching takes priority over folder navigation.
+  $('folder-preview').hidden=reading || !!$('query').value.trim() || !children.length;
+  $('toggle-folders').textContent=`${id ? '子分类' : '分类目录'} · ${children.length} ${foldersCollapsed ? '▸' : '▾'}`;
+  $('toggle-folders').setAttribute('aria-expanded',String(!foldersCollapsed));
+  $('all-folders').textContent=`查看全部 ${children.length} 个 ›`;
+  $('folder-rows').hidden=foldersCollapsed;
+  $('folder-rows').replaceChildren(...children.slice(0,3).map(row=>folderRow(row,visitCategory)));
+}
+function openDirectory() {
+  browseScroll=window.scrollY; directoryParent=categoryNodes.has($('category').value) ? $('category').value : ''; directoryPage=1;
+  $('directory-search').value=''; $('browse').hidden=true; $('directory-panel').hidden=false;
+  renderDirectory(); window.scrollTo(0,0); $('directory-title').focus({preventScroll:true});
+}
+function renderDirectory() {
+  const query=$('directory-search').value.trim().toLowerCase();
+  const rows=query ? [...categoryNodes.values()].filter(row=>(paths.get(row.id)||row.name).toLowerCase().includes(query)).sort((a,b)=>(paths.get(a.id)||'').localeCompare(paths.get(b.id)||'','zh-CN')) : childrenOf(directoryParent);
+  const pages=Math.max(1,Math.ceil(rows.length/20)); directoryPage=Math.min(pages,Math.max(1,directoryPage));
+  const navigate=id=>{directoryParent=id;directoryPage=1;$('directory-search').value='';renderDirectory();window.scrollTo(0,0);};
+  pathButtons($('directory-path'),directoryParent,navigate);
+  $('directory-root').onclick=()=>navigate('');
+  $('directory-use').textContent=directoryParent ? `查看「${categoryNodes.get(directoryParent)?.name || '当前分类'}」收藏` : '查看全部收藏';
+  $('directory-count').textContent=`${query ? '匹配' : '本级'} ${rows.length} 个分类 · 点击目录逐级浏览`;
+  $('directory-rows').replaceChildren(...rows.slice((directoryPage-1)*20,directoryPage*20).map(row=>folderRow(row,navigate,!!query)));
+  if(!rows.length) { const empty=document.createElement('p');empty.className='empty-results';empty.textContent=query ? '没有匹配的分类，试试其他关键词。' : '没有子分类，可以查看本级收藏或返回上级。';$('directory-rows').append(empty); }
+  $('directory-page').textContent=`${directoryPage} / ${pages}`; $('directory-prev').disabled=directoryPage===1;$('directory-next').disabled=directoryPage===pages;
+  $('directory-pagination').hidden=pages===1;
+}
+$('all-folders').addEventListener('click',openDirectory);
+$('toggle-folders').addEventListener('click',()=>{foldersCollapsed=!foldersCollapsed;try{localStorage.setItem('shiye:folders-collapsed',String(foldersCollapsed));}catch{}renderExplorer();});
+$('directory-back').addEventListener('click',()=>{$('directory-panel').hidden=true;$('browse').hidden=false;window.scrollTo(0,browseScroll);});
+$('directory-search').addEventListener('input',()=>{directoryPage=1;renderDirectory();});
+$('directory-prev').addEventListener('click',()=>{directoryPage--;renderDirectory();window.scrollTo(0,0);});
+$('directory-next').addEventListener('click',()=>{directoryPage++;renderDirectory();window.scrollTo(0,0);});
+$('directory-use').addEventListener('click',()=>visitCategory(directoryParent));
+$('directory-uncategorized').addEventListener('click',()=>visitCategory('__uncategorized__'));
 function cacheDatabase(action, value, current = () => true) {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open('shiye-mobile-cache', 1);
@@ -207,6 +281,7 @@ function reconcileLocal() {
   }
 }
 function showView(name) {
+  $('directory-panel').hidden=true;
   for (const [key, panel] of [['library', 'browse'], ['add', 'add-panel'], ['local', 'local-panel']]) { $(panel).hidden = key !== name; $(`show-${key}`).setAttribute('aria-pressed', String(key === name)); }
   if (name === 'local') renderLocal();
 }
