@@ -75,7 +75,10 @@ try {
   check('新增记录使用同一层级选择器', await mobile.$eval('#capture-category',n=>n.value==='web') && await mobile.$eval('#choose-capture-category',n=>n.textContent.includes('技术 / 网页')));
   await mobile.screenshot({path:path.join(directory,'category-capture.png'),fullPage:false});
   check('手机使用独立提交凭据登录，分类展示完整层级和标签', await mobile.$eval('#capture-category', (node) => [...node.options].some((option) => option.text === '技术 / 网页')) && await mobile.$eval('#capture-tags', (node) => node.options[0]?.text === '参考'));
-  await mobile.type('#capture-url', 'https://example.com/from-phone'); await mobile.type('#capture-title', '手机新增收藏'); await mobile.select('#capture-category', 'web'); await mobile.select('#capture-tags', 'reference'); await mobile.type('#capture-note', '随提交传送的笔记'); await mobile.type('#capture-description', '来源介绍'); await mobile.click('#capture-pinned'); await mobile.click('#save-local'); await waitText(mobile, '已保存到本机，尚未发送');
+  await mobile.type('#capture-url', 'https://phone-submissions.personal-bookmarks.example.com/a-long-address-for-mobile-layout?from=phone'); await mobile.type('#capture-title', '手机新增收藏'); await mobile.select('#capture-category', 'web'); await mobile.select('#capture-tags', 'reference'); await mobile.type('#capture-note', '随提交传送的笔记'); await mobile.type('#capture-description', '来源介绍'); await mobile.click('#capture-pinned'); await mobile.click('#save-local'); await waitText(mobile, '已保存到本机，尚未发送');
+  await mobile.evaluate(()=>document.querySelector('.view-tabs').scrollIntoView({block:'start'}));
+  await mobile.screenshot({path:path.join(directory,'outbox-layout.png'),fullPage:false});
+  check('本机临时页说明默认收起，发送操作突出，窄屏无横向溢出', await mobile.$eval('.local-help',n=>!n.open) && await mobile.$eval('.send-primary',n=>n.textContent==='发送给总机'&&n.getBoundingClientRect().height>=44) && await mobile.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   check('普通收藏格式先保存在本机，不自动上传', harness.db.prepare('SELECT COUNT(*) AS n FROM capture_inbox').get().n === 0 && await mobile.$$eval('.temporary', (nodes) => nodes.length) === 1);
   await mobile.reload(); await mobile.waitForSelector('#library:not([hidden])'); await mobile.click('#show-local');
   check('刷新保留临时记录且不自动发送，应用凭据没有进入本机存储', await mobile.$$eval('.temporary', (nodes) => nodes.length) === 1 && harness.db.prepare('SELECT COUNT(*) AS n FROM capture_inbox').get().n === 0 && !await mobile.evaluate((token) => JSON.stringify(localStorage).includes(token), harness.submitter));
@@ -89,13 +92,13 @@ try {
   let data = await snapshot(); check('总机先事务落库再确认，丢回执不丢记录，分类标签备注均保留', data.books.length === 27 && data.reading.length === 1 && data.books.some((row) => row.title === '手机新增收藏' && row.categoryId === 'web' && row.tagIds.includes('reference') && row.note === '随提交传送的笔记' && row.sourceDescription === '来源介绍' && row.pinned));
   await click(master, '接收选中（1）'); await waitText(master, '已接收 1 条');
   data = await snapshot(); check('重试接收不重复创建，确认后云端清除提交正文', data.books.length === 27 && data.reading.length === 1 && harness.db.prepare('SELECT COUNT(*) AS n FROM capture_inbox WHERE payload IS NOT NULL').get().n === 0);
-  await mobile.bringToFront(); await mobile.click('#refresh-local'); await waitText(mobile, '总机已接收，等待发布');
+  await mobile.bringToFront(); await mobile.click('#refresh-local'); await waitText(mobile, '等待发布');
   check('总机接收后手机显示等待发布，正式镜像尚未被改写', harness.db.prepare('SELECT revision FROM mirror_library').get().revision === 1 && await mobile.$$eval('.temporary', (nodes) => nodes.length) === 2);
   await click(master, '准备发布预览'); await waitText(master, '预览已准备'); await click(master, '确认上传并发布镜像'); await waitText(master, '镜像已发布');
-  await mobile.bringToFront(); await mobile.click('#refresh-local'); await waitText(mobile, '这里还没有临时记录'); await mobile.select('#local-filter', 'published'); await waitText(mobile, '已出现在正式发布库');
+  await mobile.bringToFront(); await mobile.click('#refresh-local'); await waitText(mobile, '这里还没有临时记录'); await mobile.select('#local-filter', 'published'); await mobile.waitForSelector('.temporary .status-published');
   check('总机重新发布后按回执编号核对，临时副本标记已发布而非自动删除', await mobile.$$eval('.temporary', (nodes) => nodes.length) === 2);
   await mobile.screenshot({ path: path.join(directory, 'mobile.png'), fullPage: true });
-  await mobile.click('#clear-published'); await waitText(mobile, '这里还没有临时记录');
+  await mobile.click('.local-maintenance > summary'); await mobile.click('#clear-published'); await waitText(mobile, '这里还没有临时记录');
   check('手动清理只删除本机临时副本，正式收藏与待看保持', (await snapshot()).books.length === 27 && (await snapshot()).reading.length === 1 && harness.db.prepare('SELECT active_generation FROM mirror_library').get().active_generation !== null);
   await mobile.evaluate(() => { const prefix = Object.keys(localStorage).find((key) => key.startsWith('shiye:outbox:')); window.savedPrefix = prefix; });
   // Use current cloud identity to create enough synthetic local-only drafts for pagination.

@@ -183,16 +183,25 @@ function renderLocal() {
   const filter = $('local-filter').value, rows = all.filter((row) => filter === 'all' || (filter === 'published' ? row.status === 'published' : row.status !== 'published'));
   const pages = Math.max(1, Math.ceil(rows.length / 50)); localPage = Math.max(1, Math.min(localPage, pages));
   $('local-page').textContent = `${localPage} / ${pages} · ${rows.length} 条`; $('local-prev').disabled = localBusy || localPage === 1; $('local-next').disabled = localBusy || localPage === pages;
+  $('local-summary').textContent = `${all.filter(row=>row.status==='queued').length} 条待发送 · ${all.filter(row=>['pending','received'].includes(row.status)).length} 条处理中 · ${all.filter(row=>row.status==='published').length} 条已发布${canSubmit ? '' : ' · 当前只读登录'}`;
   $('local-results').replaceChildren();
   for (const row of rows.slice((localPage - 1) * 50, localPage * 50)) {
-    const card = document.createElement('article'); card.className = 'temporary'; const title = document.createElement('h3'); title.textContent = row.payload.title || row.payload.url;
-    const detail = document.createElement('p'); detail.textContent = `${row.payload.destination === 'reading' ? '待看' : row.payload.categoryPath || '未分类'} · ${stateLabels[row.status] || row.status}`;
-    const link = document.createElement('a'); link.textContent = row.payload.url; const url = new URL(row.payload.url); if (['http:', 'https:'].includes(url.protocol) && !url.username && !url.password) link.href = url.href; link.target = '_blank'; link.rel = 'noreferrer noopener';
-    const disclosure = document.createElement('details'), summary = document.createElement('summary'), content = document.createElement('pre'); summary.textContent = '查看添加内容'; content.textContent = `标签：${row.payload.tagNames.join('、') || '无'}\n说明：${row.payload.sourceDescription || '无'}\n备注：${row.payload.note || '无'}\n${row.receipt?.message || ''}`; disclosure.append(summary, content);
+    const card = document.createElement('article'); card.className = 'temporary';
+    const url = new URL(row.payload.url);
+    const heading = document.createElement('div'); heading.className = 'temporary-heading';
+    const title = document.createElement('h3'); title.textContent = row.payload.title || url.hostname;
+    const badge = document.createElement('span'); badge.className = `temporary-status status-${row.status}`;
+    badge.textContent = { queued:'待发送', pending:'等待接收', received:'等待发布', rejected:'已退回', cancelled:'已撤回', published:'已发布' }[row.status] || row.status;
+    badge.title = stateLabels[row.status] || row.status; badge.setAttribute('aria-label',badge.title); heading.append(title,badge);
+    const detail = document.createElement('p'); detail.className = 'temporary-category'; detail.textContent = row.payload.destination === 'reading' ? '待看' : `收藏 · ${row.payload.categoryPath || '未分类'}`;
+    const link = document.createElement('a'); link.className = 'temporary-link'; link.textContent = url.hostname + (url.pathname === '/' ? '' : url.pathname); link.title = row.payload.url;
+    if (['http:', 'https:'].includes(url.protocol) && !url.username && !url.password) link.href = url.href; link.target = '_blank'; link.rel = 'noreferrer noopener';
+    const disclosure = document.createElement('details'); disclosure.className = 'temporary-details';
+    const summary = document.createElement('summary'), content = document.createElement('pre'); summary.textContent = '查看完整内容'; content.textContent = `网址：${row.payload.url}\n状态：${stateLabels[row.status] || row.status}\n分类：${row.payload.destination === 'reading' ? '待看' : row.payload.categoryPath || '未分类'}\n标签：${row.payload.tagNames.join('、') || '无'}\n说明：${row.payload.sourceDescription || '无'}\n备注：${row.payload.note || '无'}\n${row.receipt?.message || ''}`; disclosure.append(summary, content);
     const actions = document.createElement('div'); actions.className = 'actions';
-    if (row.status === 'queued') { const send = document.createElement('button'); send.textContent = '发送给总机'; send.disabled = localBusy || !canSubmit; send.onclick = () => void sendLocal(row.id); actions.append(send); }
-    const remove = document.createElement('button'); remove.textContent = '删除本机副本'; remove.disabled = localBusy; remove.onclick = () => { if (!confirm(row.status === 'queued' ? '删除尚未发送的本机临时记录？' : '仅删除此设备的临时副本，不撤销云端提交，不删除正式收藏。继续？')) return; try { localStorage.removeItem(localPrefix() + row.id); renderLocal(); } catch (error) { status(error.message); } }; actions.append(remove);
-    card.append(title, link, detail, disclosure, actions); $('local-results').append(card);
+    if (row.status === 'queued') { const send = document.createElement('button'); send.textContent = '发送给总机'; send.className = 'send-primary'; send.disabled = localBusy || !canSubmit; send.onclick = () => void sendLocal(row.id); actions.append(send); }
+    const remove = document.createElement('button'); remove.textContent = '删除本机副本'; remove.className = 'remove-local'; remove.disabled = localBusy; remove.onclick = () => { if (!confirm(row.status === 'queued' ? '删除尚未发送的本机临时记录？' : '仅删除此设备的临时副本，不撤销云端提交，不删除正式收藏。继续？')) return; try { localStorage.removeItem(localPrefix() + row.id); renderLocal(); } catch (error) { status(error.message); } }; actions.append(remove);
+    card.append(heading, link, detail, disclosure, actions); $('local-results').append(card);
   }
   if (!rows.length) { const empty = document.createElement('p'); empty.textContent = '这里还没有临时记录。'; $('local-results').append(empty); }
   $('refresh-local').disabled = localBusy; $('clear-published').disabled = localBusy || !all.some((row) => row.status === 'published');
