@@ -10,7 +10,7 @@ const harness = await createMirrorHarness(ROOT, directory);
 const attempt = await launchBestEffort(BROWSERS.find((row) => row.name === 'Edge') ?? BROWSERS[0], prepareProfile(directory, 'cloud-inbox'));
 const browser = attempt.browser, master = await browser.newPage();
 master.on('pageerror', (error) => report.errors.push(String(error)));
-let loseReceipt = true, loseSubmit = true, failMobileNetwork = false; const mobileRequests = [];
+let loseReceipt = true, loseSubmit = true, failMobileNetwork = false, holdSubmit = null; const mobileRequests = [];
 await master.exposeFunction('inboxRequest', async (url, init) => { report.requests.push({ url, method: init.method }); const result = await harness.request(url, init); if (loseReceipt && url.endsWith('/receipt') && result.status === 200) { loseReceipt = false; throw new Error('synthetic lost receipt'); } return result; });
 await master.evaluateOnNewDocument(() => {
   chrome.permissions.request = async () => true; chrome.permissions.contains = async () => true; window.confirm = () => true;
@@ -26,6 +26,7 @@ async function mobilePage(context = browser) {
     mobileRequests.push(new URL(request.url()).pathname);
     if (!request.url().startsWith('https://mirror.test/')) { await request.abort(); return; }
     if (failMobileNetwork && new URL(request.url()).pathname === '/v1/info') { await request.abort(); return; }
+    if (holdSubmit && request.method()==='POST' && new URL(request.url()).pathname==='/v1/inbox') { const hold=holdSubmit;holdSubmit=null;await hold(); }
     const result = await harness.request(request.url(), { method: request.method(), headers: request.headers(), ...(request.postData() ? { body: request.postData() } : {}) });
     if (loseSubmit && request.method() === 'POST' && new URL(request.url()).pathname === '/v1/inbox' && result.status === 200) { loseSubmit = false; await request.abort(); return; }
     await request.respond({ status: result.status, headers: result.headers, body: result.body });
@@ -111,8 +112,12 @@ try {
   check('可直接提交待看，记录留在本机临时列表', harness.db.prepare('SELECT COUNT(*) AS n FROM capture_inbox').get().n === 2 && await mobile.$$eval('.temporary', (nodes) => nodes.length) === 2);
   const context = await browser.createBrowserContext(), other = await mobilePage(context); await other.click('#show-local');
   check('另一设备的临时列表隔离，不显示本设备的添加记录', await other.$$eval('.temporary', (nodes) => nodes.length) === 0); await context.close();
-  await click(master, '检查云端收件箱'); await waitText(master, '本页 2 条待接收'); await click(master, '接收选中（2）'); await waitText(master, 'synthetic lost receipt');
-  let data = await snapshot(); check('总机先事务落库再确认，丢回执不丢记录，分类标签备注均保留', data.books.length === 27 && data.reading.length === 1 && data.books.some((row) => row.title === '手机新增收藏' && row.categoryId === 'web' && row.tagIds.includes('reference') && row.note === '随提交传送的笔记' && row.sourceDescription === '来源介绍' && row.pinned));
+  await click(master, '检查云端收件箱'); await waitText(master, '本页 2 条待接收');
+  await master.evaluate(()=>{const card=[...document.querySelectorAll('.cloud-inbox > .notice')].find(node=>node.textContent.includes('手机新增收藏'));card.querySelector('.inbox-editor').open=true;});
+  await master.select('.inbox-editor[open] select[aria-label="接收分类"]','tech');
+  await master.evaluate(()=>{const input=document.querySelector('.inbox-editor[open] input[maxlength="300"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'电脑确认收藏');input.dispatchEvent(new Event('input',{bubbles:true}));const note=document.querySelector('.inbox-editor[open] textarea[maxlength="10000"]');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(note,'接收时备注');note.dispatchEvent(new Event('input',{bubbles:true}));});
+  await click(master, '接收选中（2）'); await waitText(master, 'synthetic lost receipt');
+  let data = await snapshot(); check('总机先事务落库再确认，丢回执不丢记录，分类标签备注均保留', data.books.length === 27 && data.reading.length === 1 && data.books.some((row) => row.title === '电脑确认收藏' && row.categoryId === 'tech' && row.tagIds.includes('reference') && row.note === '接收时备注' && row.sourceDescription === '来源介绍' && row.pinned));
   await click(master, '接收选中（1）'); await waitText(master, '已接收 1 条');
   data = await snapshot(); check('重试接收不重复创建，确认后云端清除提交正文', data.books.length === 27 && data.reading.length === 1 && harness.db.prepare('SELECT COUNT(*) AS n FROM capture_inbox WHERE payload IS NOT NULL').get().n === 0);
   await mobile.bringToFront(); await mobile.click('#refresh-local'); await waitText(mobile, '等待发布');
@@ -126,10 +131,21 @@ try {
   await mobile.evaluate(() => { const prefix = Object.keys(localStorage).find((key) => key.startsWith('shiye:outbox:')); window.savedPrefix = prefix; });
   // Use current cloud identity to create enough synthetic local-only drafts for pagination.
   const info = JSON.parse((await harness.request('https://mirror.test/v1/info', { headers: { Authorization: `Bearer ${harness.publisher}` } })).body);
-  await mobile.evaluate((identity) => { const prefix = `shiye:outbox:${JSON.stringify([identity.serverId, identity.libraryId, identity.epoch])}:`; for (let index = 0; index < 101; index++) { const id = crypto.randomUUID(); localStorage.setItem(prefix + id, JSON.stringify({ id, createdAt: new Date().toISOString(), status: 'queued', receipt: null, payload: { destination: 'bookmark', url: `https://example.com/draft${index}`, title: `临时${index}`, categoryPath: '', tagNames: [], sourceDescription: '', note: '' } })); } }, info);
+  await mobile.evaluate((identity) => { const prefix = `shiye:outbox:${JSON.stringify([identity.serverId, identity.libraryId, identity.epoch])}:`; for (let index = 0; index < 101; index++) { const id = crypto.randomUUID(); localStorage.setItem(prefix + id, JSON.stringify({ id, createdAt: new Date().toISOString(), status: 'queued', receipt: null, payload: { destination: 'bookmark', url: `https://example.com/draft${index}`, title: `临时${index}`, categoryId:null,categoryPath: '', tagIds:[],tagNames: [], sourceDescription: '', note: '',pinned:false,unread:true,aiBlocked:false } })); } }, info);
   await mobile.select('#local-filter', 'active'); await waitText(mobile, '101 条');
   check('临时列表按 50 条分页，大量添加不会一次渲染全部', await mobile.$$eval('.temporary', (nodes) => nodes.length) === 50);
   await mobile.click('#local-next'); check('临时列表可翻页且适配手机宽度', await mobile.$eval('#local-page', (node) => node.textContent.startsWith('2 / 3')) && await mobile.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await mobile.click('#local-batch > summary');await mobile.click('#local-select-page');await mobile.click('#local-next');await mobile.click('#local-select-page');
+  check('批量勾选可跨页保留',await mobile.$eval('#local-send-selected',node=>node.textContent==='发送选中（51）'));
+  loseSubmit=true; await mobile.click('#local-send-selected');await waitText(mobile,'发送未确认');
+  check('批量丢响应停止后续发送并保留选中和待发送副本',await mobile.$eval('#local-send-selected',node=>!node.disabled && node.textContent==='发送选中（51）'));
+  await mobile.click('#local-send-selected');await waitText(mobile,'已确认发送 51 / 51');
+  check('批量重试相同编号不重复，已发送记录仍在本机',harness.db.prepare("SELECT COUNT(*) AS n FROM capture_inbox WHERE payload IS NOT NULL").get().n===51 && await mobile.evaluate(()=>localEntries().length===101 && localEntries().filter(row=>row.status==='queued').length===50));
+  let resumeSubmit, markStarted;const started=new Promise(resolve=>markStarted=resolve);holdSubmit=()=>{markStarted();return new Promise(resolve=>resumeSubmit=resolve);};
+  await mobile.click('#local-send-all');await started;await mobile.click('#local-stop');resumeSubmit();await waitText(mobile,'已确认发送 1 / 50');
+  check('停止批量发送只完成当前一条，剩余记录可继续发送',await mobile.evaluate(()=>localEntries().filter(row=>row.status==='queued').length===49));
+  await mobile.click('#local-send-all');await waitText(mobile,'已确认发送 49 / 49');
+  check('全部待发送跨分页发送且不重复发送已确认记录',harness.db.prepare("SELECT COUNT(*) AS n FROM capture_inbox WHERE payload IS NOT NULL").get().n===101 && await mobile.$eval('#local-send-all',node=>node.disabled) && await mobile.evaluate(()=>localEntries().length===101));
   await master.setViewport({ width: 1400, height: 1000 }); await master.screenshot({ path: path.join(directory, 'desktop.png'), fullPage: true });
   await mobile.bringToFront(); await mobile.click('#logout'); await waitText(mobile, '已退出'); check('退出清除当前私有内容，临时记录仅在此浏览器保留', await mobile.$$eval('.temporary', (nodes) => nodes.length) === 0 && await mobile.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith('shiye:outbox:')).length) === 101);
   const clearedCache=await mobile.evaluate(async()=>{const req=indexedDB.open('shiye-mobile-cache',1);const db=await new Promise(r=>req.onsuccess=()=>r(req.result));const q=db.transaction('snapshots').objectStore('snapshots').get('current');const item=await new Promise(r=>q.onsuccess=()=>r(q.result));db.close();return !item;});

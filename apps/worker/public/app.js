@@ -2,6 +2,7 @@
 const $ = (id) => document.getElementById(id);
 let records = [], paths = new Map(), page = 1, operation = 0, cloudInfo = null, canSubmit = false, localPage = 1, localBusy = false;
 let categoryNodes = new Map(), categoryCounts = new Map(), pickerTarget = 'category', pickerParent = '', pickerPage = 1;
+let localSelected = new Set(), stopSending = false, sendingLocal = false;
 let retryForce = false;
 let directoryParent = '', directoryPage = 1, browseScroll = 0;
 let foldersCollapsed = false;
@@ -16,7 +17,7 @@ async function api(path, options = {}) {
     return await response.json();
   } finally { clearTimeout(timer); }
 }
-function reset() { directoryParent=''; directoryPage=1; browseScroll=0; $('directory-use').textContent='查看本级收藏'; $('directory-count').textContent=''; $('directory-panel').hidden=true; $('directory-rows').replaceChildren(); $('directory-path').replaceChildren(); $('directory-search').value=''; $('folder-rows').replaceChildren(); $('browse-path').replaceChildren(); $('cache-status').textContent=''; $('retry-load').hidden = true; cloudInfo = null; canSubmit = false; $('local-results').replaceChildren(); $('capture-form').reset(); records = []; paths.clear(); categoryNodes.clear(); categoryCounts.clear(); if ($('category-dialog').open) $('category-dialog').close(); $('category-choices').replaceChildren(); $('category-breadcrumbs').replaceChildren(); $('category-current').textContent = ''; $('category-search').value = ''; $('category').replaceChildren(new Option('全部分类',''),new Option('未分类','__uncategorized__')); $('capture-category').replaceChildren(new Option('未分类','')); $('query').value=''; $('site-filter').value=''; $('scope').value='all'; $('include-descendants').checked=true; $('result-sort').value='original'; syncCategoryButtons(); $('results').replaceChildren(); $('library').hidden = true; $('logout').hidden = true; $('login').hidden = false; }
+function reset() { localSelected.clear(); $('local-batch-status').textContent=''; directoryParent=''; directoryPage=1; browseScroll=0; $('directory-use').textContent='查看本级收藏'; $('directory-count').textContent=''; $('directory-panel').hidden=true; $('directory-rows').replaceChildren(); $('directory-path').replaceChildren(); $('directory-search').value=''; $('folder-rows').replaceChildren(); $('browse-path').replaceChildren(); $('cache-status').textContent=''; $('retry-load').hidden = true; cloudInfo = null; canSubmit = false; $('local-results').replaceChildren(); $('capture-form').reset(); records = []; paths.clear(); categoryNodes.clear(); categoryCounts.clear(); if ($('category-dialog').open) $('category-dialog').close(); $('category-choices').replaceChildren(); $('category-breadcrumbs').replaceChildren(); $('category-current').textContent = ''; $('category-search').value = ''; $('category').replaceChildren(new Option('全部分类',''),new Option('未分类','__uncategorized__')); $('capture-category').replaceChildren(new Option('未分类','')); $('query').value=''; $('site-filter').value=''; $('scope').value='all'; $('include-descendants').checked=true; $('result-sort').value='original'; syncCategoryButtons(); $('results').replaceChildren(); $('library').hidden = true; $('logout').hidden = true; $('login').hidden = false; }
 function render() {
   const term = $('query').value.trim().toLowerCase(), scope = $('scope').value, category = $('category').value;
   const site = $('site-filter').value.trim().toLowerCase();
@@ -292,6 +293,18 @@ function renderLocal() {
   const pages = Math.max(1, Math.ceil(rows.length / 50)); localPage = Math.max(1, Math.min(localPage, pages));
   $('local-page').textContent = `${localPage} / ${pages} · ${rows.length} 条`; $('local-prev').disabled = localBusy || localPage === 1; $('local-next').disabled = localBusy || localPage === pages;
   $('local-summary').textContent = `${all.filter(row=>row.status==='queued').length} 条待发送 · ${all.filter(row=>['pending','received'].includes(row.status)).length} 条处理中 · ${all.filter(row=>row.status==='published').length} 条已发布${canSubmit ? '' : ' · 当前只读登录'}`;
+  localSelected = new Set([...localSelected].filter(id=>all.some(row=>row.id===id && row.status==='queued')));
+  const pageQueued=rows.slice((localPage-1)*50,localPage*50).filter(row=>row.status==='queued');
+  $('local-select-page').checked=pageQueued.length>0 && pageQueued.every(row=>localSelected.has(row.id));
+  $('local-select-page').indeterminate=pageQueued.some(row=>localSelected.has(row.id)) && !$('local-select-page').checked;
+  $('local-select-page').disabled=localBusy || !pageQueued.length;
+  $('local-send-selected').textContent=`发送选中（${localSelected.size}）`;
+  $('local-send-selected').disabled=localBusy || !canSubmit || !localSelected.size;
+  const queuedCount=all.filter(row=>row.status==='queued').length;
+  $('local-send-all').textContent=`发送全部待发送（${queuedCount}）`;
+  $('local-send-all').disabled=localBusy || !canSubmit || !queuedCount;
+  $('local-stop').hidden=!sendingLocal;
+  $('local-filter').disabled=localBusy;
   $('local-results').replaceChildren();
   for (const row of rows.slice((localPage - 1) * 50, localPage * 50)) {
     const card = document.createElement('article'); card.className = 'temporary';
@@ -301,6 +314,7 @@ function renderLocal() {
     const badge = document.createElement('span'); badge.className = `temporary-status status-${row.status}`;
     badge.textContent = { queued:'待发送', pending:'等待接收', received:'等待发布', rejected:'已退回', cancelled:'已撤回', published:'已发布' }[row.status] || row.status;
     badge.title = stateLabels[row.status] || row.status; badge.setAttribute('aria-label',badge.title); heading.append(title,badge);
+    if(row.status==='queued') { const select=document.createElement('label');select.className='temporary-select';const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=localSelected.has(row.id);checkbox.disabled=localBusy;checkbox.setAttribute('aria-label',`选择发送 ${row.payload.title || url.hostname}`);checkbox.onchange=()=>{if(checkbox.checked)localSelected.add(row.id);else localSelected.delete(row.id);renderLocal();};select.append(checkbox);heading.prepend(select); }
     const detail = document.createElement('p'); detail.className = 'temporary-category'; detail.textContent = row.payload.destination === 'reading' ? '待看' : `收藏 · ${row.payload.categoryPath || '未分类'}`;
     const link = document.createElement('a'); link.className = 'temporary-link'; link.textContent = url.hostname + (url.pathname === '/' ? '' : url.pathname); link.title = row.payload.url;
     if (['http:', 'https:'].includes(url.protocol) && !url.username && !url.password) link.href = url.href; link.target = '_blank'; link.rel = 'noreferrer noopener';
@@ -314,16 +328,35 @@ function renderLocal() {
   if (!rows.length) { const empty = document.createElement('p'); empty.textContent = '这里还没有临时记录。'; $('local-results').append(empty); }
   $('refresh-local').disabled = localBusy; $('clear-published').disabled = localBusy || !all.some((row) => row.status === 'published');
 }
-async function sendLocal(id) {
-  if (localBusy || !canSubmit) return; localBusy = true; renderLocal(); const version = operation, identity = { serverId: cloudInfo.serverId, libraryId: cloudInfo.libraryId, epoch: cloudInfo.epoch };
+async function sendLocal(id) { return sendLocalBatch([id], false); }
+async function sendLocalBatch(ids, batch = true) {
+  if (localBusy || !canSubmit || !cloudInfo) return;
+  const chosen=localEntries().filter(row=>ids.includes(row.id) && row.status==='queued');
+  if(!chosen.length || (batch && !confirm(`发送这 ${chosen.length} 条待发送记录给总机？电脑接收前仍可调整分类等信息。`))) return;
+  localBusy=true; sendingLocal=true; stopSending=false; renderLocal();
+  const version=operation, identity={serverId:cloudInfo.serverId,libraryId:cloudInfo.libraryId,epoch:cloudInfo.epoch};
+  let done=0, failed=false;
   try {
-    const row = localEntries().find((item) => item.id === id); if (!row || row.status !== 'queued') return;
-    const result = await api('/v1/inbox', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...device(), identity, id: row.id, payload: row.payload }) });
-    if (version !== operation) return;
-    putLocal({ ...row, status: result.status, receipt: result.receipt }); reconcileLocal(); status('发送已确认。总机接收后会更新状态，本机副本继续保留。');
-  } catch (error) { if (version === operation) status(`发送未确认，可重试同一条记录，不会重复提交。${error.message}`); }
-  finally { localBusy = false; if (version === operation) renderLocal(); }
+    for(const row of chosen) {
+      if(version!==operation || stopSending) break;
+      $('local-batch-status').textContent=`正在发送 ${done+1} / ${chosen.length}…`;
+      const result=await api('/v1/inbox',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...device(),identity,id:row.id,payload:row.payload})});
+      if(version!==operation) return;
+      putLocal({...row,status:result.status,receipt:result.receipt});localSelected.delete(row.id);done++;reconcileLocal();
+    }
+    if(version===operation) {
+      const text=batch ? `已确认发送 ${done} / ${chosen.length} 条。${stopSending ? '已停止后续发送，未发送的记录仍保留。' : '本机副本保留，等待电脑接收。'}` : '发送已确认。总机接收后会更新状态，本机副本继续保留。';
+      status(text);$('local-batch-status').textContent=text;
+    }
+  } catch(error) {
+    failed=true;
+    if(version===operation) {const text=`发送未确认，可重试同一条记录，不会重复提交。已确认 ${done} / ${chosen.length} 条，其余保留待发送。${error.message}`;status(text);$('local-batch-status').textContent=text;}
+  } finally { localBusy=false; sendingLocal=false; if(version===operation) {renderLocal();if(batch && !failed)$('local-batch').open=true;} }
 }
+$('local-select-page').addEventListener('change',()=>{const select=$('local-select-page').checked;const filter=$('local-filter').value;const rows=localEntries().filter(row=>filter==='all'||(filter==='published'?row.status==='published':row.status!=='published')).slice((localPage-1)*50,localPage*50);for(const row of rows)if(row.status==='queued'){if(select)localSelected.add(row.id);else localSelected.delete(row.id);}renderLocal();});
+$('local-send-selected').addEventListener('click',()=>void sendLocalBatch([...localSelected]));
+$('local-send-all').addEventListener('click',()=>void sendLocalBatch(localEntries().filter(row=>row.status==='queued').map(row=>row.id)));
+$('local-stop').addEventListener('click',()=>{stopSending=true;$('local-batch-status').textContent='正在完成当前一条，随后停止。';});
 async function refreshLocal() {
   if (localBusy || !cloudInfo) return; localBusy = true; renderLocal(); const version = operation;
   try {

@@ -280,8 +280,8 @@ export class WorkspaceService {
     return this.repos.bookmarks.create(params);
   }
 
-  async receiveCloudInbox(entry: unknown, expectedLibraryId: string) {
-    return this.repos.cloudInbox.receive(entry, expectedLibraryId);
+  async receiveCloudInbox(entry: unknown, expectedLibraryId: string, edits?: import('../../sync/src/inbox.js').InboxReceiveEdits) {
+    return this.repos.cloudInbox.receive(entry, expectedLibraryId, edits);
   }
 
   async readTwoWay(address: string) { return this.repos.twoWay.read(mirrorBase(address).href); }

@@ -43,3 +43,21 @@ it('相同提交编号不能换内容重放', async () => {
   await expect(service.receiveCloudInbox({ ...input, payload: { ...input.payload, title: '被替换' } }, libraryId)).rejects.toThrow('内容变化');
   expect((await service.snapshot()).bookmarks).toHaveLength(1);
 });
+it('接收前的本机调整可覆盖分类标签标题备注，回执丢失重试仍返回首次结果', async () => {
+  const category=await service.createCategory('电脑整理'),tag=await service.createTag('电脑标签');
+  const input=entry({categoryId:'remote-category',categoryPath:'手机路径',tagIds:['remote-tag'],tagNames:['手机标签']});
+  const first=await service.receiveCloudInbox(input,libraryId,{categoryId:category.id,tagIds:[tag.id],title:'电脑标题',note:'重新整理',pinned:false,unread:true});
+  expect((await service.snapshot()).bookmarks[0]).toMatchObject({categoryId:category.id,tagIds:[tag.id],title:'电脑标题',note:'重新整理',pinned:false,inboxUnread:true});
+  expect(await service.receiveCloudInbox(input,libraryId,{destination:'reading',title:'不应再变更'})).toEqual(first);
+  expect((await service.snapshot()).pendingReading).toHaveLength(0);
+});
+it('接收时可改为待看，或明确清空分类和标签；失效的手动选择不静默回退', async () => {
+  const input=entry(); await service.receiveCloudInbox(input,libraryId,{destination:'reading',note:'电脑决定稍后看'});
+  expect((await service.snapshot()).pendingReading[0]).toMatchObject({note:'电脑决定稍后看'});
+  const category=await service.createCategory('原分类');const tag=await service.createTag('原标签');
+  await service.receiveCloudInbox(entry({url:'https://example.com/clear',categoryId:category.id,tagIds:[tag.id]}),libraryId,{categoryId:null,tagIds:[]});
+  expect((await service.snapshot()).bookmarks[0]).toMatchObject({categoryId:null,tagIds:[]});
+  await expect(service.receiveCloudInbox(entry({url:'https://example.com/missing'}),libraryId,{categoryId:'deleted'})).rejects.toThrow('所选分类');
+  await expect(service.receiveCloudInbox(entry({url:'https://example.com/missing-tag'}),libraryId,{tagIds:['deleted']})).rejects.toThrow('所选标签');
+  expect((await service.snapshot()).bookmarks).toHaveLength(1);
+});

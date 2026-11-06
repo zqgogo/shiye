@@ -151,3 +151,11 @@ html { -webkit-text-size-adjust:100%; text-size-adjust:100%; }
   #category-breadcrumbs { flex-wrap:nowrap; overflow:auto; }
   #category-breadcrumbs button { flex:none; max-width:65%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 }
+#local-batch { margin:12px 0; padding:12px; background:#edf1e8; border-radius:12px; font-size:13px; }
+#local-batch > summary { cursor:pointer; min-height:30px; }
+#local-batch p { font-size:12px; margin:8px 0; }
+.batch-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.batch-actions button { min-height:44px; font-size:13px; }
+#local-send-selected { background:#345d41; color:#fff; }
+.temporary-select { display:flex; margin:0; flex:none; min-height:28px; align-items:center; }
+.temporary-select input { width:20px; height:20px; margin:0; }

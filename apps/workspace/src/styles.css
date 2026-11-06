@@ -550,3 +550,7 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .organization-undo > span { align-self:center; color:var(--accent); font-size:12px; }
 .organization-undo > .btn,.organization-undo > small { grid-column:1 / -1; }
 .organization-undo > small { font-size:10px; color:var(--muted); line-height:1.6; }
+
+.inbox-editor { margin-top:12px; }
+.inbox-editor summary { cursor:pointer; padding:8px 0; }
+.inbox-editor fieldset { border:1px solid var(--line, #dfe3d8); border-radius:12px; padding:16px; min-width:0; }

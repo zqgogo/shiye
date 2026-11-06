@@ -499,7 +499,7 @@ export interface Repositories {
     apply(plan: import('../../sync/src/two-way-local.js').SharedPlan, remote: import('../../sync/src/two-way.js').SharedRow[], revision: number): Promise<void>;
     disconnect(address: string): Promise<void>;
   };
-  cloudInbox: { receive(entry: unknown, expectedLibraryId: string): Promise<import('../../sync/src/inbox.js').InboxReceipt> };
+  cloudInbox: { receive(entry: unknown, expectedLibraryId: string, edits?: import('../../sync/src/inbox.js').InboxReceiveEdits): Promise<import('../../sync/src/inbox.js').InboxReceipt> };
   publications: MirrorPublicationRepository;
   organizePlans: OrganizePlanRepository;
   aiTasks: AiTaskRepository;

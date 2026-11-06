@@ -8,6 +8,10 @@ export const InboxPayloadSchema = z.object({
   pinned: z.boolean(), unread: z.boolean(), aiBlocked: z.boolean(),
 }).strict();
 export type InboxPayload = z.infer<typeof InboxPayloadSchema>;
+// Local receipt decisions never alter the original inbox identity used for retries.
+export const InboxReceiveEditsSchema = InboxPayloadSchema.omit({ url: true, categoryPath: true, tagNames: true }).partial().strict();
+export type InboxReceiveEdits = z.infer<typeof InboxReceiveEditsSchema>;
+
 export const InboxDeviceSchema = z.object({ deviceId: z.string().uuid(), deviceKey: z.string().regex(/^[A-Za-z0-9_-]{32,128}$/) }).strict();
 export const InboxSubmitSchema = InboxDeviceSchema.extend({ identity: MirrorIdentitySchema, id: z.string().uuid(), payload: InboxPayloadSchema }).strict();
 export const InboxReceiptSchema = z.object({ status: z.enum(['received', 'rejected']), recordKind: z.enum(['bookmark', 'reading']).nullable(), recordId: id.nullable(), message: z.string().max(500) }).strict();
