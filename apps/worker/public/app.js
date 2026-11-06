@@ -293,7 +293,8 @@ function renderLocal() {
   const pages = Math.max(1, Math.ceil(rows.length / 50)); localPage = Math.max(1, Math.min(localPage, pages));
   $('local-page').textContent = `${localPage} / ${pages} · ${rows.length} 条`; $('local-prev').disabled = localBusy || localPage === 1; $('local-next').disabled = localBusy || localPage === pages;
   $('local-summary').textContent = `${all.filter(row=>row.status==='queued').length} 条待发送 · ${all.filter(row=>['pending','received'].includes(row.status)).length} 条处理中 · ${all.filter(row=>row.status==='published').length} 条已发布${canSubmit ? '' : ' · 当前只读登录'}`;
-  localSelected = new Set([...localSelected].filter(id=>all.some(row=>row.id===id && row.status==='queued')));
+  const queuedIds=new Set(all.filter(row=>row.status==='queued').map(row=>row.id));
+  localSelected = new Set([...localSelected].filter(id=>queuedIds.has(id)));
   const pageQueued=rows.slice((localPage-1)*50,localPage*50).filter(row=>row.status==='queued');
   $('local-select-page').checked=pageQueued.length>0 && pageQueued.every(row=>localSelected.has(row.id));
   $('local-select-page').indeterminate=pageQueued.some(row=>localSelected.has(row.id)) && !$('local-select-page').checked;
@@ -342,7 +343,8 @@ async function sendLocalBatch(ids, batch = true) {
       $('local-batch-status').textContent=`正在发送 ${done+1} / ${chosen.length}…`;
       const result=await api('/v1/inbox',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...device(),identity,id:row.id,payload:row.payload})});
       if(version!==operation) return;
-      putLocal({...row,status:result.status,receipt:result.receipt});localSelected.delete(row.id);done++;reconcileLocal();
+      const published=result.receipt?.status==='received' && records.some(record=>record.kind===result.receipt.recordKind && record.id===result.receipt.recordId);
+      putLocal({...row,status:published ? 'published' : result.status,receipt:result.receipt});localSelected.delete(row.id);done++;
     }
     if(version===operation) {
       const text=batch ? `已确认发送 ${done} / ${chosen.length} 条。${stopSending ? '已停止后续发送，未发送的记录仍保留。' : '本机副本保留，等待电脑接收。'}` : '发送已确认。总机接收后会更新状态，本机副本继续保留。';
